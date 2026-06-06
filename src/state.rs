@@ -33,6 +33,10 @@ pub struct GnssState {
     pub almanac: Vec<Almanac>,
     pub utc_adj: bool,
     pub ion_adj: bool,
+    /// Klobuchar ionosphere model coefficients (decoded from subframe 4, page 18).
+    /// Valid once `ion_adj` is true.
+    pub iono_alpha: [f64; 4],
+    pub iono_beta: [f64; 4],
     pub latitude: f64,
     pub longitude: f64,
     pub height: f64,
@@ -48,6 +52,8 @@ impl GnssState {
             almanac: vec![Almanac::default(); 32],
             utc_adj: false,
             ion_adj: false,
+            iono_alpha: [0.0; 4],
+            iono_beta: [0.0; 4],
             latitude: 0.0,
             longitude: 0.0,
             height: 0.0,

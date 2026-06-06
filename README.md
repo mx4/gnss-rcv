@@ -6,9 +6,7 @@ This app takes as input:
 - an SDR IQ recording
 - or an rtl-sdr device
 
-It performs signal acquisition, tracking and ephemeris decoding. Finally it attempts to get a position fix.
-
-Note that this is still a WIP.
+It performs signal acquisition, tracking and ephemeris decoding. Finally it gets a position fix.
 
 ## Diagnostic output
 As the gnss receiver processes the IQ data it periodically updates a web page (index.html + pics) that helps explain the inner state of the decoder. Cf plots/index.html.
@@ -111,7 +109,6 @@ Any code contribution is welcome!
 ## TODO
 - use anise for Ephemerides and Almanac
 - use anise to compute SV position from keplerian elements
-- finish position fix computation
 - test + fix rtlsdr support
 - support: SBAS, Galileo, QZSS, Beidu.
 - handle different sampling frequencies

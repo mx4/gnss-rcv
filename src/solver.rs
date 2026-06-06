@@ -111,6 +111,62 @@ fn compute_sv_position_ecef(eph: &Ephemeris, t: Epoch) -> (f64, f64, f64) {
     (ecef_x, ecef_y, ecef_z)
 }
 
+/// Elevation and azimuth (radians) of a satellite at `sat_ecef` as seen from the
+/// receiver at `rx_ecef`, via the local East-North-Up frame.
+fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, f64) {
+    let (lat, lon, _) = ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
+    let (dx, dy, dz) = (
+        sat_ecef.0 - rx_ecef[0],
+        sat_ecef.1 - rx_ecef[1],
+        sat_ecef.2 - rx_ecef[2],
+    );
+    let (sl, cl) = (lat.sin(), lat.cos());
+    let (so, co) = (lon.sin(), lon.cos());
+    let east = -so * dx + co * dy;
+    let north = -sl * co * dx - sl * so * dy + cl * dz;
+    let up = cl * co * dx + cl * so * dy + sl * dz;
+    let range = (east * east + north * north + up * up).sqrt();
+    let elev = (up / range).asin();
+    let azim = east.atan2(north);
+    (elev, azim)
+}
+
+/// Klobuchar ionospheric group delay on L1 in meters (ICD-GPS-200 / RTKLIB).
+/// `lat`/`lon`/`elev`/`azim` are in radians; `gps_sod` is the GPS time of day [s].
+#[allow(clippy::too_many_arguments)]
+fn klobuchar_l1_delay_m(
+    alpha: &[f64; 4],
+    beta: &[f64; 4],
+    lat: f64,
+    lon: f64,
+    elev: f64,
+    azim: f64,
+    gps_sod: f64,
+) -> f64 {
+    // earth-centered angle (semicircles)
+    let psi = 0.0137 / (elev / PI + 0.11) - 0.022;
+    // subionospheric latitude (semicircles), clamped
+    let phi = (lat / PI + psi * azim.cos()).clamp(-0.416, 0.416);
+    // subionospheric longitude (semicircles)
+    let lam = lon / PI + psi * azim.sin() / (phi * PI).cos();
+    // geomagnetic latitude (semicircles)
+    let phi = phi + 0.064 * ((lam - 1.617) * PI).cos();
+    // local time (s of day)
+    let mut tt = 43200.0 * lam + gps_sod;
+    tt -= (tt / 86400.0).floor() * 86400.0;
+    // obliquity (slant) factor
+    let f = 1.0 + 16.0 * (0.53 - elev / PI).powi(3);
+    let amp = (alpha[0] + phi * (alpha[1] + phi * (alpha[2] + phi * alpha[3]))).max(0.0);
+    let per = (beta[0] + phi * (beta[1] + phi * (beta[2] + phi * beta[3]))).max(72000.0);
+    let x = 2.0 * PI * (tt - 50400.0) / per;
+    let delay = if x.abs() < 1.57 {
+        5.0e-9 + amp * (1.0 + x * x * (-0.5 + x * x / 24.0))
+    } else {
+        5.0e-9
+    };
+    SPEED_OF_LIGHT * f * delay
+}
+
 fn get_tropo_iono_bias() -> (TroposphereBias, IonosphereBias) {
     let iono_bias = IonosphereBias {
         kb_model: None,
@@ -128,9 +184,27 @@ fn get_tropo_iono_bias() -> (TroposphereBias, IonosphereBias) {
 pub type I = fn(Epoch, SV, usize) -> Option<InterpolationResult>;
 pub struct PositionSolver {
     solver: Solver<I>,
+    cfg: Config,
+    /// Linearization point of the current solver instance (gnss-rtk returns the
+    /// solution as a delta relative to this). Only changes on a re-center.
     apriori_ecef: Vector3<f64>,
+    /// Latest absolute fix (apriori_ecef + delta), used as the iono pierce-point
+    /// reference and as the re-center target.
+    last_fix_ecef: Option<Vector3<f64>>,
+    recenter_count: usize,
+    /// Latched once the fix is within RECENTER_DIST_M of the linearization point;
+    /// after that we stop re-centering and let LSQ accumulation damp the noise.
+    converged: bool,
     pub_state: Arc<Mutex<GnssState>>,
 }
+
+/// While the fix is farther than this from the solver's linearization point we
+/// re-center the apriori on it, because gnss-rtk linearizes only once and never
+/// re-linearizes. Below the threshold we stop and let cross-epoch LSQ
+/// accumulation damp the noise.
+const RECENTER_DIST_M: f64 = 30_000.0;
+/// Cap on re-centers so a single noisy fix can't make the apriori wander.
+const MAX_RECENTERS: usize = 10;
 
 static SOLVER_EPHEMERIS: Lazy<Mutex<Vec<Ephemeris>>> =
     Lazy::new(|| Mutex::new(Vec::<Ephemeris>::new()));
@@ -165,9 +239,22 @@ impl PositionSolver {
 
         Self {
             solver,
+            cfg,
             apriori_ecef,
+            last_fix_ecef: None,
+            recenter_count: 0,
+            converged: false,
             pub_state,
         }
+    }
+
+    /// Rebuild the underlying solver so it linearizes around `apriori_ecef`.
+    /// gnss-rtk performs a single linearization at the apriori and never
+    /// re-linearizes, so feeding the previous fix back as the apriori is what
+    /// removes the large linearization error when starting far from truth.
+    fn relinearize(&mut self) {
+        let apriori = AprioriPosition::from_ecef(self.apriori_ecef);
+        self.solver = Solver::new(&self.cfg, apriori, sv_interp as I).expect("Solver issue");
     }
 
     pub fn compute_position(&mut self, _ts_sec: f64, ephs: &Vec<Ephemeris>) {
@@ -215,11 +302,43 @@ impl PositionSolver {
         let latest_tx = *tx_gpst.iter().max().unwrap();
         let now_gpst = latest_tx + Duration::from_seconds(NOMINAL_TRAVEL_SEC);
 
+        // Decoded Klobuchar coefficients (if subframe 4 page 18 has been seen).
+        // We apply the model ourselves rather than via gnss-rtk's IonosphereBias
+        // because that path expects the apriori geodetic in degrees while the
+        // ECEF path uses radians, so it would mis-place the pierce point.
+        let (iono_valid, iono_alpha, iono_beta) = {
+            let st = self.pub_state.lock().unwrap();
+            (st.ion_adj, st.iono_alpha, st.iono_beta)
+        };
+        // GPS time of day used by the Klobuchar local-time term.
+        let gps_sod = {
+            let r = &ephs[0];
+            (r.tow as f64 + (now_gpst - r.tow_gpst).to_seconds()).rem_euclid(86400.0)
+        };
+
         log::warn!("----- now_gpst={now_gpst:?}");
         for (eph, t_tx) in ephs.iter().zip(tx_gpst.iter()) {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
 
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
+
+            // Klobuchar ionosphere group delay [m], subtracted from the observed
+            // pseudorange (iono delays the code, lengthening the measurement).
+            // Use the best position estimate available for the pierce point.
+            let rx_ecef = self.last_fix_ecef.unwrap_or(self.apriori_ecef);
+            let iono_m = if iono_valid {
+                let sat = compute_sv_position_ecef(eph, now_gpst);
+                let (elev, azim) = elevation_azimuth(rx_ecef, sat);
+                let (lat, lon, _) =
+                    ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
+                if elev > 0.0 {
+                    klobuchar_l1_delay_m(&iono_alpha, &iono_beta, lat, lon, elev, azim, gps_sod)
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
 
             log::warn!(
                 "{} - t_tx={t_tx:?} code_off_sec={:.7}",
@@ -227,7 +346,7 @@ impl PositionSolver {
                 eph.code_off_sec
             );
             log::warn!(
-                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e}",
+                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m",
                 eph.sv,
                 pseudo_range_sec * 1000.0,
                 eph.tgd,
@@ -240,7 +359,7 @@ impl PositionSolver {
                 Some(Duration::from_seconds(eph.tgd)),
                 vec![Observation {
                     carrier: Carrier::L1,
-                    value: pseudo_range_sec * SPEED_OF_LIGHT,
+                    value: pseudo_range_sec * SPEED_OF_LIGHT - iono_m,
                     snr: Some(eph.cn0),
                 }],
                 vec![],
@@ -251,9 +370,10 @@ impl PositionSolver {
         }
 
         let (tropo_bias, iono_bias) = get_tropo_iono_bias();
-        let res = self
-            .solver
-            .resolve(now_gpst, &pool, &iono_bias, &tropo_bias);
+
+        // Persistent solver: keep the cross-epoch LSQ accumulation, which damps
+        // measurement noise and is essential for a stable fix.
+        let res = self.solver.resolve(now_gpst, &pool, &iono_bias, &tropo_bias);
 
         match res {
             Err(err) => log::warn!("Failed to get a position: {err}"),
@@ -262,6 +382,30 @@ impl PositionSolver {
                 // apriori (it solves y = pr - rho around the apriori and never
                 // adds it back), so recover the absolute ECEF here.
                 let pos = self.apriori_ecef + solution.1.position;
+                self.last_fix_ecef = Some(pos);
+
+                // Adaptive apriori feedback: gnss-rtk linearizes only once at its
+                // apriori and never re-linearizes, so while the fix is far from that
+                // point we re-center on it (coarse Gauss-Newton) and prime the
+                // rebuilt solver so the next epoch still yields a fix. Once we get
+                // within the threshold we latch `converged` and stop re-centering,
+                // letting cross-epoch LSQ accumulation damp the noise.
+                let dist = (pos - self.apriori_ecef).norm();
+                if !self.converged {
+                    if dist > RECENTER_DIST_M && self.recenter_count < MAX_RECENTERS {
+                        self.apriori_ecef = pos;
+                        self.relinearize();
+                        let _ = self.solver.resolve(now_gpst, &pool, &iono_bias, &tropo_bias);
+                        self.recenter_count += 1;
+                        log::warn!(
+                            "re-centered apriori (#{}) at {:.0} km",
+                            self.recenter_count,
+                            dist / 1000.0
+                        );
+                    } else {
+                        self.converged = true;
+                    }
+                }
                 let (lat_rad, lon_rad, h) = ecef2geodetic(pos[0], pos[1], pos[2], Ellipsoid::WGS84);
                 let lat = lat_rad * 180.0 / PI;
                 let lon = lon_rad * 180.0 / PI;

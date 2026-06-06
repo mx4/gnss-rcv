@@ -195,6 +195,8 @@ impl Channel {
                 ion[6] = getbits(buf, 128, 8) as f64 * 2.0_f64.powi(16);
                 ion[7] = getbits(buf, 136, 8) as f64 * 2.0_f64.powi(16);
 
+                pub_state.iono_alpha = [ion[0], ion[1], ion[2], ion[3]];
+                pub_state.iono_beta = [ion[4], ion[5], ion[6], ion[7]];
                 pub_state.ion_adj = true;
 
                 let mut utc: [f64; 4] = [0.0; 4];
