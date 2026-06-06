@@ -288,6 +288,9 @@ impl Channel {
             self.nav.eph.toc_gpst = Epoch::from_gpst_seconds(toc_secs_gpst.into());
 
             self.nav.eph.ts_sec = self.ts_sec;
+            // Anchor the integer transmit-time to this subframe's tow_gpst. The
+            // current trk_phase (set this tracking step) is the tow boundary.
+            self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
 
             log::warn!(
                 "{}: tow={:?} tgd={:+.3e} toe={:?}",

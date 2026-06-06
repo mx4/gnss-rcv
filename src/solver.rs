@@ -128,6 +128,7 @@ fn get_tropo_iono_bias() -> (TroposphereBias, IonosphereBias) {
 pub type I = fn(Epoch, SV, usize) -> Option<InterpolationResult>;
 pub struct PositionSolver {
     solver: Solver<I>,
+    apriori_ecef: Vector3<f64>,
     pub_state: Arc<Mutex<GnssState>>,
 }
 
@@ -159,12 +160,17 @@ impl PositionSolver {
         // double-counting it.
         cfg.modeling.relativistic_clock_bias = false;
 
+        let apriori_ecef = apriori.ecef();
         let solver = Solver::new(&cfg, apriori, sv_interp as I).expect("Solver issue");
 
-        Self { solver, pub_state }
+        Self {
+            solver,
+            apriori_ecef,
+            pub_state,
+        }
     }
 
-    pub fn compute_position(&mut self, ts_sec: f64, ephs: &Vec<Ephemeris>) {
+    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &Vec<Ephemeris>) {
         {
             let mut glob_ephs = SOLVER_EPHEMERIS.lock().unwrap();
             *glob_ephs = ephs.clone();
@@ -187,12 +193,15 @@ impl PositionSolver {
          */
         let mut pool = vec![];
 
-        // Signal transmit time (in SV/GPS time) of the sample received at the
-        // common receiver instant ts_sec, for each SV.
+        // Signal transmit time (in SV/GPS time) of the sample currently being
+        // received, for each SV. The elapsed transmit time since the tow_gpst
+        // boundary is the growth of the transmit phase (num_trk_samples advances
+        // at the SV clock rate), NOT the receiver wall-clock delta.
         let tx_gpst: Vec<Epoch> = ephs
             .iter()
             .map(|eph| {
-                eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec + eph.code_off_sec)
+                let elapsed = (eph.trk_phase - eph.tow_trk_phase) + eph.code_off_sec;
+                eph.tow_gpst + Duration::from_seconds(elapsed)
             })
             .collect();
 
@@ -249,7 +258,10 @@ impl PositionSolver {
         match res {
             Err(err) => log::warn!("Failed to get a position: {err}"),
             Ok(solution) => {
-                let pos = solution.1.position;
+                // gnss-rtk 0.4.5 returns the position as a delta relative to the
+                // apriori (it solves y = pr - rho around the apriori and never
+                // adds it back), so recover the absolute ECEF here.
+                let pos = self.apriori_ecef + solution.1.position;
                 let (lat_rad, lon_rad, h) = ecef2geodetic(pos[0], pos[1], pos[2], Ellipsoid::WGS84);
                 let lat = lat_rad * 180.0 / PI;
                 let lon = lon_rad * 180.0 / PI;

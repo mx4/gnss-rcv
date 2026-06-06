@@ -703,6 +703,11 @@ impl Channel {
         self.hist.corr_p.push(c_p);
         self.num_trk_samples += 1;
 
+        // Integer transmit-time of the signal currently being received, from the
+        // count of transmitted code periods (SV clock rate). The absolute
+        // fractional code phase is carried separately in eph.code_off_sec.
+        self.nav.eph.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();
         } else {

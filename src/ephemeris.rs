@@ -14,6 +14,12 @@ pub struct Ephemeris {
     pub cn0: f64,
     pub code_off_sec: f64,
     pub ts_sec: f64, // receiver time for 1st subframe
+    // Integer transmit-time in seconds since tracking start: num_trk_samples *
+    // code_sec. Because num_trk_samples counts *transmitted* code periods
+    // (carrier-aided), it advances at the SV clock rate, unlike the receiver
+    // wall clock ts_sec. The absolute sub-ms code phase is kept in code_off_sec.
+    pub trk_phase: f64, // current integer transmit-time
+    pub tow_trk_phase: f64, // integer transmit-time anchored to tow_gpst
     pub tow_gpst: Epoch,
     pub toe_gpst: Epoch, // cf toe
     pub toc_gpst: Epoch,
