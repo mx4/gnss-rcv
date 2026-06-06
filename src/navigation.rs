@@ -290,7 +290,7 @@ impl Channel {
             self.nav.eph.ts_sec = self.ts_sec;
 
             log::warn!(
-                "{}: tow={:?} tgd={:+e} toe={:?}",
+                "{}: tow={:?} tgd={:+.3e} toe={:?}",
                 self.sv,
                 self.nav.eph.tow_gpst,
                 self.nav.eph.tgd,

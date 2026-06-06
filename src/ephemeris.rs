@@ -83,7 +83,7 @@ impl Ephemeris {
         self.f0 = getbits(buf, 270, 22) as f64 * P2_31;
 
         log::warn!(
-            "{sv}: {} tow={} week={} code={} sva={} svh={} iodc={} tgd={:+e} toc={} f0={:+e} f1={:+e} f2={:+e}",
+            "{sv}: {} tow={} week={} code={} sva={} svh={} iodc={} tgd={:+.3e} toc={} f0={:+.3e} f1={:+.3e} f2={:+.3e}",
             "subframe-1".blue(),
             self.tow,
             self.week,
@@ -114,7 +114,7 @@ impl Ephemeris {
         self.fit = getbitu(buf, 286, 1);
 
         log::warn!(
-            "{sv}: {} tow={} a={} iode={} crs={} crc={} cuc={:+e} cus={:+e} ecc={} m0={} toe={}",
+            "{sv}: {} tow={} a={:.2} iode={} crs={} crc={} cuc={:+.3e} cus={:+.3e} ecc={:+.3e} m0={:+.4e} toe={}",
             "subframe-2".blue(),
             self.tow,
             self.a,
@@ -142,7 +142,7 @@ impl Ephemeris {
         self.i_dot = getbits(buf, 278, 14) as f64 * P2_43 * SC2RAD;
 
         log::warn!(
-            "{sv}: {} tow={} cic={:+e} cis={:+e} omg={} omg0={} omgd={:+e} i0={} idot={:+e}",
+            "{sv}: {} tow={} cic={:+e} cis={:+e} omg={:.3} omg0={:.3} omgd={:+.3e} i0={:+.3e} idot={:+.3e}",
             "subframe-3".blue(),
             self.tow,
             self.cic,

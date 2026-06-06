@@ -38,18 +38,36 @@ fn get_eccentric_anomaly(eph: &Ephemeris, t_k: f64) -> f64 {
     e
 }
 
+fn normalize_week_seconds(mut dt: f64) -> f64 {
+    if dt > 302400.0 {
+        dt -= 604800.0;
+    }
+    if dt < -302400.0 {
+        dt += 604800.0;
+    }
+    dt
+}
+
+/// SV clock correction in seconds: polynomial term (af0/af1/af2) plus the
+/// relativistic eccentricity correction dtr = F * e * sqrt(A) * sin(E_k),
+/// with F = -2 * sqrt(mu) / c^2.
+fn get_sv_clock_correction(eph: &Ephemeris, t: Epoch) -> f64 {
+    let f_rel = -2.0 * EARTH_MU_GPS.sqrt() / SPEED_OF_LIGHT.powi(2);
+
+    let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
+    let ecc_anomaly = get_eccentric_anomaly(eph, dte);
+    let dtr = f_rel * eph.ecc * eph.a.sqrt() * ecc_anomaly.sin();
+
+    let dtc = normalize_week_seconds((t - eph.toc_gpst).to_seconds());
+
+    eph.f0 + eph.f1 * dtc + eph.f2 * dtc.powi(2) + dtr
+}
+
 fn compute_sv_position_ecef(eph: &Ephemeris, t: Epoch) -> (f64, f64, f64) {
-    let mut dte = (t - eph.toe_gpst).to_seconds();
+    let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
 
     log::warn!("{}: ---- now={t:?}", eph.sv);
     log::warn!("{}: ---- toe={:?} delta-t={dte} ", eph.sv, eph.toe_gpst);
-
-    if dte > 302400.0 {
-        dte -= 604800.0;
-    }
-    if dte < -302400.0 {
-        dte += 604800.0;
-    }
 
     let ecc_anomaly = get_eccentric_anomaly(eph, dte);
     let v_k =
@@ -127,9 +145,19 @@ fn sv_interp(t: Epoch, sv: SV, _size: usize) -> Option<InterpolationResult> {
 impl PositionSolver {
     #[allow(clippy::new_without_default)]
     pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
-        let apriori = AprioriPosition::from_geo(Vector3::new(46.5, 6.6, 0.0));
+        // AprioriPosition::from_geo() feeds map_3d::geodetic2ecef(), which expects
+        // latitude/longitude in radians (not degrees).
+        let apriori = AprioriPosition::from_geo(Vector3::new(
+            46.5_f64.to_radians(),
+            6.6_f64.to_radians(),
+            0.0,
+        ));
         let mut cfg = Config::static_preset(Method::SPP);
         cfg.min_sv_elev = Some(0.0);
+        // We add the relativistic clock correction ourselves in
+        // get_sv_clock_correction(); disable the solver's own term to avoid
+        // double-counting it.
+        cfg.modeling.relativistic_clock_bias = false;
 
         let solver = Solver::new(&cfg, apriori, sv_interp as I).expect("Solver issue");
 
@@ -159,37 +187,51 @@ impl PositionSolver {
          */
         let mut pool = vec![];
 
-        let min_gpst = ephs
+        // Signal transmit time (in SV/GPS time) of the sample received at the
+        // common receiver instant ts_sec, for each SV.
+        let tx_gpst: Vec<Epoch> = ephs
             .iter()
-            .map(|&eph| eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec))
-            .min()
-            .unwrap();
+            .map(|eph| {
+                eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec + eph.code_off_sec)
+            })
+            .collect();
 
-        let now_gpst = min_gpst + 0.01;
+        // All SVs are sampled at the same receiver instant. We don't know the
+        // receiver clock absolutely, so we place the reception epoch a nominal
+        // light-travel time after the most-recent transmit time (the closest /
+        // highest SV). This makes every pseudorange physical (~67-90 ms) which
+        // is what the solver's geometry expects; the residual offset is
+        // absorbed by the estimated receiver clock bias.
+        const NOMINAL_TRAVEL_SEC: f64 = 0.070;
+        let latest_tx = *tx_gpst.iter().max().unwrap();
+        let now_gpst = latest_tx + Duration::from_seconds(NOMINAL_TRAVEL_SEC);
+
         log::warn!("----- now_gpst={now_gpst:?}");
-        for eph in ephs {
-            let e_gpst = eph.tow_gpst + Duration::from_seconds(ts_sec - eph.ts_sec);
-            let pseudo_range_sec = (e_gpst - min_gpst).to_seconds() + eph.code_off_sec;
-            let pseudo_range = pseudo_range_sec * SPEED_OF_LIGHT;
-            let dt = (now_gpst - eph.tow_gpst).to_seconds();
-            let clock_corr = eph.f0 + eph.f1 * dt + eph.f2 * dt.powi(2);
-            assert!(dt >= 0.0);
+        for (eph, t_tx) in ephs.iter().zip(tx_gpst.iter()) {
+            let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
 
-            log::warn!("{} - e_gpst={:?} eph.ts={}", eph.sv, e_gpst, eph.ts_sec);
+            let clock_corr = get_sv_clock_correction(eph, now_gpst);
+
             log::warn!(
-                "{} - prng={pseudo_range_sec:+e}sec/{pseudo_range:.1}m tgd={:+e} clock_corr={clock_corr}",
+                "{} - t_tx={t_tx:?} code_off_sec={:.7}",
                 eph.sv,
+                eph.code_off_sec
+            );
+            log::warn!(
+                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e}",
+                eph.sv,
+                pseudo_range_sec * 1000.0,
                 eph.tgd,
             );
 
             let candidate = Candidate::new(
                 eph.sv,
                 now_gpst,
-                Duration::from_seconds(0.0),
+                Duration::from_seconds(clock_corr),
                 Some(Duration::from_seconds(eph.tgd)),
                 vec![Observation {
                     carrier: Carrier::L1,
-                    value: pseudo_range,
+                    value: pseudo_range_sec * SPEED_OF_LIGHT,
                     snr: Some(eph.cn0),
                 }],
                 vec![],

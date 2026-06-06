@@ -109,7 +109,10 @@ WIP: same caveat
 Any code contribution is welcome!
 
 ## TODO
+- use anise for Ephemerides and Almanac
+- use anise to compute SV position from keplerian elements
 - finish position fix computation
 - test + fix rtlsdr support
 - support: SBAS, Galileo, QZSS, Beidu.
 - handle different sampling frequencies
+- use received Almanac to decide which satellite are in view
