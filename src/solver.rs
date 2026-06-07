@@ -480,7 +480,9 @@ impl PositionSolver {
                 }
 
                 let lat = pvt.lat_long_alt_deg_deg_m.0;
-                let lon = pvt.lat_long_alt_deg_deg_m.1;
+                // gnss-rtk reports longitude in [0, 360); wrap to [-180, 180] so
+                // the value is usable directly (e.g. Google Maps ?ll= links).
+                let lon = (pvt.lat_long_alt_deg_deg_m.1 + 180.0).rem_euclid(360.0) - 180.0;
                 let height = pvt.lat_long_alt_deg_deg_m.2 / 1000.0;
 
                 self.pub_state.lock().unwrap().latitude = lat;
