@@ -4,13 +4,13 @@ use rustfft::num_complex::Complex64;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
+use std::io::BufReader;
+use std::io::Read;
 use std::io::Seek;
 use std::io::SeekFrom;
-use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Instant;
 
 use crate::receiver::IQReader;
 
@@ -46,9 +46,20 @@ impl fmt::Display for IQFileType {
     }
 }
 
+// 1 MiB read buffer amortizes the underlying read() syscalls over many code
+// periods (each fetch is only a few KiB).
+const READ_BUF_CAPACITY: usize = 1 << 20;
+
 pub struct IQRecording {
     file_path: PathBuf,
     file_type: IQFileType,
+    // The file handle is opened once and read sequentially. Re-opening and
+    // seeking from the start on every 1 ms fetch (as before) cost one open()+
+    // seek() syscall per code period (~hundreds of thousands over a long file).
+    reader: Option<BufReader<File>>,
+    // Current read position, in samples, so we only seek when a fetch is not
+    // contiguous with the previous one (e.g. the initial --off-msec offset).
+    pos_samples: usize,
 }
 
 impl IQReader for IQRecording {
@@ -57,118 +68,78 @@ impl IQReader for IQRecording {
         off_samples: usize,
         num_samples: usize,
     ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
-        let file = File::open(self.file_path.clone())?;
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
-        let buf_size = sample_size * num_samples;
-        let mut reader = BufReader::with_capacity(buf_size, &file);
-        let mut n: usize = 0;
-        let ts = Instant::now();
-        let mut iq_vec = vec![];
 
-        let off_file = off_samples * sample_size;
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX; // force an initial seek
+        }
+        let reader = self.reader.as_mut().unwrap();
 
-        if false {
-            log::debug!(
-                "read_iq_file: off_samples={} num_samples={}",
-                off_samples,
-                num_samples
-            );
+        // Reads are normally sequential; only seek when the requested offset is
+        // not where we already are (initial offset or any non-contiguous access).
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples * sample_size) as u64))?;
+            self.pos_samples = off_samples;
         }
 
-        let _ = reader.seek(SeekFrom::Current(off_file as i64)).unwrap();
-
-        loop {
-            let buf = reader.fill_buf()?;
-            let len = buf.len();
-
-            if len == 0 {
-                break;
-            }
-
-            match self.file_type {
-                IQFileType::TypeRtlSdrFile => {
-                    for off in (0..len).step_by(2) {
-                        iq_vec.push(Complex64 {
-                            re: (buf[off] as f64 - 127.3) / 128.0,
-                            im: (buf[off + 1] as f64 - 127.3) / 128.0,
-                        });
-                        n += 1;
-                        if n >= num_samples {
-                            break;
-                        }
-                    }
-                }
-                IQFileType::TypeOneInt8 => {
-                    for v in buf.iter().take(len) {
-                        iq_vec.push(Complex64 {
-                            re: *v as i8 as f64 / i8::MAX as f64,
-                            im: 0.0,
-                        });
-                        n += 1;
-                        if n >= num_samples {
-                            break;
-                        }
-                    }
-                }
-                IQFileType::TypePairInt16 => {
-                    for off in (0..len).step_by(4) {
-                        let i = i16::from_le_bytes([buf[off], buf[off + 1]]);
-                        let q = i16::from_le_bytes([buf[off + 2], buf[off + 3]]);
-                        iq_vec.push(Complex64 {
-                            re: i as f64 / i16::MAX as f64,
-                            im: q as f64 / i16::MAX as f64,
-                        });
-                        n += 1;
-                        if n >= num_samples {
-                            break;
-                        }
-                    }
-                }
-                IQFileType::TypePairFloat32 => {
-                    for off in (0..len).step_by(8) {
-                        let i = f32::from_le_bytes([
-                            buf[off],
-                            buf[off + 1],
-                            buf[off + 2],
-                            buf[off + 3],
-                        ]);
-                        let q = f32::from_le_bytes([
-                            buf[off + 4],
-                            buf[off + 5],
-                            buf[off + 6],
-                            buf[off + 7],
-                        ]);
-                        assert!((-1.0..=1.0).contains(&i));
-                        assert!((-1.0..=1.0).contains(&q));
-                        iq_vec.push(Complex64 {
-                            re: i as f64,
-                            im: q as f64,
-                        });
-                        n += 1;
-                        if n >= num_samples {
-                            break;
-                        }
-                    }
-                }
-            }
-            if n >= num_samples {
-                break;
-            }
-            reader.consume(len);
-        }
-        if n < num_samples {
+        let mut bytes = vec![0u8; sample_size * num_samples];
+        if reader.read_exact(&mut bytes).is_err() {
             return Err("end of file".into());
         }
-        assert_eq!(n, num_samples);
+        self.pos_samples += num_samples;
 
-        let bw = n as f64 * buf_size as f64 / 1024.0 / 1024.0 / ts.elapsed().as_secs_f64();
-        if false {
-            log::debug!(
-                "read_from_file: {} msec -- bandwidth: {:.1} MB/sec -- num_read_ops={}",
-                ts.elapsed().as_millis(),
-                bw,
-                n
-            );
+        let mut iq_vec = Vec::with_capacity(num_samples);
+        match self.file_type {
+            IQFileType::TypeRtlSdrFile => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    iq_vec.push(Complex64 {
+                        re: (bytes[off] as f64 - 127.3) / 128.0,
+                        im: (bytes[off + 1] as f64 - 127.3) / 128.0,
+                    });
+                }
+            }
+            IQFileType::TypeOneInt8 => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    iq_vec.push(Complex64 {
+                        re: bytes[off] as i8 as f64 / i8::MAX as f64,
+                        im: 0.0,
+                    });
+                }
+            }
+            IQFileType::TypePairInt16 => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    let i = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
+                    let q = i16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
+                    iq_vec.push(Complex64 {
+                        re: i as f64 / i16::MAX as f64,
+                        im: q as f64 / i16::MAX as f64,
+                    });
+                }
+            }
+            IQFileType::TypePairFloat32 => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    let i = f32::from_le_bytes([
+                        bytes[off],
+                        bytes[off + 1],
+                        bytes[off + 2],
+                        bytes[off + 3],
+                    ]);
+                    let q = f32::from_le_bytes([
+                        bytes[off + 4],
+                        bytes[off + 5],
+                        bytes[off + 6],
+                        bytes[off + 7],
+                    ]);
+                    assert!((-1.0..=1.0).contains(&i));
+                    assert!((-1.0..=1.0).contains(&q));
+                    iq_vec.push(Complex64 {
+                        re: i as f64,
+                        im: q as f64,
+                    });
+                }
+            }
         }
 
         Ok(iq_vec)
@@ -190,6 +161,8 @@ impl IQRecording {
         Self {
             file_path: file_path.to_path_buf(),
             file_type: file_type.clone(),
+            reader: None,
+            pos_samples: 0,
         }
     }
 
