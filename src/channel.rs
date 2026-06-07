@@ -3,6 +3,7 @@ use gnss_rs::sv::SV;
 use plotters::prelude::*;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex64;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -68,33 +69,33 @@ pub struct Tracking {
     sum_corr_n: f64,
 }
 
+// Rolling per-channel diagnostics. These are capped ring buffers: new samples
+// are pushed at the back, the oldest are dropped from the front once the buffer
+// reaches HISTORY_NUM. VecDeque makes that pop_front O(1); a Vec would memmove
+// the whole (HISTORY_NUM-element) buffer on every code period.
 #[derive(Default)]
 pub struct History {
     last_log_ts: f64,
     last_plot_ts: f64,
-    code_phase_offset: Vec<f64>,
-    phi_error: Vec<f64>,
-    doppler_hz: Vec<f64>,
-    pub corr_p: Vec<Complex64>,
+    code_phase_offset: VecDeque<f64>,
+    phi_error: VecDeque<f64>,
+    doppler_hz: VecDeque<f64>,
+    pub corr_p: VecDeque<Complex64>,
 }
 
 impl History {
     pub fn trim(&mut self) {
         if self.doppler_hz.len() > HISTORY_NUM {
-            self.doppler_hz.rotate_left(1);
-            self.doppler_hz.pop();
+            self.doppler_hz.pop_front();
         }
         if self.phi_error.len() > HISTORY_NUM {
-            self.phi_error.rotate_left(1);
-            self.phi_error.pop();
+            self.phi_error.pop_front();
         }
         if self.corr_p.len() > HISTORY_NUM {
-            self.corr_p.rotate_left(1);
-            self.corr_p.pop();
+            self.corr_p.pop_front();
         }
         if self.code_phase_offset.len() > HISTORY_NUM {
-            self.code_phase_offset.rotate_left(1);
-            self.code_phase_offset.pop();
+            self.code_phase_offset.pop_front();
         }
     }
 }
@@ -242,7 +243,7 @@ impl Channel {
             .channels
             .get_mut(&self.sv)
             .unwrap()
-            .code_idx = *self.hist.code_phase_offset.last().unwrap();
+            .code_idx = *self.hist.code_phase_offset.back().unwrap();
 
         if state == State::Tracking {
             (self.pub_state.lock().unwrap().update_func.func)();
@@ -494,39 +495,25 @@ impl Channel {
     }
 
     fn plot_code_phase_offset(&self) {
-        plot_time_graph(
-            self.sv,
-            "code-phase-offset",
-            self.hist.code_phase_offset.as_slice(),
-            50.0,
-            &BLUE,
-        );
+        let v: Vec<f64> = self.hist.code_phase_offset.iter().copied().collect();
+        plot_time_graph(self.sv, "code-phase-offset", &v, 50.0, &BLUE);
     }
 
     fn plot_phi_error(&self) {
-        plot_time_graph(
-            self.sv,
-            "phi-error",
-            self.hist.phi_error.as_slice(),
-            0.5,
-            &BLACK,
-        );
+        let v: Vec<f64> = self.hist.phi_error.iter().copied().collect();
+        plot_time_graph(self.sv, "phi-error", &v, 0.5, &BLACK);
     }
 
     fn plot_doppler_hz(&self) {
-        plot_time_graph(
-            self.sv,
-            "doppler-hz",
-            self.hist.doppler_hz.as_slice(),
-            10.0,
-            &BLACK,
-        );
+        let v: Vec<f64> = self.hist.doppler_hz.iter().copied().collect();
+        plot_time_graph(self.sv, "doppler-hz", &v, 10.0, &BLACK);
     }
 
     fn plot_iq_scatter(&self) {
         let len = self.hist.corr_p.len();
         let n = usize::min(len, 2000);
-        plot_iq_scatter(self.sv, &self.hist.corr_p[len - n..len]);
+        let v: Vec<Complex64> = self.hist.corr_p.iter().skip(len - n).copied().collect();
+        plot_iq_scatter(self.sv, &v);
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex64]) {
@@ -586,7 +573,7 @@ impl Channel {
         iq_vec2: &[Complex64],
     ) -> (Complex64, Complex64, Complex64, Complex64) {
         let n = self.code_sp as i32;
-        let code_idx = *self.hist.code_phase_offset.last().unwrap() as i32;
+        let code_idx = *self.hist.code_phase_offset.back().unwrap() as i32;
         assert!(-n < code_idx && code_idx < n);
 
         //       [-------][-------][---------]
@@ -680,7 +667,7 @@ impl Channel {
             1.4 * w * (err_phase - self.trk.err_phase) + w * w * err_phase * self.code_sec;
         self.update_state_doppler_hz();
         self.trk.err_phase = err_phase;
-        self.hist.phi_error.push(err_phase * 2.0 * PI);
+        self.hist.phi_error.push_back(err_phase * 2.0 * PI);
     }
 
     fn run_dll(&mut self, c_e: Complex64, c_l: Complex64) {
@@ -725,7 +712,7 @@ impl Channel {
             // code_off dropped by one period, so the transmit phase
             // (num_tx_codes * code_sec + code_off) stays continuous by adding one.
             self.num_tx_codes += 1.0;
-            self.hist.corr_p.pop();
+            self.hist.corr_p.pop_back();
             // 0-1-2-3-4
             // 0-0-1-2-3
             // 0-1-2-3-5
@@ -733,8 +720,8 @@ impl Channel {
             self.trk.code_off_sec += self.code_sec;
             self.num_trk_samples += 1;
             self.num_tx_codes -= 1.0;
-            let v = self.hist.corr_p.last().unwrap();
-            self.hist.corr_p.push(*v);
+            let v = *self.hist.corr_p.back().unwrap();
+            self.hist.corr_p.push_back(v);
             // 0-1-2-3-4
             // 1-2-3-4-4
             // 2-3-4-4-5
@@ -745,12 +732,12 @@ impl Channel {
         self.trk.phi = self.fi * tau + self.trk.adr + fc * code_off / self.fs;
         self.update_state_phi();
 
-        self.hist.code_phase_offset.push(code_off);
+        self.hist.code_phase_offset.push_back(code_off);
         self.update_state_code_idx();
     }
 
     fn log_periodically(&mut self) {
-        let code_idx = self.hist.code_phase_offset.last().unwrap();
+        let code_idx = self.hist.code_phase_offset.back().unwrap();
         if self.ts_sec - self.hist.last_log_ts > 3.0 {
             log::warn!(
                 "{}: {} cn0={:.1} dopp={:5.0} code_idx={:4.0} phi={:5.2} ts_sec={:.3} code_off_sec={:+.3e}",
@@ -770,7 +757,7 @@ impl Channel {
     fn tracking_process(&mut self, iq_vec: &[Complex64]) {
         self.get_code_and_carrier_phase();
         let (c_p, c_e, c_l, c_n) = self.tracking_compute_correlation(iq_vec);
-        self.hist.corr_p.push(c_p);
+        self.hist.corr_p.push_back(c_p);
         self.num_trk_samples += 1;
         self.num_tx_codes += 1.0;
 
@@ -806,7 +793,7 @@ impl Channel {
             self.nav_decode();
         }
 
-        self.hist.doppler_hz.push(self.trk.doppler_hz);
+        self.hist.doppler_hz.push_back(self.trk.doppler_hz);
         self.hist.trim();
         self.update_all_plots(false);
         self.log_periodically();
