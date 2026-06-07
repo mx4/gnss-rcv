@@ -3,10 +3,10 @@
 
 # gnss-rcv: GNSS receiver for :artificial_satellite: GPS L1 signal in Rust
 This app takes as input:
-- an SDR IQ recording
-- or an rtl-sdr device
+- an SDR IQ recording (several sample formats, sample rates and IFs), or
+- an rtl-sdr device
 
-It performs signal acquisition, tracking and ephemeris decoding. Finally it gets a position fix.
+It performs signal acquisition, tracking and ephemeris decoding, and finally computes a position fix.
 
 ## Diagnostic output
 As the gnss receiver processes the IQ data it periodically updates a web page (index.html + pics) that helps explain the inner state of the decoder. Cf plots/index.html.
@@ -17,11 +17,35 @@ As the gnss receiver processes the IQ data it periodically updates a web page (i
 The UI interface can be started with the command line option -u.
 ![diagnostic output](./assets/gnss-rcv-ui.png)
 
-## Run with IQ recording of L1 signal sampled at 2046MHz
+## Run with an IQ recording
 ```
 $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin
 ```
-Note that the app supports multiple IQ file formats: `2xf32`, `2xi16`, `i8`, `rtlsdr-file` and `1bit` (8 packed 1-bit real samples per byte). This can be specified via the cmd-line option -t.
+With no `-f`, it runs against the default development recording (2xf32, 2.046 MHz, zero IF).
+
+### Supported IQ formats (`-t`)
+| `-t`          | sample layout                                       |
+|---------------|-----------------------------------------------------|
+| `2xf32`       | interleaved float32 I/Q (default)                   |
+| `2xi16`       | interleaved int16 I/Q (e.g. `gps-sdr-sim -b 16`)    |
+| `i8`          | single int8, real-only                              |
+| `rtlsdr-file` | interleaved uint8 I/Q (an `rtl_sdr` capture)        |
+| `1bit`        | 8 hard-limited 1-bit real samples packed per byte   |
+
+### Sample rate & intermediate frequency
+The PRN code is resampled to the actual rate, so any sampling frequency works. Set
+the rate with `--fs` and the intermediate frequency with `--fi` (both in Hz, default
+2.046 MHz / 0 Hz):
+```
+# 1-bit real recording sampled at 5.456 MHz (IF 4.092 MHz aliases to 1.364 MHz):
+$ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
+    -t 1bit --fs 5456000 --fi 1364000
+```
+
+### Other useful options
+- `--num-msec N` / `--off-msec N`: process only N ms, or start N ms into the file.
+- `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
+- `-u`: open the UI; `-l <file>`: also write logs to a file.
 
 ## Download an existing IQ recording with GPS L1 signal
 
@@ -49,7 +73,7 @@ Cf [GPS-SDR-SIM](https://github.com/osqzss/gps-sdr-sim)
  ./gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000
 ```
 This generates an IQ recording w/ 2 int16 per I and Q sample.
-You can use this using the cmd-line option "-t 2xf16".
+You can use this using the cmd-line option "-t 2xi16".
 
 ## RTLSDR
 
@@ -78,7 +102,7 @@ $ rtl_tcp -a
 ```
 and connect to it w/ gnss-rcv:
 ```
-$ RUST_LOG=warn cargo run --release -- -h <hostname>
+$ RUST_LOG=warn cargo run --release -- -s <hostname>
 ```
 gnss-rcv will automatically configure the sampling rate, center frequency, etc.
 WIP: same caveat
@@ -118,5 +142,4 @@ Any code contribution is welcome!
 - use anise to compute SV position from keplerian elements
 - test + fix rtlsdr support
 - support: SBAS, Galileo, QZSS, Beidu.
-- handle different sampling frequencies
 - use received Almanac to decide which satellite are in view
