@@ -22,6 +22,13 @@ use crate::util::get_max_with_idx;
 
 const SP_CORR: f64 = 0.5;
 const T_IDLE: f64 = 3.0;
+// A satellite in view acquires within a handful of attempts; the 10 ms
+// acquisition CN0 estimate is noisy near the threshold, so a weak-but-real SV
+// may fail several times before it locks. Keep the normal retry rate for this
+// many failures (well above what any visible SV needs), then back off the idle
+// time so a truly-absent PRN stops burning the FFT search every few seconds.
+const ACQ_FAIL_GRACE: u32 = 20;
+const T_IDLE_MAX: f64 = 30.0;
 const T_ACQ: f64 = 0.01; // 10msec acquisition time
 const T_FPULLIN: f64 = 1.0;
 const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
@@ -126,6 +133,9 @@ pub struct Channel {
     num_tx_codes: f64,
     num_acq_samples: usize,
     num_idl_samples: usize,
+    // Consecutive failed acquisitions (reset on a successful lock); drives the
+    // idle backoff for PRNs that are very likely not in view.
+    num_acq_fails: u32,
 
     pub hist: History,
     pub nav: Navigation,
@@ -316,6 +326,7 @@ impl Channel {
 
             num_acq_samples: 0,
             num_idl_samples: 0,
+            num_acq_fails: 0,
             num_trk_samples: 0,
             num_tx_codes: 0.0,
 
@@ -360,7 +371,16 @@ impl Channel {
 
     fn idle_process(&mut self) {
         self.num_idl_samples += 1;
-        if self.num_idl_samples as f64 * self.code_sec > T_IDLE {
+        // Normal retry rate during the grace window; afterwards (PRN very likely
+        // absent) grow the idle time linearly, capped, so the FFT search runs far
+        // less often. A successful lock resets num_acq_fails, so a visible SV that
+        // locks during grace is never throttled.
+        let idle = if self.num_acq_fails <= ACQ_FAIL_GRACE {
+            T_IDLE
+        } else {
+            (T_IDLE * (self.num_acq_fails - ACQ_FAIL_GRACE + 1) as f64).min(T_IDLE_MAX)
+        };
+        if self.num_idl_samples as f64 * self.code_sec > idle {
             self.acquisition_start();
         }
     }
@@ -412,6 +432,7 @@ impl Channel {
         );
         self.tracking_init();
         self.set_state(State::Tracking);
+        self.num_acq_fails = 0; // in view: restore full-rate retry on future loss
 
         self.trk.code_off_sec = code_off_sec;
         self.trk.doppler_hz = doppler_hz;
@@ -542,6 +563,7 @@ impl Channel {
             if cn0 >= CN0_THRESHOLD_LOCKED {
                 self.tracking_start(doppler_hz, cn0, code_off_sec, code_offset_idx);
             } else {
+                self.num_acq_fails = self.num_acq_fails.saturating_add(1);
                 self.idle_start();
             }
             self.acquisition_init();
