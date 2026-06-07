@@ -37,6 +37,7 @@ pub struct Receiver {
     channels: HashMap<SV, Channel>,
     solver: PositionSolver,
     last_fix_sec: f64,
+    exit_on_fix: bool,
     exit_req: Arc<AtomicBool>,
 }
 
@@ -133,6 +134,7 @@ impl Receiver {
         sig: &str,
         sats: &str,
         plots: bool,
+        exit_on_fix: bool,
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Self {
@@ -165,6 +167,7 @@ impl Receiver {
             channels,
             solver: PositionSolver::new(state),
             last_fix_sec: 0.0,
+            exit_on_fix,
             exit_req: exit_req.clone(),
         }
     }
@@ -250,6 +253,10 @@ impl Receiver {
             }
             if self.exit_req.load(Ordering::SeqCst) {
                 log::info!("exit requested");
+                break;
+            }
+            if self.exit_on_fix && self.solver.has_fix() {
+                log::warn!("position fix obtained, exiting");
                 break;
             }
             n += 1;

@@ -41,6 +41,7 @@ to-end receiver still acquires, tracks, decodes, and solves.
   `resources/gpssim.txt`.
 - `--num-msec N` bounds the run; `RUST_LOG=warn` cuts log noise.
 - `-p` / `--plots` enables per-SV PNG diagnostics in `plots/` (off by default — skipping saves I/O during headless runs).
+- `-x` / `--exit-on-fix` stops the run as soon as the first fix is computed (useful with long files; the fix test uses this).
 - A position fix needs ~3 subframes decoded (~20–40 s of IQ). There is no
   exit-on-fix flag yet, so bound long files with `--num-msec`.
 

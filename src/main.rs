@@ -50,6 +50,8 @@ struct Options {
     use_ui: bool,
     #[structopt(short = "-p", long, help = "write diagnostic plots to plots/")]
     plots: bool,
+    #[structopt(short = "-x", long, help = "stop as soon as the first position fix is computed")]
+    exit_on_fix: bool,
 }
 
 fn init_logging(log_file: &PathBuf) {
@@ -125,6 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &opt.sig,
         &opt.sats,
         opt.plots,
+        opt.exit_on_fix,
         exit_req.clone(),
         Arc::new(Mutex::new(GnssState::new())),
     );

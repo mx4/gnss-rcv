@@ -333,6 +333,10 @@ impl PositionSolver {
         }
     }
 
+    pub fn has_fix(&self) -> bool {
+        self.last_fix_ecef.is_some()
+    }
+
     fn relinearize(&mut self) {
         self.solver.reset();
         self.solver = make_solver(

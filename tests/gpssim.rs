@@ -31,13 +31,11 @@ const SIM_SATS: &str = "5,10,12,13,15,18,23,24,25,28,32";
 
 /// Run the receiver over `num_msec` of the gpssim recording and return the
 /// resulting shared state, or `None` (skip) when the recording isn't present.
-fn run(num_msec: usize) -> Option<Arc<Mutex<GnssState>>> {
+fn run(num_msec: usize, exit_on_fix: bool) -> Option<Arc<Mutex<GnssState>>> {
     if !Path::new(GPSSIM).exists() {
         eprintln!("skipping: {GPSSIM} not present (see resources/README.md)");
         return None;
     }
-    // update_all_plots() writes PNGs into plots/; ensure it exists for headless runs.
-    let _ = std::fs::create_dir_all("plots");
 
     let state = Arc::new(Mutex::new(GnssState::new()));
     let exit_req = Arc::new(AtomicBool::new(false));
@@ -52,6 +50,7 @@ fn run(num_msec: usize) -> Option<Arc<Mutex<GnssState>>> {
         "L1CA",      // sig
         SIM_SATS,    // sats
         false,       // plots
+        exit_on_fix,
         exit_req,
         state.clone(),
     );
@@ -62,7 +61,7 @@ fn run(num_msec: usize) -> Option<Arc<Mutex<GnssState>>> {
 /// Fast signal: acquisition + tracking lock onto the simulated satellites.
 #[test]
 fn acquires_and_tracks_gpssim() {
-    let Some(state) = run(5_000) else { return };
+    let Some(state) = run(5_000, false) else { return };
 
     let tracking = state
         .lock()
@@ -84,7 +83,7 @@ fn acquires_and_tracks_gpssim() {
 #[test]
 #[ignore = "slow: processes ~40s of IQ to reach a position fix"]
 fn computes_position_fix_gpssim() {
-    let Some(state) = run(40_000) else { return };
+    let Some(state) = run(40_000, true) else { return };
 
     let st = state.lock().unwrap();
     let (lat, lon) = (st.latitude, st.longitude);
