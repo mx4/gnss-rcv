@@ -81,12 +81,14 @@ pub fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -
 }
 
 pub fn doppler_shift(iq_vec: &mut [Complex64], doppler_hz: f64, phi: f64, fs: f64) {
-    let carrier = doppler_shifted_carrier(doppler_hz, phi, fs, iq_vec.len());
-
-    assert_eq!(iq_vec.len(), carrier.len());
-
-    for i in 0..iq_vec.len() {
-        iq_vec[i] *= carrier[i];
+    // Mix by phase recurrence (one complex multiply per sample) instead of
+    // building a carrier vector with a sin/cos per sample. Equivalent to
+    // multiplying sample n by exp(-j(2*pi*doppler*n/fs + 2*pi*phi)).
+    let step = Complex64::from_polar(1.0, -2.0 * PI * doppler_hz / fs);
+    let mut c = Complex64::from_polar(1.0, -2.0 * PI * phi);
+    for s in iq_vec.iter_mut() {
+        *s *= c;
+        c *= step;
     }
 }
 

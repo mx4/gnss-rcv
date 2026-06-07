@@ -48,6 +48,7 @@ pub enum State {
 #[derive(Default)]
 pub struct Tracking {
     prn_code: Vec<Complex64>, // upsampled
+    sig_buf: Vec<Complex64>,  // reused scratch for the Doppler-mixed code period
     doppler_hz: f64,
     code_off_sec: f64,
     cn0: f64,
@@ -567,43 +568,46 @@ impl Channel {
         assert!(lo >= 0);
         let lo_u = lo as usize;
         let hi_u = (lo + n) as usize;
-        let mut signal = iq_vec2[lo_u..hi_u].to_vec();
 
-        doppler_shift(&mut signal, self.trk.doppler_hz, self.trk.phi, self.fs);
+        // Doppler-mix the received code period into a reused scratch buffer
+        // (no per-call allocation; doppler_shift mixes by phase recurrence).
+        let (doppler, phi, fs) = (self.trk.doppler_hz, self.trk.phi, self.fs);
+        self.trk.sig_buf.clear();
+        self.trk.sig_buf.extend_from_slice(&iq_vec2[lo_u..hi_u]);
+        doppler_shift(&mut self.trk.sig_buf, doppler, phi, fs);
 
         let pos = (SP_CORR * self.code_sec * self.fs / self.code_len as f64) as usize;
+        let pos_neutral: usize = 80;
+
+        let sig = &self.trk.sig_buf;
+        let code = &self.trk.prn_code;
+        let len = sig.len();
 
         let mut corr_prompt = Complex64::default();
         let mut corr_early = Complex64::default();
         let mut corr_late = Complex64::default();
         let mut corr_neutral = Complex64::default();
 
-        // PROMPT
-        for (j, sig_val) in signal.iter().enumerate() {
-            corr_prompt += sig_val * self.trk.prn_code[j];
+        // Single fused pass: prompt (full), early/late (offset by +/-pos) and
+        // neutral (offset by pos_neutral) accumulated together, reading sig[j]
+        // and code[j] once each instead of in four separate passes.
+        for j in 0..len {
+            let sj = sig[j];
+            let cj = code[j];
+            corr_prompt += sj * cj;
+            if j + pos < len {
+                corr_early += sj * code[j + pos];
+                corr_late += sig[j + pos] * cj;
+            }
+            if j + pos_neutral < len {
+                corr_neutral += sj * code[j + pos_neutral];
+            }
         }
-        corr_prompt /= signal.len() as f64;
 
-        // EARLY:
-        #[allow(clippy::needless_range_loop)]
-        for j in 0..signal.len() - pos {
-            corr_early += signal[j] * self.trk.prn_code[pos + j];
-        }
-        corr_early /= (signal.len() - pos) as f64;
-
-        // LATE:
-        for j in 0..signal.len() - pos {
-            corr_late += signal[pos + j] * self.trk.prn_code[j];
-        }
-        corr_late /= (signal.len() - pos) as f64;
-
-        // NEUTRAL:
-        let pos_neutral: usize = 80;
-        #[allow(clippy::needless_range_loop)]
-        for j in 0..signal.len() - pos_neutral {
-            corr_neutral += signal[j] * self.trk.prn_code[pos_neutral + j];
-        }
-        corr_neutral /= (signal.len() - pos_neutral) as f64;
+        corr_prompt /= len as f64;
+        corr_early /= (len - pos) as f64;
+        corr_late /= (len - pos) as f64;
+        corr_neutral /= (len - pos_neutral) as f64;
 
         (corr_prompt, corr_early, corr_late, corr_neutral)
     }
