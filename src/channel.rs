@@ -286,10 +286,14 @@ impl Channel {
         let code_sp = (fs * code_sec) as usize;
         let mut fft_planner = FftPlanner::new();
 
-        let prn_code: Vec<_> = code_buf
-            .iter()
-            .map(|&x| Complex64::new(x as f64, 0.0))
-            .flat_map(|x| [x, x])
+        // Resample the PRN code to the actual samples-per-code-period (code_sp =
+        // fs * code_sec), so any sampling rate works. (For fs = 2.046 MHz this is
+        // exactly 2 samples/chip, matching the previous hardcoded duplication.)
+        let prn_code: Vec<Complex64> = (0..code_sp)
+            .map(|i| {
+                let chip = i * code_len / code_sp;
+                Complex64::new(code_buf[chip] as f64, 0.0)
+            })
             .collect();
 
         let mut prn_code_fft = prn_code.clone();

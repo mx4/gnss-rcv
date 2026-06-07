@@ -20,6 +20,9 @@ pub enum IQFileType {
     TypePairInt16,
     TypeRtlSdrFile,
     TypeOneInt8,
+    // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
+    // e.g. jks.com's gps.samples.1bit.I.fs5456.if4092.bin.
+    TypeOneBit,
 }
 
 impl FromStr for IQFileType {
@@ -30,6 +33,7 @@ impl FromStr for IQFileType {
             "2xi16" => Ok(IQFileType::TypePairInt16),
             "rtlsdr-file" => Ok(IQFileType::TypeRtlSdrFile),
             "i8" => Ok(IQFileType::TypeOneInt8),
+            "1bit" => Ok(IQFileType::TypeOneBit),
             _ => Err(format!("Failed to parse {}", input).into()),
         }
     }
@@ -42,6 +46,7 @@ impl fmt::Display for IQFileType {
             IQFileType::TypePairInt16 => write!(f, "2xi16"),
             IQFileType::TypeRtlSdrFile => write!(f, "rtlsdr-file"),
             IQFileType::TypeOneInt8 => write!(f, "i8"),
+            IQFileType::TypeOneBit => write!(f, "1bit"),
         }
     }
 }
@@ -68,6 +73,11 @@ impl IQReader for IQRecording {
         off_samples: usize,
         num_samples: usize,
     ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+        // 1-bit samples are bit-packed (8 per byte), so they don't fit the
+        // integer-bytes-per-sample math below; handle them on a dedicated path.
+        if let IQFileType::TypeOneBit = self.file_type {
+            return self.get_iq_data_1bit(off_samples, num_samples);
+        }
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
 
         if self.reader.is_none() {
@@ -140,6 +150,8 @@ impl IQReader for IQRecording {
                     });
                 }
             }
+            // Returned early above via get_iq_data_1bit.
+            IQFileType::TypeOneBit => unreachable!(),
         }
 
         Ok(iq_vec)
@@ -149,8 +161,11 @@ impl IQReader for IQRecording {
 impl IQRecording {
     pub fn new(file_path: &Path, fs: f64, file_type: &IQFileType) -> Self {
         let file_size = file_path.metadata().unwrap().len();
-        let sample_size = Self::get_sample_size_bytes(file_type) as f64;
-        let recording_duration_sec = file_size as f64 / fs / sample_size;
+        let recording_duration_sec = match file_type {
+            // 8 samples per byte rather than an integer number of bytes/sample.
+            IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
+            _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
+        };
 
         println!(
             "file: {} -- {file_type} {} duration: {:.1} secs",
@@ -172,6 +187,51 @@ impl IQRecording {
             IQFileType::TypeOneInt8 => 1,
             IQFileType::TypePairInt16 => 2 * 2,
             IQFileType::TypePairFloat32 => 2 * 4,
+            // Sub-byte; not expressible here -- handled on its own read path.
+            IQFileType::TypeOneBit => unreachable!("1-bit uses get_iq_data_1bit"),
         }
+    }
+
+    // Read bit-packed 1-bit real samples (8 per byte, MSB first). Each bit is a
+    // hard-limited sample: 1 -> +1.0, 0 -> -1.0; the quadrature part is 0.
+    // Reads are byte-aligned: period_sp = PERIOD_RCV * fs is a multiple of 8 for
+    // any fs that is a multiple of 8000 (e.g. the 5.456 MHz this format uses), so
+    // off_samples and num_samples are always multiples of 8.
+    fn get_iq_data_1bit(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+        assert!(
+            off_samples.is_multiple_of(8) && num_samples.is_multiple_of(8),
+            "1-bit reads must be 8-sample aligned (use an fs that is a multiple of 8000)"
+        );
+
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX; // force an initial seek
+        }
+        let reader = self.reader.as_mut().unwrap();
+
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples / 8) as u64))?;
+            self.pos_samples = off_samples;
+        }
+
+        let mut bytes = vec![0u8; num_samples / 8];
+        if reader.read_exact(&mut bytes).is_err() {
+            return Err("end of file".into());
+        }
+        self.pos_samples += num_samples;
+
+        let mut iq_vec = Vec::with_capacity(num_samples);
+        for byte in bytes {
+            for bit in (0..8).rev() {
+                let re = if (byte >> bit) & 1 == 1 { 1.0 } else { -1.0 };
+                iq_vec.push(Complex64 { re, im: 0.0 });
+            }
+        }
+        Ok(iq_vec)
     }
 }

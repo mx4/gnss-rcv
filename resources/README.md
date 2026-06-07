@@ -43,9 +43,32 @@ Process time = 7.5 [sec]
 
 ## GPS-L1-2022-03-27.sigmf-data
 source: https://zenodo.org/records/6394603
-complex i16 @4KHz -- not usable just yet
+SigMF: complex int16 (ci16), 4 MHz, centered on L1 (1575.42 MHz, so fi=0).
+Acquires and tracks GPS SVs (e.g. G31 @ ~40 dB-Hz):
+```
+RUST_LOG=info cargo run --release -- -f resources/GPS-L1-2022-03-27.sigmf-data -t 2xi16 --fs 4000000
+```
+Only ~15s long, so it is too short to decode an ephemeris / get a position fix.
 
 ## gioveAandB_short.bin
 http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/
-sampling at 16367600Hz -- not usable yet
-one signal sample is stored as one signed byte (int8)
+Real int8 samples (one signed byte per sample) at 16367600 Hz, IF=4130400 Hz:
+```
+cargo run --release -- -f resources/gioveAandB_short.bin -t i8 --fs 16367600 --fi 4130400
+```
+
+## gps.samples.1bit.I.fs5456.if4092.bin
+http://www.jks.com/gps/gps.html
+1-bit hard-limited real samples, 8 packed per byte (MSB first), ~81.8s.
+fs=5.456 MHz, IF=4.092 MHz. Use the new "-t 1bit" type.
+
+Note: IF 4.092 MHz is above Nyquist (fs/2 = 2.728 MHz), so the real signal
+aliases to fs - IF = 1.364 MHz with an inverted spectrum. Pass that aliased IF
+(--fi 1364000), not 4.092 MHz -- using 4092000 selects the mirrored sideband and
+the nav data never bit-syncs.
+```
+cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin -t 1bit --fs 5456000 --fi 1364000
+```
+Acquires and tracks ~7 SVs (G01/G09/G21/G25/G29/G30/G31) and reaches bit/frame
+sync, but at a marginal ~30 dB-Hz (near the 29 dB-Hz drop threshold) sync drops
+repeatedly, so it does not hold long enough to decode an ephemeris / get a fix.

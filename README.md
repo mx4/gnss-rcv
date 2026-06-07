@@ -21,7 +21,7 @@ The UI interface can be started with the command line option -u.
 ```
 $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin
 ```
-Note that the app supports multiple IQ file formats: i8, 2xf16, 2xf32, etc. This can be specified via the cmd-line option -t.
+Note that the app supports multiple IQ file formats: `2xf32`, `2xi16`, `i8`, `rtlsdr-file` and `1bit` (8 packed 1-bit real samples per byte). This can be specified via the cmd-line option -t.
 
 ## Download an existing IQ recording with GPS L1 signal
 
