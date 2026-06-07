@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::channel::Channel;
 use crate::device::RtlSdrDevice;
+use crate::ephemeris::Ephemeris as RxEphemeris;
 use crate::network::RtlSdrTcp;
 use crate::recording::IQFileType;
 use crate::recording::IQRecording;
@@ -58,6 +59,37 @@ fn get_sat_list(sats: &str) -> Vec<SV> {
         }
     }
     sat_vec
+}
+
+/// Reject cross-correlation false locks.
+///
+/// A weak channel can lock onto a strong SV's signal via C/A code
+/// cross-correlation (peaks ~21 dB below the auto-correlation, at Doppler
+/// offsets of k*1 kHz). It then decodes that strong SV's navigation data, so its
+/// ephemeris is bit-identical to the strong SV's while its pseudorange is a
+/// biased duplicate. Distinct GPS satellites never broadcast identical
+/// orbital+clock parameters, so when two channels report the same ephemeris we
+/// keep only the highest-C/N0 (true) one and drop the cross-correlation(s).
+fn reject_cross_correlations(mut ephs: Vec<RxEphemeris>) -> Vec<RxEphemeris> {
+    ephs.sort_by(|a, b| b.cn0.total_cmp(&a.cn0));
+    let mut kept: Vec<RxEphemeris> = Vec::with_capacity(ephs.len());
+    for e in ephs {
+        if let Some(dup) = kept
+            .iter()
+            .find(|k| k.m0 == e.m0 && k.omg0 == e.omg0 && k.f0 == e.f0)
+        {
+            log::warn!(
+                "{}: dropping cross-correlation lock (duplicate ephemeris of {}, cn0 {:.1} < {:.1})",
+                e.sv,
+                dup.sv,
+                e.cn0,
+                dup.cn0,
+            );
+        } else {
+            kept.push(e);
+        }
+    }
+    kept
 }
 
 fn get_iq_feed(
@@ -182,6 +214,8 @@ impl Receiver {
             .map(|ch| ch.nav.eph)
             .collect();
 
+        let ephs = reject_cross_correlations(ephs);
+
         if ephs.len() < 4 {
             return;
         }
@@ -223,5 +257,50 @@ impl Receiver {
                 break;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
+        let mut e = RxEphemeris::new(SV::new(Constellation::GPS, prn));
+        e.m0 = m0;
+        e.omg0 = omg0;
+        e.f0 = f0;
+        e.cn0 = cn0;
+        e
+    }
+
+    #[test]
+    fn cross_correlation_dropped_keeps_strongest() {
+        // G15 is the true strong SV; G16 cross-correlated onto it and decoded the
+        // same nav data (identical m0/omg0/f0) at a lower C/N0. G24 is a distinct SV.
+        let strong = eph(15, 0.5, -1.2, 1.0e-4, 52.0);
+        let xcorr = eph(16, 0.5, -1.2, 1.0e-4, 35.6);
+        let other = eph(24, -0.3, 0.8, -4.7e-4, 55.0);
+
+        let kept = reject_cross_correlations(vec![xcorr, strong, other]);
+
+        assert_eq!(kept.len(), 2, "the cross-correlation duplicate must be dropped");
+        assert!(kept.iter().any(|e| e.sv.prn == 15), "the strong (true) SV is kept");
+        assert!(kept.iter().any(|e| e.sv.prn == 24), "the distinct SV is kept");
+        assert!(
+            !kept.iter().any(|e| e.sv.prn == 16),
+            "the weaker cross-correlation lock is dropped"
+        );
+    }
+
+    #[test]
+    fn distinct_svs_all_kept() {
+        // Distinct satellites (different orbital/clock params) are never merged,
+        // even if some fields coincide.
+        let a = eph(5, 0.1, 0.2, 1.0e-4, 46.0);
+        let b = eph(10, 0.1, 0.9, 2.0e-4, 49.0); // same m0, different omg0/f0
+        let c = eph(12, 0.7, 0.2, 3.0e-4, 50.0); // same omg0, different m0/f0
+
+        let kept = reject_cross_correlations(vec![a, b, c]);
+        assert_eq!(kept.len(), 3, "distinct SVs must all be retained");
     }
 }
