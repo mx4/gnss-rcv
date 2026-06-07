@@ -45,6 +45,12 @@ pub struct GnssState {
     pub update_func: UpdateFunc,
 }
 
+impl Default for GnssState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GnssState {
     pub fn new() -> Self {
         Self {

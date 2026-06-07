@@ -1,8 +1,8 @@
 use crate::{
     channel::Channel,
-    constants::{P2_24, P2_27, P2_30, P2_50},
+    constants::{P2_24, P2_27, P2_30},
     ephemeris::Ephemeris,
-    util::{bits_equal, bits_opposed, getbits, getbits2, getbitu, hex_str, setbitu, xor_bits},
+    util::{bits_equal, bits_opposed, getbits, getbitu, hex_str, setbitu, xor_bits},
 };
 use colored::Colorize;
 use gnss_rs::sv::SV;
@@ -116,7 +116,7 @@ impl Channel {
                 self.nav.bit_sync = self.num_trk_samples - n;
                 log::info!("{}: SYNC: p={:.5} ssync={}", self.sv, p, self.nav.bit_sync);
             }
-        } else if (self.num_trk_samples - self.nav.bit_sync) % num == 0 {
+        } else if (self.num_trk_samples - self.nav.bit_sync).is_multiple_of(num) {
             let p = self.nav_mean_ip(num);
             if p.abs() >= THRESHOLD_LOST {
                 let sym: u8 = if p >= 0.0 { 1 } else { 0 };
@@ -199,13 +199,8 @@ impl Channel {
                 pub_state.iono_beta = [ion[4], ion[5], ion[6], ion[7]];
                 pub_state.ion_adj = true;
 
-                let mut utc: [f64; 4] = [0.0; 4];
-
-                utc[0] = getbits2(buf, 180, 24, 210, 8) as f64 * P2_30;
-                utc[1] = getbits(buf, 150, 24) as f64 * P2_50;
-                utc[2] = getbits(buf, 218, 8) as f64 * 2.0_f64.powi(12);
-                utc[3] = getbits(buf, 226, 8) as f64;
-
+                // Page 18 also carries UTC (A0/A1/tot/WNt) and leap seconds; we
+                // only flag that it was received, as nothing consumes them yet.
                 pub_state.utc_adj = true;
             }
         }

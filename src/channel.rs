@@ -651,7 +651,7 @@ impl Channel {
         assert_eq!(n, 10);
         self.trk.sum_corr_e += c_e.norm();
         self.trk.sum_corr_l += c_l.norm();
-        if self.num_trk_samples % n == 0 {
+        if self.num_trk_samples.is_multiple_of(n) {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
             let err_code = (e - l) / (e + l) / 2.0 * self.code_sec / self.code_len as f64;
@@ -665,7 +665,7 @@ impl Channel {
         self.trk.sum_corr_p += c_p.norm_sqr();
         self.trk.sum_corr_n += c_n.norm_sqr();
 
-        if self.num_trk_samples % (T_CN0 / self.code_sec) as usize == 0 {
+        if self.num_trk_samples.is_multiple_of((T_CN0 / self.code_sec) as usize) {
             if self.trk.sum_corr_n > 0.0 {
                 let cn0 =
                     10.0 * (self.trk.sum_corr_p / self.trk.sum_corr_n / self.code_sec).log10();
@@ -782,18 +782,6 @@ impl Channel {
 
     pub fn process_samples(&mut self, iq_vec: &[Complex64], ts_sec: f64) {
         self.ts_sec = ts_sec;
-
-        #[allow(clippy::overly_complex_bool_expr)]
-        if false && self.state != State::Idle {
-            log::info!(
-                "{}: processing: ts={:.3}: cn0={:.1} dopp={:5.0} code_off_sec={:2.6}",
-                self.sv,
-                self.ts_sec,
-                self.trk.cn0,
-                self.trk.doppler_hz,
-                self.trk.code_off_sec,
-            );
-        }
 
         match self.state {
             State::Acquisition => self.acquisition_process(iq_vec),

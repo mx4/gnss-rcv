@@ -118,7 +118,7 @@ pub fn getbitu2(buf: &[u8], p1: usize, l1: usize, p2: usize, l2: usize) -> u32 {
 pub fn getbits2(buf: &[u8], p1: usize, l1: usize, p2: usize, l2: usize) -> i32 {
     assert!(l1 + l2 <= 32);
     if getbitu(buf, p1, 1) != 0 {
-        ((getbits(buf, p1, l1) << l2) + getbitu(buf, p2, l2) as i32) as i32
+        (getbits(buf, p1, l1) << l2) + getbitu(buf, p2, l2) as i32
     } else {
         getbitu2(buf, p1, l1, p2, l2) as i32
     }

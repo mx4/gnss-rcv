@@ -343,10 +343,10 @@ impl PositionSolver {
         );
     }
 
-    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &Vec<RxEphemeris>) {
+    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) {
         {
             let mut glob_ephs = SOLVER_EPHEMERIS.lock().unwrap();
-            *glob_ephs = ephs.clone();
+            *glob_ephs = ephs.to_vec();
         }
 
         let mut pool = vec![];
