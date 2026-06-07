@@ -51,6 +51,7 @@ fn run(num_msec: usize) -> Option<Arc<Mutex<GnssState>>> {
         0,           // off_msec
         "L1CA",      // sig
         SIM_SATS,    // sats
+        false,       // plots
         exit_req,
         state.clone(),
     );

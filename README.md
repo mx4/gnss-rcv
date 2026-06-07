@@ -45,6 +45,7 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
 ### Other useful options
 - `--num-msec N` / `--off-msec N`: process only N ms, or start N ms into the file.
 - `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
+- `-p` / `--plots`: write per-SV diagnostic PNGs to `plots/` (off by default).
 - `-u`: open the UI; `-l <file>`: also write logs to a file.
 
 ## Download an existing IQ recording with GPS L1 signal

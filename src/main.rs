@@ -48,6 +48,8 @@ struct Options {
     sats: String,
     #[structopt(short = "-u", long, help = "use ui")]
     use_ui: bool,
+    #[structopt(short = "-p", long, help = "write diagnostic plots to plots/")]
+    plots: bool,
 }
 
 fn init_logging(log_file: &PathBuf) {
@@ -90,7 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     init_logging(&opt.log_file);
     init_ctrl_c(exit_req.clone());
-    plot_remove_old_graph();
+    if opt.plots {
+        plot_remove_old_graph();
+    }
 
     log::warn!(
         "gnss-rcv: sampling: {} fi: {} off_msec={} num_msec={}",
@@ -120,6 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opt.off_msec,
         &opt.sig,
         &opt.sats,
+        opt.plots,
         exit_req.clone(),
         Arc::new(Mutex::new(GnssState::new())),
     );

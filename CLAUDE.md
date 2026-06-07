@@ -40,6 +40,7 @@ to-end receiver still acquires, tracks, decodes, and solves.
   otherwise run an FFT search every cycle). gpssim's PRNs are in
   `resources/gpssim.txt`.
 - `--num-msec N` bounds the run; `RUST_LOG=warn` cuts log noise.
+- `-p` / `--plots` enables per-SV PNG diagnostics in `plots/` (off by default — skipping saves I/O during headless runs).
 - A position fix needs ~3 subframes decoded (~20–40 s of IQ). There is no
   exit-on-fix flag yet, so bound long files with `--num-msec`.
 

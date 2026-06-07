@@ -132,6 +132,7 @@ impl Receiver {
         off_msec: usize,
         sig: &str,
         sats: &str,
+        plots: bool,
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Self {
@@ -141,7 +142,7 @@ impl Receiver {
 
         for sv in sat_vec {
             let pub_state = state.clone();
-            channels.insert(sv, Channel::new(sig, sv, fs, fi, pub_state));
+            channels.insert(sv, Channel::new(sig, sv, fs, fi, plots, pub_state));
         }
 
         let iq_feed = get_iq_feed(

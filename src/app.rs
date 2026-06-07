@@ -66,6 +66,7 @@ fn async_receive(
         0,
         sig,
         "",
+        false, // plots
         needs_stop.clone(),
         pub_state,
     );

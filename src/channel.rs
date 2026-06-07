@@ -112,6 +112,7 @@ pub struct Acquisition {
 pub struct Channel {
     pub pub_state: Arc<Mutex<GnssState>>,
     pub sv: SV,
+    plots: bool,
     fc: f64, // carrier frequency
     fs: f64, // sampling frequency
     fi: f64, // intermediate frequency
@@ -145,7 +146,9 @@ pub struct Channel {
 
 impl Drop for Channel {
     fn drop(&mut self) {
-        self.update_all_plots(true);
+        if self.plots {
+            self.update_all_plots(true);
+        }
     }
 }
 
@@ -279,7 +282,7 @@ impl Channel {
         }
     }
 
-    pub fn new(sig: &str, sv: SV, fs: f64, fi: f64, pub_state: Arc<Mutex<GnssState>>) -> Self {
+    pub fn new(sig: &str, sv: SV, fs: f64, fi: f64, plots: bool, pub_state: Arc<Mutex<GnssState>>) -> Self {
         let code_buf = Code::gen_code(sig, sv.prn).unwrap();
         let code_sec = Code::get_code_period(sig);
         let code_len = Code::get_code_len(sig);
@@ -319,6 +322,7 @@ impl Channel {
         Self {
             pub_state: pub_state.clone(),
             sv,
+            plots,
             fft_planner,
             ts_sec: 0.0,
             fc: Code::get_code_freq(sig),
@@ -468,6 +472,9 @@ impl Channel {
     }
 
     fn update_all_plots(&mut self, force: bool) {
+        if !self.plots {
+            return;
+        }
         if !force && self.ts_sec - self.hist.last_plot_ts <= 2.0 {
             return;
         }
