@@ -34,12 +34,10 @@ impl Code {
             r1[0] = c1;
             r2[0] = c2;
         }
-        let mut j = L1CA_CODE_LEN - G2_DELAY[(prn - 1) as usize];
-        #[allow(clippy::needless_range_loop)]
-        for i in 0..L1CA_CODE_LEN {
-            let v = -g1[i] * g2[j % L1CA_CODE_LEN];
-            g.push(v);
-            j += 1;
+        let start = L1CA_CODE_LEN - G2_DELAY[(prn - 1) as usize];
+        for (i, &g1_i) in g1.iter().enumerate() {
+            let j = (start + i) % L1CA_CODE_LEN;
+            g.push(-g1_i * g2[j]);
         }
 
         g
@@ -103,8 +101,15 @@ mod tests {
 
     fn assert_gold_code(code: &[i8]) {
         assert_eq!(code.len(), L1CA_CODE_LEN);
-        assert!(code.iter().all(|&c| c == 1 || c == -1), "code must be bipolar");
-        assert_eq!(circ_corr(code, code, 0), L1CA_CODE_LEN as i32, "autocorr peak");
+        assert!(
+            code.iter().all(|&c| c == 1 || c == -1),
+            "code must be bipolar"
+        );
+        assert_eq!(
+            circ_corr(code, code, 0),
+            L1CA_CODE_LEN as i32,
+            "autocorr peak"
+        );
         for shift in 1..L1CA_CODE_LEN {
             let v = circ_corr(code, code, shift);
             assert!(

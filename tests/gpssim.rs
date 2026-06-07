@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use gnss_rcv::channel::State;
-use gnss_rcv::receiver::Receiver;
+use gnss_rcv::receiver::{Receiver, ReceiverConfig};
 use gnss_rcv::recording::IQFileType;
 use gnss_rcv::state::GnssState;
 
@@ -51,23 +51,14 @@ fn run(
 
     let state = Arc::new(Mutex::new(GnssState::new()));
     let exit_req = Arc::new(AtomicBool::new(false));
-    let mut rx = Receiver::new(
-        false, // use_device
-        "",    // hostname (rtl_tcp)
-        Path::new(recording),
-        &IQFileType::TypePairInt16,
-        2_046_000.0, // fs
-        0.0,         // fi
-        0,           // off_msec
-        "L1CA",      // sig
-        sats,
-        false, // sbas
-        false, // plots
+    let cfg = ReceiverConfig {
+        file: Path::new(recording).to_path_buf(),
+        iq_file_type: IQFileType::TypePairInt16,
+        sats: sats.to_string(),
         exit_on_fix,
-        exit_req,
-        state.clone(),
-    )
-    .expect("receiver");
+        ..Default::default()
+    };
+    let mut rx = Receiver::new(&cfg, exit_req, state.clone()).expect("receiver");
     rx.run_loop(num_msec);
     Some(state)
 }

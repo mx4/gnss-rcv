@@ -287,7 +287,14 @@ impl Channel {
         }
     }
 
-    pub fn new(sig: &str, sv: SV, fs: f64, fi: f64, plots: bool, pub_state: Arc<Mutex<GnssState>>) -> Self {
+    pub fn new(
+        sig: &str,
+        sv: SV,
+        fs: f64,
+        fi: f64,
+        plots: bool,
+        pub_state: Arc<Mutex<GnssState>>,
+    ) -> Self {
         let code_buf = Code::gen_code(sig, sv.prn).unwrap();
         let code_sec = Code::get_code_period(sig);
         let code_len = Code::get_code_len(sig);
@@ -697,7 +704,10 @@ impl Channel {
         self.trk.sum_corr_p += c_p.norm_sqr();
         self.trk.sum_corr_n += c_n.norm_sqr();
 
-        if self.num_trk_samples.is_multiple_of((T_CN0 / self.code_sec) as usize) {
+        if self
+            .num_trk_samples
+            .is_multiple_of((T_CN0 / self.code_sec) as usize)
+        {
             if self.trk.sum_corr_n > 0.0 {
                 let cn0 =
                     10.0 * (self.trk.sum_corr_p / self.trk.sum_corr_n / self.code_sec).log10();

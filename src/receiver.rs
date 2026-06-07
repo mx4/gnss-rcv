@@ -4,7 +4,7 @@ use gnss_rs::sv::SV;
 use rayon::prelude::*;
 use rustfft::num_complex::Complex64;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +26,70 @@ pub trait IQReader {
         off_samples: usize,
         num_samples: usize,
     ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>>;
+}
+
+/// In-memory IQ source: serves slices of a pre-loaded sample buffer and reports
+/// "end of file" past the end, matching the `IQRecording` contract. Lets tests
+/// and synthetic-signal harnesses drive `Receiver`/`Channel` without a file.
+pub struct MockIQReader {
+    samples: Vec<Complex64>,
+}
+
+impl MockIQReader {
+    pub fn new(samples: Vec<Complex64>) -> Self {
+        Self { samples }
+    }
+}
+
+impl IQReader for MockIQReader {
+    fn get_iq_data(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+        let end = off_samples + num_samples;
+        if end > self.samples.len() {
+            return Err("end of file".into());
+        }
+        Ok(self.samples[off_samples..end].to_vec())
+    }
+}
+
+/// All the value configuration `Receiver::new` needs, in one place. Implements
+/// `Default` (file-less, 2.046 MHz / zero-IF L1CA over every GPS PRN), so a
+/// caller sets only what differs instead of passing a dozen positional args.
+pub struct ReceiverConfig {
+    pub use_device: bool,
+    pub hostname: String,
+    pub file: PathBuf,
+    pub iq_file_type: IQFileType,
+    pub fs: f64,
+    pub fi: f64,
+    pub off_msec: usize,
+    pub sig: String,
+    pub sats: String,
+    pub sbas: bool,
+    pub plots: bool,
+    pub exit_on_fix: bool,
+}
+
+impl Default for ReceiverConfig {
+    fn default() -> Self {
+        Self {
+            use_device: false,
+            hostname: String::new(),
+            file: PathBuf::new(),
+            iq_file_type: IQFileType::TypePairFloat32,
+            fs: 2_046_000.0,
+            fi: 0.0,
+            off_msec: 0,
+            sig: "L1CA".to_string(),
+            sats: String::new(),
+            sbas: false,
+            plots: false,
+            exit_on_fix: false,
+        }
+    }
 }
 
 pub struct Receiver {
@@ -129,54 +193,54 @@ fn get_iq_feed(
 }
 
 impl Receiver {
-    #[allow(clippy::too_many_arguments)]
+    /// Usual entry point: open the file/device/tcp IQ source described by `cfg`.
     pub fn new(
-        use_device: bool,
-        hostname: &str,
-        file: &Path,
-        iq_file_type: &IQFileType,
-        fs: f64,
-        fi: f64,
-        off_msec: usize,
-        sig: &str,
-        sats: &str,
-        sbas: bool,
-        plots: bool,
-        exit_on_fix: bool,
+        cfg: &ReceiverConfig,
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let period_sp = (PERIOD_RCV * fs) as usize;
-        let mut channels = HashMap::<SV, Channel>::new();
-        let sat_vec = get_sat_list(sats, sbas);
-
-        for sv in sat_vec {
-            let pub_state = state.clone();
-            channels.insert(sv, Channel::new(sig, sv, fs, fi, plots, pub_state));
-        }
-
         let iq_feed = get_iq_feed(
-            use_device,
-            hostname,
-            sig,
-            fs,
-            file,
-            iq_file_type,
+            cfg.use_device,
+            &cfg.hostname,
+            &cfg.sig,
+            cfg.fs,
+            &cfg.file,
+            &cfg.iq_file_type,
             exit_req.clone(),
         )?;
+        Ok(Self::with_feed(iq_feed, cfg, exit_req, state))
+    }
 
-        Ok(Self {
+    /// Build a receiver around an already-constructed IQ source. Used by tests
+    /// (with `MockIQReader`) and any caller feeding samples from a non-file
+    /// source; `new` wraps this with the file/device/tcp source.
+    pub fn with_feed(
+        iq_feed: Box<dyn IQReader>,
+        cfg: &ReceiverConfig,
+        exit_req: Arc<AtomicBool>,
+        state: Arc<Mutex<GnssState>>,
+    ) -> Self {
+        let period_sp = (PERIOD_RCV * cfg.fs) as usize;
+        let mut channels = HashMap::<SV, Channel>::new();
+        for sv in get_sat_list(&cfg.sats, cfg.sbas) {
+            channels.insert(
+                sv,
+                Channel::new(&cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
+            );
+        }
+
+        Self {
             iq_feed,
             period_sp,
-            off_samples: off_msec * period_sp,
+            off_samples: cfg.off_msec * period_sp,
             cached_iq_vec: Vec::<Complex64>::new(),
             cached_ts_sec_tail: 0.0,
             channels,
             solver: PositionSolver::new(state),
             last_fix_sec: 0.0,
-            exit_on_fix,
-            exit_req: exit_req.clone(),
-        })
+            exit_on_fix: cfg.exit_on_fix,
+            exit_req,
+        }
     }
 
     fn fetch_samples_msec(&mut self) -> Result<(Vec<Complex64>, f64), Box<dyn std::error::Error>> {
@@ -219,9 +283,7 @@ impl Receiver {
             .values()
             .filter(|&ch| ch.is_state_tracking())
             .filter(|&ch| ch.is_ephemeris_complete())
-            .filter(|&ch| {
-                ch.nav.eph.tx_anchored && ch.ts_sec - ch.nav.eph.tx_anchor_ts_sec > 3.0
-            })
+            .filter(|&ch| ch.nav.eph.tx_anchored && ch.ts_sec - ch.nav.eph.tx_anchor_ts_sec > 3.0)
             .map(|ch| ch.nav.eph)
             .collect();
 
@@ -279,6 +341,92 @@ impl Receiver {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mock_reader_serves_slices_and_eof() {
+        let samples: Vec<Complex64> = (0..100).map(|i| Complex64::new(i as f64, 0.0)).collect();
+        let mut r = MockIQReader::new(samples);
+
+        let a = r.get_iq_data(0, 10).unwrap();
+        assert_eq!(a.len(), 10);
+        assert_eq!(a[0], Complex64::new(0.0, 0.0));
+
+        let b = r.get_iq_data(10, 10).unwrap();
+        assert_eq!(b[0], Complex64::new(10.0, 0.0));
+
+        assert!(
+            r.get_iq_data(95, 10).is_err(),
+            "reading past the end is EOF"
+        );
+    }
+
+    // Synthesize `num_msec` of a clean (noiseless) L1CA signal for `prn`: the
+    // upsampled PRN code (rotated by `code_phase_chips`) modulated onto a carrier
+    // at the intermediate frequency, with the sign convention the receiver's
+    // de-rotation cancels (iq * replica = bare code). Acquisition locks on the
+    // first attempt. A non-zero code phase matches a real SV (never at exactly
+    // phase 0, which would hit a first-tracking-step buffer edge case).
+    fn synth_l1ca(
+        prn: u8,
+        fs: f64,
+        fi: f64,
+        code_phase_chips: usize,
+        num_msec: usize,
+    ) -> Vec<Complex64> {
+        use crate::code::Code;
+        const PI: f64 = std::f64::consts::PI;
+
+        let code = Code::gen_code("L1CA", prn).unwrap();
+        let code_len = code.len();
+        let code_sp = (fs * 1e-3) as usize;
+        let step = Complex64::from_polar(1.0, 2.0 * PI * fi / fs);
+
+        let mut carrier = Complex64::new(1.0, 0.0);
+        let mut sig = Vec::with_capacity(code_sp * num_msec);
+        for n in 0..code_sp * num_msec {
+            let chip = ((n % code_sp) * code_len / code_sp + code_phase_chips) % code_len;
+            sig.push(carrier * code[chip] as f64);
+            carrier *= step;
+        }
+        sig
+    }
+
+    // End-to-end DSP unit test with no recording or network: a synthetic clean
+    // signal must drive a channel from Acquisition into Tracking. This is the
+    // hermetic regression the file-based integration tests can't be in CI.
+    #[test]
+    fn synthetic_signal_acquires_and_tracks() {
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let prn = 5u8;
+        let sig = synth_l1ca(prn, fs, fi, 200, 60); // 60 ms: enough to acquire + track
+
+        let state = Arc::new(Mutex::new(GnssState::new()));
+        let cfg = ReceiverConfig {
+            sats: prn.to_string(),
+            fs,
+            fi,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(MockIQReader::new(sig)),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            state,
+        );
+        rx.run_loop(0); // until the mock feed is exhausted
+
+        let sv = SV::new(Constellation::GPS, prn);
+        let ch = &rx.channels[&sv];
+        assert!(
+            ch.is_state_tracking(),
+            "synthetic clean signal for {sv} should reach Tracking"
+        );
+        assert!(
+            ch.get_cn0() > 45.0,
+            "a noiseless signal should track at very high C/N0, got {:.1}",
+            ch.get_cn0()
+        );
+    }
+
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
         let mut e = RxEphemeris::new(SV::new(Constellation::GPS, prn));
         e.m0 = m0;
@@ -298,9 +446,19 @@ mod tests {
 
         let kept = reject_cross_correlations(vec![xcorr, strong, other]);
 
-        assert_eq!(kept.len(), 2, "the cross-correlation duplicate must be dropped");
-        assert!(kept.iter().any(|e| e.sv.prn == 15), "the strong (true) SV is kept");
-        assert!(kept.iter().any(|e| e.sv.prn == 24), "the distinct SV is kept");
+        assert_eq!(
+            kept.len(),
+            2,
+            "the cross-correlation duplicate must be dropped"
+        );
+        assert!(
+            kept.iter().any(|e| e.sv.prn == 15),
+            "the strong (true) SV is kept"
+        );
+        assert!(
+            kept.iter().any(|e| e.sv.prn == 24),
+            "the distinct SV is kept"
+        );
         assert!(
             !kept.iter().any(|e| e.sv.prn == 16),
             "the weaker cross-correlation lock is dropped"

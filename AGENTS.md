@@ -5,12 +5,22 @@ device), then does acquisition → tracking → ephemeris decode → position fi
 
 ## Testing
 
-- **`cargo test --release`** — unit tests + the fast integration test
-  `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
+CI (Linux + macOS) gates every push/PR on three checks; keep all green locally
+before pushing:
+- **`cargo fmt --all -- --check`**
+- **`cargo clippy --release --all-targets -- -D warnings`**
+- **`cargo test --release`**
+
+- **`cargo test --release`** — unit tests (incl. `synthetic_signal_acquires_and_tracks`,
+  a hermetic acquisition→tracking test that synthesizes its own signal and needs
+  no recording) + the fast integration test `acquires_and_tracks_gpssim` (~0.6 s).
+  Run this after any change.
 - **`cargo test --release -- --ignored`** — also runs the heavy
   `computes_position_fix_gpssim` (~3 s; pipeline until the first fix, via
   `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below).
-- **`cargo clippy --release --tests`** — must be clean; the project keeps it so.
+- Unit-testing the receiver without a recording: `MockIQReader`
+  ([receiver.rs](src/receiver.rs)) feeds a `Vec<Complex64>`; build a `Receiver`
+  with `Receiver::with_feed(...)`.
 
 The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 **full pipeline** against a gps-sdr-sim recording at a known location:
@@ -70,22 +80,33 @@ guesses. Tackle roughly top-to-bottom.
   every code period (~1 kHz/SV) — a full-buffer memmove per tick (`corr_p` is
   `Complex64`, ~320 KB). Now O(1) `pop_front`.
 - ~~`-x`/`--exit-on-fix`~~, ~~`-p`/`--plots` (opt-in plotting)~~.
+- ~~**CI gate**~~: Linux/macOS CI now runs fmt + clippy (`-D warnings`) + test,
+  not just `cargo build`.
+- ~~**Mock `IQReader`** + hermetic DSP test~~: `MockIQReader` + a synthetic-signal
+  helper drive a channel acquisition→tracking with no recording
+  (`synthetic_signal_acquires_and_tracks`).
+- ~~**`ReceiverConfig` struct**~~: `Receiver::new(&ReceiverConfig, ...)` (+
+  `with_feed` for injected sources); callers build a struct with
+  `..Default::default()` instead of a dozen positional args.
+- ~~SBAS PRNs in `get_sat_list`~~: constellation-aware tagging (PRN ≥ 120 → SBAS)
+  + a `--sbas` sweep, replacing the dead `use_sbas` flag. (Detection only — no
+  SBAS *decode* or ranging; not seen above the noise floor in any recording.)
 
 **High value, low risk**
-- **Mock `IQReader`**: the `IQReader` trait (`receiver.rs`) has no test impl, so
-  `Channel`/`Receiver` logic can't be unit-tested without a real recording. A
-  `MockIQReader { samples: Vec<Complex64> }` unblocks everything below.
-- **Unit tests for the state machine and nav decode**: with a mock reader, cover
-  Acquisition→Tracking→Idle transitions and LNAV subframe decoding (use
-  known-good subframes; no IQ needed). Today only cross-correlation rejection is
-  unit-tested.
-- **`ReceiverConfig` struct**: `Receiver::new` takes 13 positional args; callers
-  pass runs of bare `false, false` ([app.rs](src/app.rs)). A config struct makes
-  callsites self-documenting and stops breaking them on every new option.
+- **Nav-decode unit tests**: the mock reader + synthetic signal now cover
+  Acquisition→Tracking; still untested is LNAV subframe decoding — feed known-good
+  subframes through [navigation.rs](src/navigation.rs) (no IQ needed) and assert
+  the parsed ephemeris fields.
 - **`is_ephemeris_complete` is under-specified** ([channel.rs](src/channel.rs)):
   checks 5 fields; missing keplerian/clock terms (`ecc`, `f0`, `omg_dot`) can let
   a half-decoded ephemeris reach the solver. Move to `RxEphemeris::is_valid()`
   and table-test it.
+- **`get_code_and_carrier_phase` unwraps an empty `corr_p`**
+  ([channel.rs](src/channel.rs)): it runs at the *start* of `tracking_process`,
+  before the first `push_back`, and calls `corr_p.back().unwrap()` / `pop_back()`
+  when `code_off_sec` crosses a period boundary. A code phase landing within one
+  carrier-aiding step of exactly 0 panics on the first tracking step (found via
+  the synthetic test, which sidesteps it with a non-zero code phase). Guard it.
 
 **Real but lower priority**
 - **Per-correlation allocations in `calc_correlation`** ([util.rs](src/util.rs)):
@@ -102,14 +123,22 @@ guesses. Tackle roughly top-to-bottom.
   ([navigation.rs](src/navigation.rs)): same anti-pattern as the old `History`,
   but at ~50 Hz it's negligible. Fix for consistency, not speed.
 
-**Only if multi-constellation (Galileo/GLONASS) becomes a real goal**
-These are correct refactors but pure scaffolding until there's a second
-constellation — adding them now is speculative generality.
+**Multi-constellation**
+- **QZSS L1 C/A — cheap first step**: same 1023 Gold codes (PRN 193-202 live in
+  the same extended table SBAS uses), same 50 bps LNAV and ephemeris format, and
+  `gnss-rtk` supports QZSS — so it decodes *and solves* through the existing GPS
+  path. Add the PRN range to `get_sat_list` (tag `Constellation::QZSS`) and
+  confirm the codes with the Gold-code test. This validates the multi-
+  constellation seams cheaply before the hard signals.
+
+The rest are correct refactors but mostly scaffolding until there's a second
+*solving* constellation; adding them earlier is speculative generality:
 - Replace the string signal id (`"L1CA"`, matched in `code.rs`/`channel.rs`) with
   a `SignalType` enum carrying frequency/code params.
 - Extract navigation decoding (~440 lines of `impl Channel` in
   [navigation.rs](src/navigation.rs)) behind a `NavigationDecoder` trait.
-- Make `get_sat_list` ([receiver.rs](src/receiver.rs)) constellation-aware
-  instead of hardcoding GPS PRN 1–32 (and the dead `use_sbas = false`).
+- Galileo E1 needs a BOC(1,1)-aware correlator, embedded 4092-chip memory codes,
+  and an I/NAV decoder (FEC + interleaving); GLONASS L1 is FDMA (per-SV carrier),
+  which breaks the single-IF assumption end-to-end. Both rank well below QZSS.
 - Trait-based ionosphere model (Klobuchar / NeQuick / none) in
   [solver.rs](src/solver.rs).

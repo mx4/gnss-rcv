@@ -11,7 +11,7 @@ use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 
 use crate::channel::State;
-use crate::receiver::Receiver;
+use crate::receiver::{Receiver, ReceiverConfig};
 use crate::recording::IQFileType;
 use crate::state::GnssState;
 
@@ -56,22 +56,13 @@ fn async_receive(
 
     active.store(true, Ordering::SeqCst);
 
-    let receiver = Receiver::new(
-        false,
-        "",
-        &file,
-        &iq_file_type,
-        2046000.0,
-        0.0,
-        0,
-        sig,
-        "",
-        false, // sbas
-        false, // plots
-        false, // exit_on_fix
-        needs_stop.clone(),
-        pub_state,
-    );
+    let config = ReceiverConfig {
+        file,
+        iq_file_type,
+        sig: sig.to_string(),
+        ..Default::default()
+    };
+    let receiver = Receiver::new(&config, needs_stop.clone(), pub_state);
 
     match receiver {
         Ok(mut receiver) => {
@@ -79,7 +70,7 @@ fn async_receive(
             receiver.run_loop(0);
         }
         // A bad path or unavailable source must not crash the UI; log and stop.
-        Err(e) => log::error!("cannot start receiver for {}: {e}", file.display()),
+        Err(e) => log::error!("cannot start receiver for {}: {e}", config.file.display()),
     }
 
     active.store(false, Ordering::SeqCst);

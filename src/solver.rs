@@ -2,9 +2,9 @@ use colored::Colorize;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{
     AbsoluteTime, Almanac, BiasRuntime, Candidate, Carrier, ClockProfile, Config, Duration,
-    EARTH_J2000, EnvironmentalBias, Epoch, Ephemeris, EphemerisSource, Frame, Method,
-    Observation, Orbit, OrbitSource, Rc, SatelliteClockCorrection, SpacebornBias, Solver,
-    UserParameters, UserProfile, Vector3,
+    EARTH_J2000, EnvironmentalBias, Ephemeris, EphemerisSource, Epoch, Frame, Method, Observation,
+    Orbit, OrbitSource, Rc, SatelliteClockCorrection, Solver, SpacebornBias, UserParameters,
+    UserProfile, Vector3,
 };
 use map_3d::{Ellipsoid, ecef2geodetic, geodetic2ecef};
 use once_cell::sync::Lazy;
@@ -315,9 +315,7 @@ impl PositionSolver {
         let apriori_ecef = Vector3::new(x, y, z);
         let cfg = make_config();
         let almanac = Almanac::until_2035().expect("Almanac");
-        let earth_frame = almanac
-            .frame_from_uid(EARTH_J2000)
-            .expect("earth frame");
+        let earth_frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
         let solver = make_solver(&almanac, earth_frame, &cfg, None);
 
         Self {
@@ -388,10 +386,11 @@ impl PositionSolver {
             (r.tow as f64 + (now_gpst - r.tow_gpst).to_seconds()).rem_euclid(86400.0)
         };
 
-        let truth_ecef: Option<Vector3<f64>> = std::env::var("GNSS_TRUTH_ECEF").ok().and_then(|s| {
-            let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-            (v.len() == 3).then(|| Vector3::new(v[0], v[1], v[2]))
-        });
+        let truth_ecef: Option<Vector3<f64>> =
+            std::env::var("GNSS_TRUTH_ECEF").ok().and_then(|s| {
+                let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                (v.len() == 3).then(|| Vector3::new(v[0], v[1], v[2]))
+            });
 
         let params = UserParameters::new(UserProfile::Static, ClockProfile::Quartz);
 
@@ -432,10 +431,9 @@ impl PositionSolver {
                 let (cw, sw) = (we.cos(), we.sin());
                 let s = compute_sv_position_ecef(eph, *t_tx);
                 let (sx, sy, sz) = (cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2);
-                let geom = ((sx - truth[0]).powi(2)
-                    + (sy - truth[1]).powi(2)
-                    + (sz - truth[2]).powi(2))
-                .sqrt();
+                let geom =
+                    ((sx - truth[0]).powi(2) + (sy - truth[1]).powi(2) + (sz - truth[2]).powi(2))
+                        .sqrt();
                 let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m;
                 let clk_m = clock_corr * SPEED_OF_LIGHT;
                 // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.

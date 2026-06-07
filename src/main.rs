@@ -13,7 +13,7 @@ use structopt::StructOpt;
 
 use gnss_rcv::code::Code;
 use gnss_rcv::plots::plot_remove_old_graph;
-use gnss_rcv::receiver::Receiver;
+use gnss_rcv::receiver::{Receiver, ReceiverConfig};
 use gnss_rcv::recording::IQFileType;
 use gnss_rcv::state::GnssState;
 
@@ -52,7 +52,11 @@ struct Options {
     use_ui: bool,
     #[structopt(short = "-p", long, help = "write diagnostic plots to plots/")]
     plots: bool,
-    #[structopt(short = "-x", long, help = "stop as soon as the first position fix is computed")]
+    #[structopt(
+        short = "-x",
+        long,
+        help = "stop as soon as the first position fix is computed"
+    )]
     exit_on_fix: bool,
 }
 
@@ -120,19 +124,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    let config = ReceiverConfig {
+        use_device: opt.use_device,
+        hostname: opt.hostname.clone(),
+        file: opt.file.clone(),
+        iq_file_type: opt.iq_file_type.clone(),
+        fs: opt.fs,
+        fi: opt.fi,
+        off_msec: opt.off_msec,
+        sig: opt.sig.clone(),
+        sats: opt.sats.clone(),
+        sbas: opt.sbas,
+        plots: opt.plots,
+        exit_on_fix: opt.exit_on_fix,
+    };
     let mut receiver = Receiver::new(
-        opt.use_device,
-        &opt.hostname,
-        &opt.file,
-        &opt.iq_file_type,
-        opt.fs,
-        opt.fi,
-        opt.off_msec,
-        &opt.sig,
-        &opt.sats,
-        opt.sbas,
-        opt.plots,
-        opt.exit_on_fix,
+        &config,
         exit_req.clone(),
         Arc::new(Mutex::new(GnssState::new())),
     )?;
