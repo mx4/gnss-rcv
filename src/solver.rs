@@ -495,7 +495,10 @@ impl PositionSolver {
 
                 log::warn!(
                     "{}",
-                    format!("XXX: lat/lon: {:.4},{:.4} h={:.1}", lat, lon, height).red(),
+                    format!(
+                        "position fix: {lat:.6},{lon:.6} h={height:.1}km  https://maps.google.com/?ll={lat},{lon}"
+                    )
+                    .green()
                 );
             }
         }

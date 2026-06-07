@@ -21,13 +21,14 @@ use gnss_rcv::state::GnssState;
 
 const GPSSIM: &str = "resources/gpssim_2xi16";
 
-// The static location gps-sdr-sim was told to simulate.
-const TRUE_LAT: f64 = 35.681298;
-const TRUE_LON: f64 = 139.766247;
+// The static location gps-sdr-sim was told to simulate: Geneva (Jet d'Eau),
+// 2026/04/28 17:00 -- the default scenario of resources/gen_gpssim.sh.
+const TRUE_LAT: f64 = 46.2075;
+const TRUE_LON: f64 = 6.1557;
 
-// PRNs actually present in the sim (see resources/gpssim.txt). Restricting the
+// PRNs present in that scenario (see resources/gpssim_gen.txt). Restricting the
 // search to these keeps the tests fast and avoids cross-correlation noise.
-const SIM_SATS: &str = "5,10,12,13,15,18,23,24,25,28,32";
+const SIM_SATS: &str = "1,2,3,4,6,9,17,19,28,31";
 
 // End-to-end generated recording + the meta the generator script writes.
 const GEN_SCRIPT: &str = "resources/gen_gpssim.sh";
@@ -103,12 +104,12 @@ fn acquires_and_tracks_gpssim() {
 
 /// Full pipeline through a position fix on the pre-existing recording. Needs
 /// ~40s of signal (three subframes to decode an ephemeris, then >=4 SVs to
-/// solve) but stops at the first fix via exit_on_fix, so it is `#[ignore]`'d;
+/// solve); runs until the first fix (exit_on_fix) or EOF, so it is `#[ignore]`'d;
 /// run it explicitly with `cargo test -- --ignored`.
 #[test]
 #[ignore = "slow: runs the pipeline until the first position fix"]
 fn computes_position_fix_gpssim() {
-    let Some(state) = run(GPSSIM, SIM_SATS, 40_000, true) else {
+    let Some(state) = run(GPSSIM, SIM_SATS, 0, true) else {
         return;
     };
     assert_fix_near(&state, TRUE_LAT, TRUE_LON);

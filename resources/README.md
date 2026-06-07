@@ -37,35 +37,34 @@ that day, runs gps-sdr-sim, and writes `gpssim_gen_2xi16` plus a
   days may not have a brdc posted yet.
 - Drives the `generates_and_solves_gpssim` test in [../tests/gpssim.rs](../tests/gpssim.rs).
 
-## gpssim.bin
+## gpssim.bin (manual gps-sdr-sim example)
 cf https://github.com/osqzss/gps-sdr-sim
-result of:
- ./gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000
+result of (Geneva, Jet d'Eau -- the fixture's default scenario):
+ ./gps-sdr-sim -b 16 -d 45 -t 2026/04/28,17:00:00 -l 46.2075,6.1557,375 -e brdc1180.26n -s 2046000
 file-type: 2xi16
-This is the `gpssim_2xi16` fixture the other two gpssim tests use; the command
-above is what `gen_gpssim.sh` automates.
+A worked example of invoking gps-sdr-sim by hand (the steps `gen_gpssim.sh`
+automates). The `gpssim_2xi16` fixture the fixture-based tests read is produced
+by `gen_gpssim.sh` (Geneva default); generate it with `./resources/gen_gpssim.sh`.
 
 ```
-./gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000
+./gps-sdr-sim -b 16 -d 45 -t 2026/04/28,17:00:00 -l 46.2075,6.1557,375 -e brdc1180.26n -s 2046000
 Using static location mode.
-xyz =  -3959617.5,   3350136.6,   3699531.5
-llh =   35.681298,  139.766247,        10.0
-Start time = 2022/01/01,01:02:03 (2190:522123)
-Duration = 60.0 [sec]
-05  146.8  12.9  24517023.8   9.6
-10  315.8  31.4  22789584.0   4.9
-12  157.5  30.8  22679311.2   6.1
-13   79.9  19.7  23736998.7   7.6
-15   77.0  50.6  21203005.0   4.1
-18  230.4  24.7  23191867.9   6.2
-23  298.9  65.8  20585659.2   3.3
-24  356.1  79.4  19958939.4   3.2
-25  186.1   9.4  24769194.9  10.1
-28   42.8  14.7  24631379.7   7.9
-32  285.5   2.0  25712738.2   6.4
-Time into run = 60.0
+xyz =   4396463.3,    474169.7,   4581510.0
+llh =   46.207500,    6.155700,       375.0
+Start time = 2026/04/28,17:00:00 (2416:234000)
+Duration = 45.0 [sec]
+01  134.4  40.9  21981064.0   9.1
+02  140.1  12.4  24692095.6  16.8
+03   54.8  63.7  20555397.7   6.6
+04  180.0  69.4  20591518.5   6.6
+06  309.5  30.7  22779445.7  10.5
+09  212.4  38.2  22161552.4   9.9
+17  244.7  39.5  22311933.7   9.5
+19  283.8  37.9  21943836.7   9.5
+28   41.5  15.8  24129434.2  12.9
+31   69.2  26.3  22829955.5  11.1
 Done!
-Process time = 7.5 [sec]
+Process time = 1.5 [sec]
 ```
 
 ## GPS-L1-2022-03-27.sigmf-data

@@ -72,7 +72,9 @@ fn init_logging(log_file: &PathBuf) {
             })
             .init();
     } else {
-        env_logger::Builder::from_default_env()
+        // Default to warn so a plain run still shows tracking status and the
+        // position fix; RUST_LOG overrides it (e.g. RUST_LOG=info for detail).
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
             .format_target(false)
             .format_module_path(false)
             .format_timestamp_millis()
