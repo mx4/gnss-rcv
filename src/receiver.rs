@@ -427,6 +427,32 @@ mod tests {
         );
     }
 
+    // Regression: a code phase of exactly 0 makes the first tracking step wrap
+    // `code_off_sec` below zero while corr_p is still empty. That used to panic
+    // (`corr_p.back().unwrap()` in get_code_and_carrier_phase); it must now track.
+    #[test]
+    fn tracks_at_code_phase_zero_without_panicking() {
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let prn = 5u8;
+        let sig = synth_l1ca(prn, fs, fi, 0, 60);
+        let cfg = ReceiverConfig {
+            sats: prn.to_string(),
+            fs,
+            fi,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(MockIQReader::new(sig)),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        );
+        rx.run_loop(0);
+
+        let sv = SV::new(Constellation::GPS, prn);
+        assert!(rx.channels[&sv].is_state_tracking());
+    }
+
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
         let mut e = RxEphemeris::new(SV::new(Constellation::GPS, prn));
         e.m0 = m0;

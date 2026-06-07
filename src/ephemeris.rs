@@ -66,6 +66,23 @@ impl Ephemeris {
             ..Default::default()
         }
     }
+    /// True once subframes 1-3 have decoded into a physically plausible
+    /// ephemeris. The position solver should only consume valid ones; this
+    /// checks at least one field set by each subframe (so a half-decoded
+    /// ephemeris can't slip through) plus an eccentricity sanity bound to reject
+    /// a corrupt subframe-2. Constellation-agnostic on orbit size/inclination so
+    /// it stays correct if QZSS/GEO ephemerides are added later.
+    pub fn is_valid(&self) -> bool {
+        self.ts_sec != 0.0           // first subframe was timestamped
+            && self.week != 0        // subframe 1
+            && self.toc != 0         // subframe 1
+            && self.toe != 0         // subframe 2
+            && self.a >= 20_000_000.0 // subframe 2 (sqrt_a decoded)
+            && self.ecc < 0.5        // subframe 2 sanity (real orbits: ecc << 1)
+            && self.i0 != 0.0        // subframe 3
+            && self.omg_dot != 0.0 // subframe 3
+    }
+
     pub fn nav_decode_lnav_subframe1(&mut self, buf: &[u8], sv: SV) {
         self.tow = getbitu(buf, 30, 17) * 6;
         // GPS Time started on Jan 6, 1980
@@ -162,5 +179,118 @@ impl Ephemeris {
             self.i0,
             self.i_dot
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnss_rs::constellation::Constellation;
+
+    // A fully-decoded GPS ephemeris (representative values: a ~ 26560 km,
+    // i0 ~ 55 deg, small eccentricity).
+    fn valid_eph() -> Ephemeris {
+        let mut e = Ephemeris::new(SV::new(Constellation::GPS, 1));
+        e.ts_sec = 1.0;
+        e.week = 2300;
+        e.toc = 100 * 16;
+        e.toe = 450 * 16;
+        e.a = 26_560_000.0;
+        e.ecc = 0.012;
+        e.i0 = 0.96;
+        e.omg_dot = -8.0e-9;
+        e
+    }
+
+    #[test]
+    fn fully_decoded_ephemeris_is_valid() {
+        assert!(valid_eph().is_valid());
+    }
+
+    #[test]
+    fn default_ephemeris_is_invalid() {
+        assert!(!Ephemeris::default().is_valid());
+    }
+
+    #[test]
+    fn missing_any_subframe_field_is_invalid() {
+        // Zeroing any single field a subframe sets must invalidate the ephemeris.
+        let check = |zero: fn(&mut Ephemeris), name: &str| {
+            let mut e = valid_eph();
+            zero(&mut e);
+            assert!(!e.is_valid(), "{name} missing should be invalid");
+        };
+        check(|e| e.ts_sec = 0.0, "untimestamped");
+        check(|e| e.week = 0, "sf1 week");
+        check(|e| e.toc = 0, "sf1 toc");
+        check(|e| e.toe = 0, "sf2 toe");
+        check(|e| e.a = 0.0, "sf2 a");
+        check(|e| e.i0 = 0.0, "sf3 i0");
+        check(|e| e.omg_dot = 0.0, "sf3 omg_dot");
+    }
+
+    #[test]
+    fn corrupt_eccentricity_is_invalid() {
+        let mut e = valid_eph();
+        e.ecc = 0.9; // a garbled subframe-2 can decode to ecc ~ 1
+        assert!(!e.is_valid());
+    }
+
+    fn hex_to_bytes(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    // Real parity-stripped LNAV subframes captured from G01 in the gpssim_2xi16
+    // fixture (the `LNAV: id=N -- <hex>` log lines). Decoding them must recover a
+    // physically plausible GPS ephemeris. This locks the bit-field offsets in
+    // nav_decode_lnav_subframe{1,2,3}; a regression there would fail the ranges.
+    const G01_SF1: &str =
+        "8b00000130bc1805c10020000000000000000000000000000ec0174e808000ffb20096b22400";
+    const G01_SF2: &str =
+        "8b00000130b42405df43d00cc12000adc63303d76c000e2306f0048c28400cef4100e8080c00";
+    const G01_SF3: &str =
+        "8b00000130b63c0fff05603c788700fff727000a987401a420701c6e3280ffa6fb0177be6400";
+
+    #[test]
+    fn decodes_real_lnav_subframes_to_a_valid_ephemeris() {
+        let pi = std::f64::consts::PI;
+        let sv = SV::new(Constellation::GPS, 1);
+        let mut e = Ephemeris::new(sv);
+        // The receiver sets ts_sec when it timestamps the first subframe; mimic.
+        e.ts_sec = 1.0;
+
+        e.nav_decode_lnav_subframe1(&hex_to_bytes(G01_SF1), sv);
+        e.nav_decode_lnav_subframe2(&hex_to_bytes(G01_SF2), sv);
+        e.nav_decode_lnav_subframe3(&hex_to_bytes(G01_SF3), sv);
+
+        // Subframe 1 (clock / week).
+        assert!(
+            (2048..3000).contains(&e.week),
+            "GPS week {} implausible",
+            e.week
+        );
+        assert_ne!(e.toc, 0);
+        assert!(e.f0.abs() < 1.0e-2, "clock bias {} out of range", e.f0);
+
+        // Subframe 2 (orbit shape). GPS: a ~ 26560 km, near-circular.
+        assert!((2.6e7..2.66e7).contains(&e.a), "semi-major axis {} m", e.a);
+        assert!((0.0..0.03).contains(&e.ecc), "eccentricity {}", e.ecc);
+        assert_ne!(e.toe, 0);
+        assert!((-pi..=pi).contains(&e.m0), "mean anomaly {}", e.m0);
+
+        // Subframe 3 (orientation). GPS inclination ~ 55 deg = 0.96 rad.
+        assert!((0.9..1.1).contains(&e.i0), "inclination {} rad", e.i0);
+        assert!((-pi..=pi).contains(&e.omg0), "ascending node {}", e.omg0);
+        assert!(
+            e.omg_dot < 0.0 && e.omg_dot > -1.0e-8,
+            "omg_dot {}",
+            e.omg_dot
+        );
+
+        // All three subframes decoded -> the ephemeris passes the solver gate.
+        assert!(e.is_valid());
     }
 }

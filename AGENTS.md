@@ -91,22 +91,19 @@ guesses. Tackle roughly top-to-bottom.
 - ~~SBAS PRNs in `get_sat_list`~~: constellation-aware tagging (PRN ≥ 120 → SBAS)
   + a `--sbas` sweep, replacing the dead `use_sbas` flag. (Detection only — no
   SBAS *decode* or ranging; not seen above the noise floor in any recording.)
-
-**High value, low risk**
-- **Nav-decode unit tests**: the mock reader + synthetic signal now cover
-  Acquisition→Tracking; still untested is LNAV subframe decoding — feed known-good
-  subframes through [navigation.rs](src/navigation.rs) (no IQ needed) and assert
-  the parsed ephemeris fields.
-- **`is_ephemeris_complete` is under-specified** ([channel.rs](src/channel.rs)):
-  checks 5 fields; missing keplerian/clock terms (`ecc`, `f0`, `omg_dot`) can let
-  a half-decoded ephemeris reach the solver. Move to `RxEphemeris::is_valid()`
-  and table-test it.
-- **`get_code_and_carrier_phase` unwraps an empty `corr_p`**
-  ([channel.rs](src/channel.rs)): it runs at the *start* of `tracking_process`,
-  before the first `push_back`, and calls `corr_p.back().unwrap()` / `pop_back()`
-  when `code_off_sec` crosses a period boundary. A code phase landing within one
-  carrier-aiding step of exactly 0 panics on the first tracking step (found via
-  the synthetic test, which sidesteps it with a non-zero code phase). Guard it.
+- ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
+  ([ephemeris.rs](src/ephemeris.rs)) feeds real captured LNAV subframes 1-3
+  through the decoders and range-checks the result (a≈26 560 km, ecc<0.03,
+  i0≈0.96 rad…), locking the bit-field offsets.
+- ~~**`is_ephemeris_complete` → `Ephemeris::is_valid()`**~~
+  ([ephemeris.rs](src/ephemeris.rs)): moved + broadened (now also checks `toc`,
+  an eccentricity sanity bound, and `omg_dot`); constellation-agnostic on orbit
+  size/inclination (QZSS-safe). Table-tested.
+- ~~**`get_code_and_carrier_phase` empty-`corr_p` panic**~~
+  ([channel.rs](src/channel.rs)): `num_trk_samples` now moves with the buffer
+  pop/push (it tracks buffer alignment) while `num_tx_codes`/`code_off_sec`
+  always wrap, so a first tracking step at code phase ~0 no longer panics.
+  Regression: `tracks_at_code_phase_zero_without_panicking`.
 
 **Real but lower priority**
 - **Per-correlation allocations in `calc_correlation`** ([util.rs](src/util.rs)):

@@ -171,11 +171,7 @@ impl Channel {
     }
 
     pub fn is_ephemeris_complete(&self) -> bool {
-        self.nav.eph.ts_sec != 0.0
-            && self.nav.eph.week != 0
-            && self.nav.eph.toe != 0
-            && self.nav.eph.i0 != 0.0
-            && self.nav.eph.a >= 20_000_000.0
+        self.nav.eph.is_valid()
     }
 
     fn set_state(&mut self, state: State) {
@@ -724,22 +720,27 @@ impl Channel {
         self.trk.adr += self.trk.doppler_hz * tau; // accumulated Doppler
         self.trk.code_off_sec -= self.trk.doppler_hz / self.fc * tau; // carrier-aided code offset
 
+        // A code-period wrap shifts the transmit phase (num_tx_codes * code_sec +
+        // code_off), which always tracks; num_trk_samples instead tracks
+        // corr_p-buffer alignment, so it only moves together with the pop/push.
+        // On the very first tracking step corr_p is still empty (the push happens
+        // later in tracking_process), so leave the buffer/num_trk_samples alone.
         if self.trk.code_off_sec >= self.code_sec {
             self.trk.code_off_sec -= self.code_sec;
-            self.num_trk_samples -= 1;
-            // code_off dropped by one period, so the transmit phase
-            // (num_tx_codes * code_sec + code_off) stays continuous by adding one.
             self.num_tx_codes += 1.0;
-            self.hist.corr_p.pop_back();
+            if self.hist.corr_p.pop_back().is_some() {
+                self.num_trk_samples -= 1;
+            }
             // 0-1-2-3-4
             // 0-0-1-2-3
             // 0-1-2-3-5
         } else if self.trk.code_off_sec < 0.0 {
             self.trk.code_off_sec += self.code_sec;
-            self.num_trk_samples += 1;
             self.num_tx_codes -= 1.0;
-            let v = *self.hist.corr_p.back().unwrap();
-            self.hist.corr_p.push_back(v);
+            if let Some(&v) = self.hist.corr_p.back() {
+                self.hist.corr_p.push_back(v);
+                self.num_trk_samples += 1;
+            }
             // 0-1-2-3-4
             // 1-2-3-4-4
             // 2-3-4-4-5
