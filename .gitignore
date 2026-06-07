@@ -3,5 +3,7 @@
 Cargo.lock
 *bin
 resources/*
+!resources/README.md
+!resources/fetch.sh
 gnss.log
 plots/*png

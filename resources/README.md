@@ -6,11 +6,18 @@
 -rw-r--r-- 1 pi    16368000 Mar  3  2014 gioveAandB_short.bin
 ```
 
+The downloadable recordings can be fetched with [fetch.sh](./fetch.sh):
+```
+./resources/fetch.sh            # list what's available / already present
+./resources/fetch.sh jks-1bit   # fetch one (or several) by name
+./resources/fetch.sh all        # fetch everything (incl. the 12.7 GiB nov3)
+```
+
 ## nov_3_time_18_48_st_ives
 https://github.com/codyd51/gypsum/releases
 file-type: 2xf32
 Captured in the UK in Nov 2023.
-You can use this script to download/unzip the file [get_iq_samples.sh](./resources/get_iq_samples.sh).
+Download/unzip it with `./resources/fetch.sh nov3`.
 
 ## gpssim.bin
 cf https://github.com/osqzss/gps-sdr-sim

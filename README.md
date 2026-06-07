@@ -25,6 +25,13 @@ Note that the app supports multiple IQ file formats: `2xf32`, `2xi16`, `i8`, `rt
 
 ## Download an existing IQ recording with GPS L1 signal
 
+Use the helper script to fetch the downloadable recordings into `resources/`:
+```
+$ ./resources/fetch.sh          # list what's available
+$ ./resources/fetch.sh nov3     # the main dev recording (2xf32, 12.7 GiB)
+$ ./resources/fetch.sh all      # everything
+```
+
 The one I used for most of the development:
 https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip
 .. unzip and move the file under resources/. Use "-t 2xf32".
