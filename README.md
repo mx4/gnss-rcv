@@ -36,7 +36,7 @@ flowchart LR
 3. **Nav decode** — the 50 bps navigation message is demodulated; three
    subframes yield each satellite's ephemeris (its precise orbit + clock).
 4. **Position solve** — pseudoranges from ≥4 satellites are combined into a
-   single-point position fix.
+   single-point position fix via [gnss-rtk](https://github.com/rtk-rs/gnss-rtk).
 
 The whole chain is exercised end-to-end by an integration test that simulates a
 recording for a chosen date/location and checks the receiver recovers it (see
