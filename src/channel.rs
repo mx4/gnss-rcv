@@ -17,6 +17,7 @@ use crate::state::ChannelState;
 use crate::state::GnssState;
 use crate::util::calc_correlation;
 use crate::util::doppler_shift;
+use crate::util::doppler_shifted_carrier;
 use crate::util::get_max_with_idx;
 
 const SP_CORR: f64 = 0.5;
@@ -94,6 +95,10 @@ impl History {
 pub struct Acquisition {
     prn_code_fft: Vec<Complex64>,
     sum_p: Vec<Vec<f64>>,
+    // Pre-computed carrier replica for each Doppler bin. The bins are fixed, so
+    // building these once avoids a sin/cos per sample per bin on every 1 ms
+    // acquisition step (the dominant CPU cost while searching for SVs).
+    carriers: Vec<Vec<Complex64>>,
 }
 
 pub struct Channel {
@@ -281,6 +286,15 @@ impl Channel {
         let fft_fw = fft_planner.plan_fft_forward(prn_code_fft.len());
         fft_fw.process(&mut prn_code_fft);
 
+        // Pre-compute the carrier replica for each (fixed) acquisition Doppler bin.
+        let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
+        let carriers: Vec<Vec<Complex64>> = (0..DOPPLER_SPREAD_BINS)
+            .map(|i| {
+                let doppler_hz = -DOPPLER_SPREAD_HZ + i as f64 * step_hz;
+                doppler_shifted_carrier(fi + doppler_hz, 0.0, fs, code_sp)
+            })
+            .collect();
+
         pub_state
             .lock()
             .unwrap()
@@ -314,6 +328,7 @@ impl Channel {
             acq: Acquisition {
                 prn_code_fft,
                 sum_p: vec![vec![0.0; code_sp]; DOPPLER_SPREAD_BINS],
+                carriers,
             },
         }
     }
@@ -407,13 +422,18 @@ impl Channel {
     fn acquisition_integrate_correlation(
         &mut self,
         iq_vec_slice: &[Complex64],
-        doppler_hz: f64,
+        bin: usize,
     ) -> Vec<f64> {
         let mut iq_vec = iq_vec_slice.to_vec();
 
         assert_eq!(iq_vec.len(), self.acq.prn_code_fft.len());
 
-        doppler_shift(&mut iq_vec, self.fi + doppler_hz, 0.0, self.fs);
+        // Apply the pre-computed carrier for this Doppler bin (was a per-sample
+        // sin/cos via doppler_shift on every call).
+        let carrier = &self.acq.carriers[bin];
+        for (s, c) in iq_vec.iter_mut().zip(carrier.iter()) {
+            *s *= *c;
+        }
 
         let corr = calc_correlation(&mut self.fft_planner, &iq_vec, &self.acq.prn_code_fft);
         let corr_vec: Vec<_> = corr.iter().map(|v| v.norm_sqr()).collect();
@@ -482,8 +502,7 @@ impl Channel {
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
 
         for i in 0..DOPPLER_SPREAD_BINS {
-            let doppler_hz = -DOPPLER_SPREAD_HZ + i as f64 * step_hz;
-            let c_non_coherent = self.acquisition_integrate_correlation(iq_vec_slice, doppler_hz);
+            let c_non_coherent = self.acquisition_integrate_correlation(iq_vec_slice, i);
             assert_eq!(c_non_coherent.len(), self.code_sp);
 
             #[allow(clippy::needless_range_loop)]

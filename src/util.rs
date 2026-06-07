@@ -64,15 +64,19 @@ pub fn calc_correlation(
     v_res
 }
 
-fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -> Vec<Complex64> {
-    let imaginary = 2.0 * PI * doppler_hz;
-    let phi_off = 2.0 * PI * phi;
+pub fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -> Vec<Complex64> {
+    // carrier[n] = exp(-j (2*pi*doppler*n/fs + 2*pi*phi))
+    // Built by phase recurrence (carrier[n+1] = carrier[n] * step) so it costs one
+    // complex multiply per sample instead of a sin/cos per sample. This runs on
+    // every tracking correlation (per locked SV, per 1 ms) and dominates the CPU.
+    let step = Complex64::from_polar(1.0, -2.0 * PI * doppler_hz / fs);
+    let mut c = Complex64::from_polar(1.0, -2.0 * PI * phi);
 
-    let carrier: Vec<Complex64> = (0..len)
-        .map(|x| x as f64)
-        .map(|y| Complex64::from_polar(1.0, -imaginary * (y / fs) - phi_off))
-        .collect();
-
+    let mut carrier = Vec::with_capacity(len);
+    for _ in 0..len {
+        carrier.push(c);
+        c *= step;
+    }
     carrier
 }
 
