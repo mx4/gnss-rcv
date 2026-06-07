@@ -19,11 +19,31 @@ file-type: 2xf32
 Captured in the UK in Nov 2023.
 Download/unzip it with `./resources/fetch.sh nov3`.
 
+## Generating a recording with gps-sdr-sim ([gen_gpssim.sh](./gen_gpssim.sh))
+
+`gen_gpssim.sh` produces a recording end-to-end from a date + location: it
+derives the day-of-year, downloads the matching broadcast ephemeris (brdc) for
+that day, runs gps-sdr-sim, and writes `gpssim_gen_2xi16` plus a
+`gpssim_gen.meta` (truth lat/lon + visible PRNs) that the integration test reads.
+```
+./resources/gen_gpssim.sh                                   # default: Geneva Jet d'Eau, 2026/04/28
+./resources/gen_gpssim.sh 2023/06/15,12:00:00 48.8566,2.3522,35 60
+```
+- Ephemeris is fetched from **ESA GSSC** over FTP, which (unlike NASA CDDIS)
+  serves brdc without an Earthdata login:
+  `ftp://gssc.esa.int/gnss/data/daily/<YYYY>/<DDD>/brdc<DDD>0.<YY>n.gz`.
+- Needs `curl`, `gunzip`, and a built gps-sdr-sim binary (`$GPS_SDR_SIM`, or
+  `~/git/gps-sdr-sim/gps-sdr-sim`, or on `PATH`). Pick a real past date — recent
+  days may not have a brdc posted yet.
+- Drives the `generates_and_solves_gpssim` test in [../tests/gpssim.rs](../tests/gpssim.rs).
+
 ## gpssim.bin
 cf https://github.com/osqzss/gps-sdr-sim
 result of:
  ./gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000
 file-type: 2xi16
+This is the `gpssim_2xi16` fixture the other two gpssim tests use; the command
+above is what `gen_gpssim.sh` automates.
 
 ```
 ./gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000

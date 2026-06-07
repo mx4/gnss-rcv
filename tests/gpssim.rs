@@ -1,16 +1,16 @@
-//! Integration regression test against a known gps-sdr-sim recording.
+//! Integration regression tests against gps-sdr-sim recordings.
 //!
-//! Drives the full receiver pipeline (acquisition -> tracking -> nav decode ->
-//! position fix) on `resources/gpssim_2xi16`, the recording documented in
-//! resources/README.md, generated with:
+//! These drive the full receiver pipeline (acquisition -> tracking -> nav
+//! decode -> position fix). Two of them run on a pre-existing recording
+//! `resources/gpssim_2xi16` (see resources/README.md); a third generates a
+//! fresh recording end-to-end (download ephemeris -> gps-sdr-sim -> solve).
 //!
-//!   gps-sdr-sim -b 16 -d 60 -t 2022/01/01,01:02:03 \
-//!               -l 35.681298,139.766247,10.0 -e brdc0010.22n -s 2046000
-//!
-//! That recording is large and gitignored (absent in CI), so both tests skip
-//! cleanly when it isn't present; generate it locally to exercise them.
+//! All recordings are large and gitignored (absent in CI), and the generator
+//! needs external tools + network, so every test skips cleanly (prints
+//! `skipping...` and passes) when its inputs aren't available.
 
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -29,11 +29,22 @@ const TRUE_LON: f64 = 139.766247;
 // search to these keeps the tests fast and avoids cross-correlation noise.
 const SIM_SATS: &str = "5,10,12,13,15,18,23,24,25,28,32";
 
-/// Run the receiver over `num_msec` of the gpssim recording and return the
-/// resulting shared state, or `None` (skip) when the recording isn't present.
-fn run(num_msec: usize, exit_on_fix: bool) -> Option<Arc<Mutex<GnssState>>> {
-    if !Path::new(GPSSIM).exists() {
-        eprintln!("skipping: {GPSSIM} not present (see resources/README.md)");
+// End-to-end generated recording + the meta the generator script writes.
+const GEN_SCRIPT: &str = "resources/gen_gpssim.sh";
+const GEN_GPSSIM: &str = "resources/gpssim_gen_2xi16";
+const GEN_META: &str = "resources/gpssim_gen.meta";
+
+/// Run the receiver over `num_msec` of `recording` (0 = until EOF/fix),
+/// restricting the search to `sats`. Returns the shared state, or `None`
+/// (skip) when the recording isn't present.
+fn run(
+    recording: &str,
+    sats: &str,
+    num_msec: usize,
+    exit_on_fix: bool,
+) -> Option<Arc<Mutex<GnssState>>> {
+    if !Path::new(recording).exists() {
+        eprintln!("skipping: {recording} not present (see resources/README.md)");
         return None;
     }
 
@@ -42,14 +53,14 @@ fn run(num_msec: usize, exit_on_fix: bool) -> Option<Arc<Mutex<GnssState>>> {
     let mut rx = Receiver::new(
         false, // use_device
         "",    // hostname (rtl_tcp)
-        Path::new(GPSSIM),
+        Path::new(recording),
         &IQFileType::TypePairInt16,
         2_046_000.0, // fs
         0.0,         // fi
         0,           // off_msec
         "L1CA",      // sig
-        SIM_SATS,    // sats
-        false,       // plots
+        sats,
+        false, // plots
         exit_on_fix,
         exit_req,
         state.clone(),
@@ -58,10 +69,22 @@ fn run(num_msec: usize, exit_on_fix: bool) -> Option<Arc<Mutex<GnssState>>> {
     Some(state)
 }
 
+/// Assert the receiver's computed fix is within 0.02 deg of `(lat, lon)`.
+fn assert_fix_near(state: &Arc<Mutex<GnssState>>, lat: f64, lon: f64) {
+    let st = state.lock().unwrap();
+    let (got_lat, got_lon) = (st.latitude, st.longitude);
+    assert!(
+        (got_lat - lat).abs() < 0.02 && (got_lon - lon).abs() < 0.02,
+        "fix {got_lat:.5},{got_lon:.5} not within 0.02 deg of {lat},{lon}"
+    );
+}
+
 /// Fast signal: acquisition + tracking lock onto the simulated satellites.
 #[test]
 fn acquires_and_tracks_gpssim() {
-    let Some(state) = run(5_000, false) else { return };
+    let Some(state) = run(GPSSIM, SIM_SATS, 5_000, false) else {
+        return;
+    };
 
     let tracking = state
         .lock()
@@ -77,18 +100,52 @@ fn acquires_and_tracks_gpssim() {
     );
 }
 
-/// Full pipeline through a position fix. Needs ~40s of signal (three subframes
-/// to decode an ephemeris, then >=4 SVs to solve), so it is marked `#[ignore]`;
+/// Full pipeline through a position fix on the pre-existing recording. Needs
+/// ~40s of signal (three subframes to decode an ephemeris, then >=4 SVs to
+/// solve) but stops at the first fix via exit_on_fix, so it is `#[ignore]`'d;
 /// run it explicitly with `cargo test -- --ignored`.
 #[test]
-#[ignore = "slow: processes ~40s of IQ to reach a position fix"]
+#[ignore = "slow: runs the pipeline until the first position fix"]
 fn computes_position_fix_gpssim() {
-    let Some(state) = run(40_000, true) else { return };
+    let Some(state) = run(GPSSIM, SIM_SATS, 40_000, true) else {
+        return;
+    };
+    assert_fix_near(&state, TRUE_LAT, TRUE_LON);
+}
 
-    let st = state.lock().unwrap();
-    let (lat, lon) = (st.latitude, st.longitude);
-    assert!(
-        (lat - TRUE_LAT).abs() < 0.02 && (lon - TRUE_LON).abs() < 0.02,
-        "fix {lat:.5},{lon:.5} not within 0.02 deg of {TRUE_LAT},{TRUE_LON}"
-    );
+/// End-to-end: generate a fresh recording (pick a date+location, download the
+/// matching broadcast ephemeris, run gps-sdr-sim) and verify the receiver
+/// recovers that location. Needs gps-sdr-sim + network, so it is `#[ignore]`'d
+/// and skips cleanly when the generator reports its tools/network are missing.
+#[test]
+#[ignore = "needs gps-sdr-sim + network: generates a fresh recording end-to-end"]
+fn generates_and_solves_gpssim() {
+    // Steps 1-4: select date/location, download ephemeris, run gps-sdr-sim.
+    match Command::new(GEN_SCRIPT).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("skipping: {GEN_SCRIPT} exited {s} (missing gps-sdr-sim/network?)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("skipping: cannot run {GEN_SCRIPT}: {e}");
+            return;
+        }
+    }
+
+    // Read truth location + visible PRNs the generator recorded.
+    let meta = std::fs::read_to_string(GEN_META).expect("generator wrote a meta file");
+    let get = |key: &str| -> String {
+        meta.lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("meta missing '{key}'"))
+            .to_string()
+    };
+    let lat: f64 = get("lat").parse().expect("meta lat");
+    let lon: f64 = get("lon").parse().expect("meta lon");
+    let sats = get("sats");
+
+    // Step 5: run the receiver against the generated recording and check the fix.
+    let state = run(GEN_GPSSIM, &sats, 0, true).expect("generated recording present");
+    assert_fix_near(&state, lat, lon);
 }

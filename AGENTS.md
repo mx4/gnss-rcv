@@ -8,19 +8,27 @@ device), then does acquisition → tracking → ephemeris decode → position fi
 - **`cargo test --release`** — unit tests + the fast integration test
   `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
 - **`cargo test --release -- --ignored`** — also runs the heavy
-  `computes_position_fix_gpssim` test (~3 s; runs the pipeline until the first
-  position fix, then stops via `-x`/`--exit-on-fix`).
+  `computes_position_fix_gpssim` (~3 s; pipeline until the first fix, via
+  `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below).
 - **`cargo clippy --release --tests`** — must be clean; the project keeps it so.
 
 The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
-**full pipeline** against `resources/gpssim_2xi16` (a gps-sdr-sim recording at a
-known location). The fast test asserts ≥4 SVs reach tracking; the ignored test
-asserts the computed fix is within 0.02° of the simulated location.
+**full pipeline** against a gps-sdr-sim recording at a known location:
+- `acquires_and_tracks_gpssim` (fast) — ≥4 SVs reach tracking.
+- `computes_position_fix_gpssim` (ignored) — fix within 0.02° of the simulated
+  location, on the pre-existing `resources/gpssim_2xi16`.
+- `generates_and_solves_gpssim` (ignored) — **end-to-end**: runs
+  [resources/gen_gpssim.sh](resources/gen_gpssim.sh) to pick a date+location,
+  download the matching broadcast ephemeris (ESA GSSC, auth-free FTP), and run
+  gps-sdr-sim, then verifies the receiver recovers that location. Needs
+  `gps-sdr-sim` (`$GPS_SDR_SIM`, or `~/git/gps-sdr-sim/gps-sdr-sim`, or PATH)
+  plus network; **skips cleanly when those are missing**. The script caches by
+  scenario, so reruns skip regeneration.
 
-> The test recording is large, gitignored, and not in CI. The tests **skip
-> cleanly (print `skipping…` and pass) when `resources/gpssim_2xi16` is absent**,
-> so `cargo test` is always safe to run. To actually exercise them the file must
-> be present — it is generated with gps-sdr-sim (see
+> The recordings are large, gitignored, and not in CI. Every test **skips
+> cleanly (prints `skipping…` and passes)** when its input recording (or, for
+> the generated test, gps-sdr-sim/network) is absent, so `cargo test` is always
+> safe to run. `gpssim_2xi16` is generated with gps-sdr-sim (see
 > [resources/README.md](resources/README.md)), not downloaded.
 
 **When you change anything in the DSP/receiver path** (`channel.rs`,
