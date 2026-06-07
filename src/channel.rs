@@ -376,6 +376,8 @@ impl Channel {
         self.num_idl_samples = 0;
         self.num_trk_samples = 0;
         self.num_tx_codes = 0.0;
+        self.nav.eph.tx_anchored = false;
+        self.nav.eph.tow_trk_phase = 0.0;
         self.nav.init();
     }
 
@@ -716,12 +718,24 @@ impl Channel {
         self.num_trk_samples += 1;
         self.num_tx_codes += 1.0;
 
-        // Integer transmit-time of the signal currently being received, from the
-        // continuous count of transmitted code periods (SV clock rate). The
-        // absolute fractional code phase is carried separately in eph.code_off_sec.
-        // num_tx_codes (not num_trk_samples) is used so that code-phase wraps don't
-        // double-count the Doppler-induced range rate in the transmit time.
-        self.nav.eph.trk_phase = self.num_tx_codes * self.code_sec;
+        // Integer part of the received-signal transmit-time. The continuous,
+        // correctly-signed transmit phase is num_trk_samples*code_sec - code_off:
+        //   - num_trk_samples advances at the *received* code rate (it gains an
+        //     extra period on a code_off<0 wrap, which is when Doppler is positive
+        //     i.e. the SV is approaching), and
+        //   - code_off is the *replica* offset, which moves opposite to the
+        //     received code phase (carrier aiding does code_off -= doppler/fc),
+        //     hence the minus sign.
+        // This gives d(t_tx)/d(t_rx) = 1 + doppler/fc = 1 - range_rate/c (correct).
+        // The earlier num_tx_codes*code_sec + code_off form had the opposite wrap
+        // sign and +code_off, yielding 1 - doppler/fc (Doppler with the wrong sign,
+        // so pseudoranges moved opposite to the true range).
+        self.nav.eph.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+        // Snapshot the fractional code phase paired with trk_phase from the same
+        // period. The solver forms the transmit phase as trk_phase - code_off; the
+        // absolute code_off (common cross-SV reference from acquisition) carries the
+        // sub-ms range and must NOT be differenced away at the anchor.
+        self.nav.eph.code_off_sec = self.trk.code_off_sec;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();
@@ -741,7 +755,6 @@ impl Channel {
         self.update_all_plots(false);
         self.log_periodically();
         self.nav.eph.cn0 = self.trk.cn0;
-        self.nav.eph.code_off_sec = self.trk.code_off_sec;
 
         if self.trk.cn0 < CN0_THRESHOLD_LOST {
             self.idle_start();

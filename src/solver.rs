@@ -254,9 +254,13 @@ const MAX_RECENTERS: usize = 10;
 fn make_config() -> Config {
     let mut cfg = Config::default().with_navigation_method(Method::SPP);
     cfg.min_sv_elev = Some(0.0);
-    // Clock and TGD are supplied via ReceiverSpacebornBias (with relativistic
-    // term already in get_sv_clock_correction). Ionosphere is subtracted from
-    // the raw pseudorange before the candidate is built.
+    // Our pseudorange t_tx is anchored to the nav-message TOW, which is the
+    // satellite's OWN clock reading. So pr_m = geom + c*dT_rx - c*clock_corr,
+    // and gnss-rtk must ADD clock_corr back (sv_clock_bias = true, default).
+    // clock_corr is supplied via ReceiverSpacebornBias::clock_bias with the
+    // relativistic term already folded in (with_relativistic_correction), so we
+    // disable gnss-rtk's own relativistic clock model to avoid double-counting.
+    // TGD is likewise supplied via group_delay (sv_total_group_delay = true).
     cfg.modeling.relativistic_clock_bias = false;
     cfg.modeling.tropospheric_bias = false;
     cfg.modeling.ionospheric_bias = false;
@@ -350,8 +354,20 @@ impl PositionSolver {
         let tx_gpst: Vec<Epoch> = ephs
             .iter()
             .map(|eph| {
-                let elapsed = (eph.trk_phase - eph.tow_trk_phase) + eph.code_off_sec;
-                eph.tow_gpst + Duration::from_seconds(elapsed)
+                // Transmit phase = trk_phase - code_off (see channel.rs: code_off is
+                // the replica offset, opposite in sign to the received code phase).
+                let phase = eph.trk_phase - eph.code_off_sec;
+                let elapsed = if eph.tx_anchored {
+                    phase - eph.tow_trk_phase
+                } else {
+                    (eph.trk_phase - eph.tow_trk_phase) - eph.code_off_sec
+                };
+                let tow = if eph.tx_anchored {
+                    eph.tx_tow_gpst
+                } else {
+                    eph.tow_gpst
+                };
+                tow + Duration::from_seconds(elapsed)
             })
             .collect();
 
@@ -418,6 +434,8 @@ impl PositionSolver {
                 .sqrt();
                 let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m;
                 let clk_m = clock_corr * SPEED_OF_LIGHT;
+                // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.
+                // residual = pr_m + clk_m - geom = c*dT_rx (common-mode rx clock).
                 log::warn!(
                     "RESID {} pr={:.2}km geom={:.2}km clk={:+.3}km resid={:+.3}km",
                     eph.sv,

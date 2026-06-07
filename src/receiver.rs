@@ -176,6 +176,9 @@ impl Receiver {
             .values()
             .filter(|&ch| ch.is_state_tracking())
             .filter(|&ch| ch.is_ephemeris_complete())
+            .filter(|&ch| {
+                ch.nav.eph.tx_anchored && ch.ts_sec - ch.nav.eph.tx_anchor_ts_sec > 3.0
+            })
             .map(|ch| ch.nav.eph)
             .collect();
 

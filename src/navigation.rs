@@ -221,7 +221,7 @@ impl Channel {
     fn nav_decode_lnav_subframe5(&mut self, buf: &[u8]) {
         self.nav.eph.tow = getbitu(buf, 30, 17) * 6;
         let data_id = getbitu(buf, 60, 2);
-        let svid = getbitu(buf, 62, 4);
+        let svid = getbitu(buf, 62, 6);
         let alm_array = &mut self.pub_state.lock().unwrap().almanac;
 
         if data_id == 1 {
@@ -239,7 +239,7 @@ impl Channel {
                 ];
                 for sv in 1..=24 {
                     let alm = alm_array.get_mut(sv - 1).unwrap();
-                    let pos = ARRAY_SVH_IDX[sv - 25];
+                    let pos = ARRAY_SVH_IDX[sv - 1];
                     alm.svh = getbitu(buf, pos, 6);
                     if alm.svh != 0 {
                         log::warn!("{}: sv {} is unhealthy", self.sv, sv)
@@ -290,11 +290,30 @@ impl Channel {
             self.nav.eph.toc_gpst = Epoch::from_gpst_seconds(toc_secs_gpst.into());
 
             self.nav.eph.ts_sec = self.ts_sec;
-            // Anchor the *absolute* transmit phase (integer code-period count plus
-            // the sub-ms code offset) at this subframe's tow_gpst boundary. The
-            // solver then advances it by the change in (trk_phase + code_off_sec)
-            // since this instant, which pins the boundary exactly to tow_gpst.
-            self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase + self.nav.eph.code_off_sec;
+
+            // Pin transmit time once when ephemeris is complete. Re-anchoring every
+            // subframe reset c_anchor and made sub-ms inter-SV range track (c-c_anchor)
+            // instead of absolute code phase. After re-acquisition tx_anchored is
+            // cleared in tracking_init until the next nav subframe re-anchors.
+            if self.is_ephemeris_complete() && !self.nav.eph.tx_anchored {
+                // Anchor only the INTEGER period count at the TOW edge (a code
+                // epoch). The sub-ms range must come from the absolute code_off at
+                // the fix (which is on a common cross-SV reference, since all SVs
+                // are acquired against the same IQ buffer). Subtracting code_off
+                // here would cancel the absolute sub-ms range in the solver's
+                // elapsed = phase_now - tow_trk_phase, biasing each SV by its
+                // arbitrary acquisition code phase (~±0.5 ms = ±150 km).
+                self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
+                self.nav.eph.tx_tow_gpst = self.nav.eph.tow_gpst;
+                self.nav.eph.tx_anchor_ts_sec = self.ts_sec;
+                self.nav.eph.tx_anchored = true;
+                log::warn!(
+                    "{}: tx anchored tow={:?} phase={:.6}",
+                    self.sv,
+                    self.nav.eph.tx_tow_gpst,
+                    self.nav.eph.tow_trk_phase,
+                );
+            }
 
             log::warn!(
                 "{}: tow={:?} tgd={:+.3e} toe={:?}",
