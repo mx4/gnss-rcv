@@ -81,3 +81,73 @@ impl Code {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Circular correlation of `a` against `b` shifted by `shift` chips.
+    fn circ_corr(a: &[i8], b: &[i8], shift: usize) -> i32 {
+        let n = a.len();
+        (0..n)
+            .map(|i| a[i] as i32 * b[(i + shift) % n] as i32)
+            .sum()
+    }
+
+    // A length-1023 Gold code (degree-10 m-sequences) is balanced bipolar, has a
+    // 1023 autocorrelation peak, and its off-peak auto- and cross-correlations
+    // are three-valued: {-1, -65, 63} where 65 = 1 + 2^((10+2)/2). These props
+    // are what acquisition relies on, so they validate that the SBAS PRNs
+    // (120-138) pick up correct G2 phase delays from the extended code table.
+    const VALID_OFF_PEAK: [i32; 3] = [-1, -65, 63];
+
+    fn assert_gold_code(code: &[i8]) {
+        assert_eq!(code.len(), L1CA_CODE_LEN);
+        assert!(code.iter().all(|&c| c == 1 || c == -1), "code must be bipolar");
+        assert_eq!(circ_corr(code, code, 0), L1CA_CODE_LEN as i32, "autocorr peak");
+        for shift in 1..L1CA_CODE_LEN {
+            let v = circ_corr(code, code, shift);
+            assert!(
+                VALID_OFF_PEAK.contains(&v),
+                "off-peak autocorr {v} at shift {shift} not in {VALID_OFF_PEAK:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sbas_prns_are_valid_gold_codes() {
+        // EGNOS / legacy SBAS L1 PRNs that we expect to be able to acquire.
+        for prn in [120u8, 123, 126, 136, 138] {
+            let code = Code::gen_code("L1CA", prn).expect("L1CA code");
+            assert_gold_code(&code);
+        }
+    }
+
+    #[test]
+    fn gps_prns_are_valid_gold_codes() {
+        // Sanity check the same properties hold for the GPS block we already use.
+        for prn in [1u8, 16, 32] {
+            let code = Code::gen_code("L1CA", prn).expect("L1CA code");
+            assert_gold_code(&code);
+        }
+    }
+
+    #[test]
+    fn distinct_prn_codes_have_bounded_cross_correlation() {
+        // Cross-correlation between distinct PRNs (SBAS-vs-SBAS and SBAS-vs-GPS)
+        // is three-valued and bounded by 65 -- this is what keeps an SBAS search
+        // from cross-locking onto a strong GPS SV.
+        let pairs = [(123u8, 136u8), (120, 1), (136, 32)];
+        for (a, b) in pairs {
+            let ca = Code::gen_code("L1CA", a).unwrap();
+            let cb = Code::gen_code("L1CA", b).unwrap();
+            for shift in 0..L1CA_CODE_LEN {
+                let v = circ_corr(&ca, &cb, shift);
+                assert!(
+                    VALID_OFF_PEAK.contains(&v),
+                    "xcorr {v} of PRN{a}xPRN{b} at shift {shift} not in {VALID_OFF_PEAK:?}"
+                );
+            }
+        }
+    }
+}

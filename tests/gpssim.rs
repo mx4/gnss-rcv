@@ -61,6 +61,7 @@ fn run(
         0,           // off_msec
         "L1CA",      // sig
         sats,
+        false, // sbas
         false, // plots
         exit_on_fix,
         exit_req,

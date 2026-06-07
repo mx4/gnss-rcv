@@ -138,6 +138,10 @@ pub struct Channel {
     // Consecutive failed acquisitions (reset on a successful lock); drives the
     // idle backoff for PRNs that are very likely not in view.
     num_acq_fails: u32,
+    // Peak C/N0 of the most recent acquisition attempt. Kept even when it is
+    // below the lock threshold so a search (e.g. for weak SBAS GEOs) can tell
+    // "present but weak" from "noise floor"; surfaced in the IDLE log.
+    acq_cn0: f64,
 
     pub hist: History,
     pub nav: Navigation,
@@ -336,6 +340,7 @@ impl Channel {
             num_acq_samples: 0,
             num_idl_samples: 0,
             num_acq_fails: 0,
+            acq_cn0: 0.0,
             num_trk_samples: 0,
             num_tx_codes: 0.0,
 
@@ -364,10 +369,12 @@ impl Channel {
                 self.ts_sec,
             );
         } else {
+            // acq_cn0 is the peak C/N0 of the last (failed) acquisition: useful
+            // to gauge a weak signal that didn't reach the lock threshold.
             log::info!(
-                "{}: IDLE cn0={:.1} ts_sec={:.3}",
+                "{}: IDLE acq_cn0={:.1} ts_sec={:.3}",
                 self.sv,
-                self.trk.cn0,
+                self.acq_cn0,
                 self.ts_sec,
             );
         }
@@ -557,6 +564,7 @@ impl Channel {
             let code_off_sec = code_offset_idx as f64 / self.code_sp as f64 * self.code_sec;
             let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / DOPPLER_SPREAD_BINS as f64;
             let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();
+            self.acq_cn0 = cn0;
 
             if cn0 >= CN0_THRESHOLD_LOCKED {
                 self.tracking_start(doppler_hz, cn0, code_off_sec, code_offset_idx);

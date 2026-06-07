@@ -41,22 +41,35 @@ pub struct Receiver {
     exit_req: Arc<AtomicBool>,
 }
 
-fn get_sat_list(sats: &str) -> Vec<SV> {
+/// Build the channel list. PRNs >= 120 are SBAS (geostationary augmentation)
+/// satellites; they share the L1 C/A code structure, so tag them as such — logs
+/// and plots then read e.g. `S123`, and since they never complete a GPS
+/// ephemeris the position solver leaves them out. `sbas` appends the legacy SBAS
+/// L1 block (PRN 120-138) for a detection sweep on top of whatever was selected.
+fn get_sat_list(sats: &str, sbas: bool) -> Vec<SV> {
+    let sv_for_prn = |prn: u8| {
+        let cons = if prn >= 120 {
+            Constellation::SBAS
+        } else {
+            Constellation::GPS
+        };
+        SV::new(cons, prn)
+    };
+
     let mut sat_vec = vec![];
     if !sats.is_empty() {
         for s in sats.split(',') {
             let prn = s.parse::<u8>().unwrap();
-            sat_vec.push(SV::new(Constellation::GPS, prn));
+            sat_vec.push(sv_for_prn(prn));
         }
     } else {
         for prn in 1..=32_u8 {
             sat_vec.push(SV::new(Constellation::GPS, prn));
         }
-        let use_sbas = false;
-        if use_sbas {
-            for prn in 120..=158_u8 {
-                sat_vec.push(SV::new(Constellation::GPS, prn));
-            }
+    }
+    if sbas {
+        for prn in 120..=138_u8 {
+            sat_vec.push(SV::new(Constellation::SBAS, prn));
         }
     }
     sat_vec
@@ -127,6 +140,7 @@ impl Receiver {
         off_msec: usize,
         sig: &str,
         sats: &str,
+        sbas: bool,
         plots: bool,
         exit_on_fix: bool,
         exit_req: Arc<AtomicBool>,
@@ -134,7 +148,7 @@ impl Receiver {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let period_sp = (PERIOD_RCV * fs) as usize;
         let mut channels = HashMap::<SV, Channel>::new();
-        let sat_vec = get_sat_list(sats);
+        let sat_vec = get_sat_list(sats, sbas);
 
         for sv in sat_vec {
             let pub_state = state.clone();
@@ -291,6 +305,23 @@ mod tests {
             !kept.iter().any(|e| e.sv.prn == 16),
             "the weaker cross-correlation lock is dropped"
         );
+    }
+
+    #[test]
+    fn sat_list_tags_sbas_and_appends_block() {
+        // Explicit list: PRN >= 120 is tagged SBAS, the rest GPS.
+        let l = get_sat_list("1,32,120,138", false);
+        assert_eq!(l.len(), 4);
+        assert_eq!(l[0].constellation, Constellation::GPS);
+        assert_eq!(l[1].constellation, Constellation::GPS);
+        assert_eq!(l[2].constellation, Constellation::SBAS);
+        assert_eq!(l[3].constellation, Constellation::SBAS);
+
+        // --sbas appends the 120-138 block (19 PRNs) on top of the GPS default.
+        let l = get_sat_list("", true);
+        let sbas = l.iter().filter(|s| s.constellation == Constellation::SBAS);
+        assert_eq!(l.len(), 32 + 19);
+        assert_eq!(sbas.count(), 19);
     }
 
     #[test]
