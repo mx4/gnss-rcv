@@ -112,6 +112,12 @@ pub struct Channel {
 
     pub ts_sec: f64, // current time
     pub num_trk_samples: usize,
+    // Continuous count of transmitted code periods since tracking start. Unlike
+    // `num_trk_samples` (whose +/-1 wraps are for correlation-buffer alignment),
+    // this advances by +1 per processed code period and is corrected at code-phase
+    // wraps with the sign that keeps the *transmit phase* continuous. It is the
+    // source for the pseudorange transmit-time and must not be reused for buffering.
+    num_tx_codes: f64,
     num_acq_samples: usize,
     num_idl_samples: usize,
 
@@ -296,6 +302,7 @@ impl Channel {
             num_acq_samples: 0,
             num_idl_samples: 0,
             num_trk_samples: 0,
+            num_tx_codes: 0.0,
 
             state: State::Acquisition,
             nav: Navigation::new(sv),
@@ -368,6 +375,7 @@ impl Channel {
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
         self.num_trk_samples = 0;
+        self.num_tx_codes = 0.0;
         self.nav.init();
     }
 
@@ -656,6 +664,9 @@ impl Channel {
         if self.trk.code_off_sec >= self.code_sec {
             self.trk.code_off_sec -= self.code_sec;
             self.num_trk_samples -= 1;
+            // code_off dropped by one period, so the transmit phase
+            // (num_tx_codes * code_sec + code_off) stays continuous by adding one.
+            self.num_tx_codes += 1.0;
             self.hist.corr_p.pop();
             // 0-1-2-3-4
             // 0-0-1-2-3
@@ -663,6 +674,7 @@ impl Channel {
         } else if self.trk.code_off_sec < 0.0 {
             self.trk.code_off_sec += self.code_sec;
             self.num_trk_samples += 1;
+            self.num_tx_codes -= 1.0;
             let v = self.hist.corr_p.last().unwrap();
             self.hist.corr_p.push(*v);
             // 0-1-2-3-4
@@ -702,11 +714,14 @@ impl Channel {
         let (c_p, c_e, c_l, c_n) = self.tracking_compute_correlation(iq_vec);
         self.hist.corr_p.push(c_p);
         self.num_trk_samples += 1;
+        self.num_tx_codes += 1.0;
 
         // Integer transmit-time of the signal currently being received, from the
-        // count of transmitted code periods (SV clock rate). The absolute
-        // fractional code phase is carried separately in eph.code_off_sec.
-        self.nav.eph.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+        // continuous count of transmitted code periods (SV clock rate). The
+        // absolute fractional code phase is carried separately in eph.code_off_sec.
+        // num_tx_codes (not num_trk_samples) is used so that code-phase wraps don't
+        // double-count the Doppler-induced range rate in the transmit time.
+        self.nav.eph.trk_phase = self.num_tx_codes * self.code_sec;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();

@@ -316,6 +316,15 @@ impl PositionSolver {
             (r.tow as f64 + (now_gpst - r.tow_gpst).to_seconds()).rem_euclid(86400.0)
         };
 
+        // Optional diagnostic: if GNSS_TRUTH_ECEF="x,y,z" is set, log per-SV
+        // pseudorange residuals against that known position. After removing the
+        // common (receiver clock) offset, the spread of residuals across SVs is
+        // the per-SV measurement error.
+        let truth_ecef: Option<Vector3<f64>> = std::env::var("GNSS_TRUTH_ECEF").ok().and_then(|s| {
+            let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 3).then(|| Vector3::new(v[0], v[1], v[2]))
+        });
+
         log::warn!("----- now_gpst={now_gpst:?}");
         for (eph, t_tx) in ephs.iter().zip(tx_gpst.iter()) {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
@@ -351,6 +360,29 @@ impl PositionSolver {
                 pseudo_range_sec * 1000.0,
                 eph.tgd,
             );
+
+            if let Some(truth) = truth_ecef {
+                // Satellite position at transmit time, Sagnac-rotated by the
+                // signal travel time (same convention as gnss-rtk).
+                let we = EARTH_ROTATION_RATE * pseudo_range_sec;
+                let (cw, sw) = (we.cos(), we.sin());
+                let s = compute_sv_position_ecef(eph, *t_tx);
+                let (sx, sy, sz) = (cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2);
+                let geom = ((sx - truth[0]).powi(2)
+                    + (sy - truth[1]).powi(2)
+                    + (sz - truth[2]).powi(2))
+                .sqrt();
+                let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m;
+                let clk_m = clock_corr * SPEED_OF_LIGHT;
+                log::warn!(
+                    "RESID {} pr={:.2}km geom={:.2}km clk={:+.3}km resid={:+.3}km",
+                    eph.sv,
+                    pr_m / 1000.0,
+                    geom / 1000.0,
+                    clk_m / 1000.0,
+                    (pr_m + clk_m - geom) / 1000.0
+                );
+            }
 
             let candidate = Candidate::new(
                 eph.sv,
