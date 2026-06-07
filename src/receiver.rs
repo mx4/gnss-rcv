@@ -101,23 +101,17 @@ fn get_iq_feed(
     file: &Path,
     iq_file_type: &IQFileType,
     exit_req: Arc<AtomicBool>,
-) -> Option<Box<dyn IQReader>> {
+) -> Result<Box<dyn IQReader>, Box<dyn std::error::Error>> {
     if use_device {
-        let res = RtlSdrDevice::new(sig, fs);
-        if res.is_err() {
-            log::warn!("Failed to open rtl-sdr device.");
-            return None;
-        }
-        let dev = res.unwrap();
-
-        Some(Box::new(dev))
+        let dev = RtlSdrDevice::new(sig, fs).map_err(|_| "failed to open rtl-sdr device")?;
+        Ok(Box::new(dev))
     } else if !hostname.is_empty() {
-        let net = RtlSdrTcp::new(hostname, exit_req.clone(), sig, fs).unwrap();
-
+        let net = RtlSdrTcp::new(hostname, exit_req.clone(), sig, fs)
+            .map_err(|_| format!("failed to connect rtl_tcp backend {hostname}"))?;
         log::warn!("Using rtl_tcp backend: {}", hostname);
-        Some(Box::new(net))
+        Ok(Box::new(net))
     } else {
-        Some(Box::new(IQRecording::new(file, fs, iq_file_type)))
+        Ok(Box::new(IQRecording::new(file, fs, iq_file_type)?))
     }
 }
 
@@ -137,7 +131,7 @@ impl Receiver {
         exit_on_fix: bool,
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let period_sp = (PERIOD_RCV * fs) as usize;
         let mut channels = HashMap::<SV, Channel>::new();
         let sat_vec = get_sat_list(sats);
@@ -155,10 +149,9 @@ impl Receiver {
             file,
             iq_file_type,
             exit_req.clone(),
-        )
-        .unwrap();
+        )?;
 
-        Self {
+        Ok(Self {
             iq_feed,
             period_sp,
             off_samples: off_msec * period_sp,
@@ -169,7 +162,7 @@ impl Receiver {
             last_fix_sec: 0.0,
             exit_on_fix,
             exit_req: exit_req.clone(),
-        }
+        })
     }
 
     fn fetch_samples_msec(&mut self) -> Result<(Vec<Complex64>, f64), Box<dyn std::error::Error>> {

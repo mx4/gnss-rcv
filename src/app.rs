@@ -56,7 +56,7 @@ fn async_receive(
 
     active.store(true, Ordering::SeqCst);
 
-    let mut receiver = Receiver::new(
+    let receiver = Receiver::new(
         false,
         "",
         &file,
@@ -72,9 +72,14 @@ fn async_receive(
         pub_state,
     );
 
-    log::info!("run_loop");
-
-    receiver.run_loop(0);
+    match receiver {
+        Ok(mut receiver) => {
+            log::info!("run_loop");
+            receiver.run_loop(0);
+        }
+        // A bad path or unavailable source must not crash the UI; log and stop.
+        Err(e) => log::error!("cannot start receiver for {}: {e}", file.display()),
+    }
 
     active.store(false, Ordering::SeqCst);
     log::info!("start_receiving: done");

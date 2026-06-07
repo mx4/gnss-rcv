@@ -130,7 +130,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opt.exit_on_fix,
         exit_req.clone(),
         Arc::new(Mutex::new(GnssState::new())),
-    );
+    )?;
 
     let ts = Instant::now();
 

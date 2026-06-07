@@ -64,7 +64,8 @@ fn run(
         exit_on_fix,
         exit_req,
         state.clone(),
-    );
+    )
+    .expect("receiver");
     rx.run_loop(num_msec);
     Some(state)
 }

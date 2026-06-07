@@ -159,8 +159,11 @@ impl IQReader for IQRecording {
 }
 
 impl IQRecording {
-    pub fn new(file_path: &Path, fs: f64, file_type: &IQFileType) -> Self {
-        let file_size = file_path.metadata().unwrap().len();
+    pub fn new(file_path: &Path, fs: f64, file_type: &IQFileType) -> Result<Self, Box<dyn Error>> {
+        let file_size = file_path
+            .metadata()
+            .map_err(|e| format!("{}: {e}", file_path.display()))?
+            .len();
         let recording_duration_sec = match file_type {
             // 8 samples per byte rather than an integer number of bytes/sample.
             IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
@@ -173,12 +176,12 @@ impl IQRecording {
             ByteSize::b(file_size).to_string().bold(),
             recording_duration_sec
         );
-        Self {
+        Ok(Self {
             file_path: file_path.to_path_buf(),
             file_type: file_type.clone(),
             reader: None,
             pos_samples: 0,
-        }
+        })
     }
 
     fn get_sample_size_bytes(file_type: &IQFileType) -> usize {
