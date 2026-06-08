@@ -115,6 +115,17 @@ RUST_LOG=info cargo run --release -- -f resources/ION_BladeRF_Bands-L1.2xi16 -t 
 Acquires/tracks 13 SVs at ≥40 dB-Hz and decodes subframes cleanly, but ~13 s is
 too short to complete an ephemeris / get a fix (like the SigMF capture above).
 
+## ION_LimeSDR_Bands-L1.2xi16
+source: https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16 (`fetch.sh ion-lime`)
+[ION sample](https://sdr.ion.org/api-sample-data.html): LimeSDR, complex int16,
+10 MHz, **IF 420 kHz** (same scene as the rtl-sdr capture above), 60 s.
+```
+RUST_LOG=info cargo run --release -- -f resources/ION_LimeSDR_Bands-L1.2xi16 -t 2xi16 --fs 10000000 --fi 420000
+```
+**gnss-rcv fixes it at ≈ 52.177 N, 4.488 E** (Netherlands), 11 SVs with ephemeris.
+This is the non-zero-IF check: it validates the tracking carrier de-rotation
+(mix by `fi + doppler`, see the HackRF note below) on a clean int16 recording.
+
 ## ION_HackRF_Bands-L1.2xi8
 source: https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8 (`fetch.sh ion-hackrf`)
 HackRF front-end, **interleaved signed int8 I/Q** (complex), 10 MHz, IF 420 kHz,

@@ -118,6 +118,7 @@ formats and IFs. Each needs the right `-t` (and sometimes `--fs`/`--fi`); append
 | `cttc` | `-t 2xi16 --fs 4000000` | ✅ fix 41.274, 1.986 (Castelldefels) |
 | `ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ fix 52.177, 4.489 (Netherlands) |
 | `ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs; ~13 s — too short for a fix |
+| `ion-lime` | `-t 2xi16 --fs 10000000 --fi 420000` | ✅ fix 52.177, 4.488 (NL); non-zero-IF check |
 | `ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks; partial nav decode, no full fix (open) |
 | `zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks; ~15 s — too short for a fix |
 | `jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks marginal ~30 dB-Hz; no fix |

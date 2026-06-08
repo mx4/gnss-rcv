@@ -137,6 +137,7 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 | `nov_3_time_18_48_st_ives` | `fetch.sh nov3` | `-t 2xf32` | ✅ **52.334, −0.081** — St Ives, Cambs UK |
 | CTTC Spain 2013 | `fetch.sh cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
 | ION rooftop RTL-SDR | `fetch.sh ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
+| ION LimeSDR (10 MHz, IF 420 kHz) | `fetch.sh ion-lime` | `-t 2xi16 --fs 10000000 --fi 420000` | ✅ **52.177, 4.488** — Netherlands (non-zero IF) |
 | [TEXBAT](https://rnl-data.ae.utexas.edu/datastore/texbat/) `cleanStatic` | manual (44 GB; ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ **30.287, −97.736** — Austin TX |
 | `GPS-L1-2022-03-27.sigmf-data` | `fetch.sh zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
 | ION BladeRF (10 MHz) | `fetch.sh ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
