@@ -459,6 +459,7 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::synth::{SynthSv, synth_l1ca};
 
     #[test]
     fn mock_reader_serves_slices_and_eof() {
@@ -478,37 +479,6 @@ mod tests {
         );
     }
 
-    // Synthesize `num_msec` of a clean (noiseless) L1CA signal for `prn`: the
-    // upsampled PRN code (rotated by `code_phase_chips`) modulated onto a carrier
-    // at the intermediate frequency, with the sign convention the receiver's
-    // de-rotation cancels (iq * replica = bare code). Acquisition locks on the
-    // first attempt. A non-zero code phase matches a real SV (never at exactly
-    // phase 0, which would hit a first-tracking-step buffer edge case).
-    fn synth_l1ca(
-        prn: u8,
-        fs: f64,
-        fi: f64,
-        code_phase_chips: usize,
-        num_msec: usize,
-    ) -> Vec<Complex64> {
-        use crate::code::Code;
-        const PI: f64 = std::f64::consts::PI;
-
-        let code = Code::gen_code("L1CA", prn).unwrap();
-        let code_len = code.len();
-        let code_sp = (fs * 1e-3) as usize;
-        let step = Complex64::from_polar(1.0, 2.0 * PI * fi / fs);
-
-        let mut carrier = Complex64::new(1.0, 0.0);
-        let mut sig = Vec::with_capacity(code_sp * num_msec);
-        for n in 0..code_sp * num_msec {
-            let chip = ((n % code_sp) * code_len / code_sp + code_phase_chips) % code_len;
-            sig.push(carrier * code[chip] as f64);
-            carrier *= step;
-        }
-        sig
-    }
-
     // End-to-end DSP unit test with no recording or network: a synthetic clean
     // signal must drive a channel from Acquisition into Tracking. This is the
     // hermetic regression the file-based integration tests can't be in CI.
@@ -516,7 +486,9 @@ mod tests {
     fn synthetic_signal_acquires_and_tracks() {
         let (fs, fi) = (2_046_000.0, 0.0);
         let prn = 5u8;
-        let sig = synth_l1ca(prn, fs, fi, 200, 60); // 60 ms: enough to acquire + track
+        // noiseless single SV at code phase 200 chips, zero Doppler.
+        let svs = [SynthSv::new(prn, 0.0, 200.0, 0.0)];
+        let sig = synth_l1ca(&svs, fs, fi, 60, None); // 60 ms: enough to acquire + track
 
         let state = Arc::new(Mutex::new(GnssState::new()));
         let cfg = ReceiverConfig {
@@ -546,6 +518,50 @@ mod tests {
         );
     }
 
+    // Point-4 regression at a realistic SNR: three SVs at different Doppler,
+    // code phase and strength share one AWGN realization; each must still
+    // acquire and hold tracking. Catches DSP regressions the noiseless test can
+    // hide, with no recording (runs in CI in well under a second).
+    #[test]
+    fn synthetic_noisy_multi_sv_acquires_and_tracks() {
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let svs = [
+            SynthSv::new(5, 1200.0, 137.0, 48.0),
+            SynthSv::new(12, -3400.0, 512.0, 45.0),
+            SynthSv::new(20, 700.0, 900.0, 50.0),
+        ];
+        let sig = synth_l1ca(&svs, fs, fi, 150, Some(0xC0FFEE)); // 150 ms in AWGN
+
+        let cfg = ReceiverConfig {
+            sats: "5,12,20".to_string(),
+            fs,
+            fi,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(MockIQReader::new(sig)),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        );
+        rx.run_loop(0);
+
+        for s in &svs {
+            let sv = SV::new(Constellation::GPS, s.prn);
+            let ch = &rx.channels[&sv];
+            assert!(
+                ch.is_state_tracking(),
+                "{sv} ({} dB-Hz synth) should reach Tracking in AWGN",
+                s.cn0_dbhz
+            );
+            assert!(
+                ch.get_cn0() > 35.0,
+                "{sv} C/N0 {:.1} should be above the lock threshold",
+                ch.get_cn0()
+            );
+        }
+    }
+
     // Regression: a code phase of exactly 0 makes the first tracking step wrap
     // `code_off_sec` below zero while corr_p is still empty. That used to panic
     // (`corr_p.back().unwrap()` in get_code_and_carrier_phase); it must now track.
@@ -553,7 +569,8 @@ mod tests {
     fn tracks_at_code_phase_zero_without_panicking() {
         let (fs, fi) = (2_046_000.0, 0.0);
         let prn = 5u8;
-        let sig = synth_l1ca(prn, fs, fi, 0, 60);
+        let svs = [SynthSv::new(prn, 0.0, 0.0, 0.0)]; // code phase exactly 0
+        let sig = synth_l1ca(&svs, fs, fi, 60, None);
         let cfg = ReceiverConfig {
             sats: prn.to_string(),
             fs,
