@@ -110,12 +110,15 @@ Use the helper script to fetch downloadable recordings into `resources/`:
 ```sh
 $ ./resources/fetch.sh          # list what's available
 $ ./resources/fetch.sh nov3     # the main dev recording (2xf32, 12.7 GiB)
+$ ./resources/fetch.sh cttc     # gnss-sdr's CTTC Spain capture (2xi16, ~1.1 GiB)
 $ ./resources/fetch.sh all      # everything
 ```
 The recording used for most of the development is `nov_3_time_18_48_st_ives`
 ([gypsum release](https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip),
-unzip into `resources/`, `-t 2xf32`). A few other online SDR captures at
-1575.42 MHz:
+unzip into `resources/`, `-t 2xf32`). Another good one is gnss-sdr's classic
+[CTTC Spain capture](https://sourceforge.net/projects/gnss-sdr/files/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.tar.gz)
+(complex int16, 4 MHz, `-t 2xi16 --fs 4000000`). A few other online SDR captures
+at 1575.42 MHz:
 - https://jeremyclark.ca/wp/telecom/rtl-sdr-for-satellite-gps/
 - https://s-taka.org/en/gnss-sdr-with-rtl-tcp/
 - https://destevez.net/2022/03/timing-sdr-recordings-with-gps/

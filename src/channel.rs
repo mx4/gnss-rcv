@@ -108,9 +108,28 @@ pub struct Acquisition {
     carriers: Vec<Vec<Complex64>>,
 }
 
+/// Per-channel work/quality counters, aggregated and printed at end of run.
+/// Plain counters bumped in the hot path (no locking).
+#[derive(Default, Clone)]
+pub struct ChannelStats {
+    pub acq_attempts: u64,       // completed acquisition attempts (T_ACQ blocks)
+    pub acq_corrs: u64,          // acquisition correlations done (= FFT pairs)
+    pub locks: u64,              // successful acquisitions -> tracking
+    pub lock_losses: u64,        // lost track (cn0 < threshold while tracking)
+    pub trk_periods: u64,        // code periods correlated while tracking (total)
+    pub trk_streak: u64,         // current continuous tracking run (periods)
+    pub max_trk_streak: u64,     // longest continuous tracking run (periods)
+    pub first_lock_ts: f64,      // ts_sec of first lock (0 = never)
+    pub peak_cn0: f64,           // best C/N0 seen while tracking
+    pub subframes: u64,          // LNAV subframes decoded (parity OK)
+    pub parity_errors: u64,      // LNAV parity failures
+    pub used_in_fix: bool,       // contributed to at least one successful fix
+}
+
 pub struct Channel {
     pub pub_state: Arc<Mutex<GnssState>>,
     pub sv: SV,
+    pub stats: ChannelStats,
     plots: bool,
     fc: f64, // carrier frequency
     fs: f64, // sampling frequency
@@ -156,6 +175,17 @@ impl Drop for Channel {
 }
 
 impl Channel {
+    /// Seconds of signal tracked (code periods correlated × code duration).
+    pub fn tracked_secs(&self) -> f64 {
+        self.stats.trk_periods as f64 * self.code_sec
+    }
+
+    /// Longest uninterrupted lock, in seconds (separates real SVs from the brief
+    /// false locks every PRN picks up during the search).
+    pub fn max_lock_secs(&self) -> f64 {
+        self.stats.max_trk_streak as f64 * self.code_sec
+    }
+
     pub fn get_cn0(&self) -> f64 {
         if self.state != State::Tracking {
             return 0.0;
@@ -270,6 +300,7 @@ impl Channel {
         Self {
             pub_state: pub_state.clone(),
             sv,
+            stats: ChannelStats::default(),
             plots,
             fft_planner,
             ts_sec: 0.0,
@@ -304,6 +335,7 @@ impl Channel {
 
     fn idle_start(&mut self) {
         if self.state == State::Tracking {
+            self.stats.lock_losses += 1;
             log::warn!(
                 "{}: {} cn0={:.1} ts_sec={:.3}",
                 self.sv,
@@ -393,6 +425,12 @@ impl Channel {
         self.set_state(State::Tracking);
         self.num_acq_fails = 0; // in view: restore full-rate retry on future loss
 
+        self.stats.locks += 1;
+        self.stats.trk_streak = 0; // start a fresh continuous-tracking run
+        if self.stats.first_lock_ts == 0.0 {
+            self.stats.first_lock_ts = self.ts_sec;
+        }
+
         self.trk.code_off_sec = code_off_sec;
         self.trk.doppler_hz = doppler_hz;
         self.update_state_doppler_hz();
@@ -408,6 +446,7 @@ impl Channel {
         let mut iq_vec = iq_vec_slice.to_vec();
 
         assert_eq!(iq_vec.len(), self.acq.prn_code_fft.len());
+        self.stats.acq_corrs += 1;
 
         // Apply the pre-computed carrier for this Doppler bin (was a per-sample
         // sin/cos via doppler_shift on every call).
@@ -476,6 +515,7 @@ impl Channel {
             let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / DOPPLER_SPREAD_BINS as f64;
             let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();
             self.acq_cn0 = cn0;
+            self.stats.acq_attempts += 1;
 
             if cn0 >= CN0_THRESHOLD_LOCKED {
                 self.tracking_start(doppler_hz, cn0, code_off_sec, code_offset_idx);
@@ -687,6 +727,10 @@ impl Channel {
         self.hist.corr_p.push_back(c_p);
         self.num_trk_samples += 1;
         self.num_tx_codes += 1.0;
+        self.stats.trk_periods += 1;
+        self.stats.trk_streak += 1;
+        self.stats.max_trk_streak = self.stats.max_trk_streak.max(self.stats.trk_streak);
+        self.stats.peak_cn0 = self.stats.peak_cn0.max(self.trk.cn0);
 
         // Integer part of the received-signal transmit-time. The continuous,
         // correctly-signed transmit phase is num_trk_samples*code_sec - code_off:

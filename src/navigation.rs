@@ -358,6 +358,7 @@ impl Channel {
         if Self::nav_test_lnav_parity(&bits, &mut nav_data) {
             self.nav.nav_sync = self.num_trk_samples;
             self.nav.sync_state = sync;
+            self.stats.subframes += 1;
 
             let id = self.nav_decode_lnav_subframe(&nav_data);
             let hex_str = hex_str(&nav_data[0..300]);
@@ -366,6 +367,7 @@ impl Channel {
             self.nav.nav_sync = 0;
             self.nav.sync_state = SyncState::Normal;
             self.nav.count_parity_err += 1;
+            self.stats.parity_errors += 1;
 
             log::warn!("{}: PARITY ERROR", self.sv);
         }

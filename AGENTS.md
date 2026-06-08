@@ -104,6 +104,22 @@ guesses. Tackle roughly top-to-bottom.
   pop/push (it tracks buffer alignment) while `num_tx_codes`/`code_off_sec`
   always wrap, so a first tracking step at code phase ~0 no longer panics.
   Regression: `tracks_at_code_phase_zero_without_panicking`.
+- ~~**`channel.rs` low-risk extractions**~~: the four `update_state_*` methods
+  collapsed into one `publish()` helper; the five `plot_*` methods moved to
+  `plots::plot_channel(sv, &History)`. `channel.rs` 835 → 743 lines, no longer
+  depends on `plotters`. (The deeper acquisition/tracking split is deferred — see
+  Architecture.)
+
+**Architecture**
+- **Full `channel.rs` acquisition/tracking split — deferred on purpose.** The
+  cheap, orthogonal extractions above are done. A true split into independent
+  `Acquisition`/`Tracking` types is harder than it looks: the tracking methods
+  read/write most of `Channel`'s fields (`num_trk_samples`, `num_tx_codes`,
+  `hist`, `trk`, `fc/fi/fs`, `code_sp`, `pub_state`), so it needs a real
+  interface, not a mechanical move — and it's pure cleanup with no functional
+  payoff. Do it when QZSS / the `SignalType` refactor (Multi-constellation,
+  below) forces the seams, not speculatively. The synthetic-signal +
+  position-fix tests make it safe to attempt whenever it happens.
 
 **Real but lower priority**
 - **Per-correlation allocations in `calc_correlation`** ([util.rs](src/util.rs)):

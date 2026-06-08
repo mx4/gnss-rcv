@@ -345,7 +345,8 @@ impl PositionSolver {
         );
     }
 
-    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) {
+    /// Returns true if a position was resolved this call.
+    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
         {
             let mut glob_ephs = SOLVER_EPHEMERIS.lock().unwrap();
             *glob_ephs = ephs.to_vec();
@@ -459,7 +460,10 @@ impl PositionSolver {
         let res = self.solver.ppp(now_gpst, params, &pool);
 
         match res {
-            Err(err) => log::warn!("Failed to get a position: {err}"),
+            Err(err) => {
+                log::warn!("Failed to get a position: {err}");
+                false
+            }
             Ok(pvt) => {
                 let pos = Vector3::new(pvt.pos_m.0, pvt.pos_m.1, pvt.pos_m.2);
                 self.last_fix_ecef = Some(pos);
@@ -498,6 +502,7 @@ impl PositionSolver {
                     )
                     .green()
                 );
+                true
             }
         }
     }

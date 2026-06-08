@@ -76,6 +76,20 @@ RUST_LOG=info cargo run --release -- -f resources/GPS-L1-2022-03-27.sigmf-data -
 ```
 Only ~15s long, so it is too short to decode an ephemeris / get a position fix.
 
+## 2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat
+source: https://sourceforge.net/projects/gnss-sdr/files/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.tar.gz
+The classic [gnss-sdr](https://gnss-sdr.org) sample capture (Castelldefels, Spain,
+2013). Complex int16 (ishort), 4 MHz, baseband (L1 centered, fi=0), 100 s. The
+`.tar.gz` (~1.1 GiB) expands into a folder; fetch with `./resources/fetch.sh cttc`.
+```
+RUST_LOG=info cargo run --release -- -f resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat -t 2xi16 --fs 4000000
+```
+gnss-sdr fixes it (5 SVs @ 45-52 dB-Hz; bundled `.nmea` truth ≈ 41.275 N, 1.988 E).
+**gnss-rcv does NOT yet get a fix on it**: the real SVs are strong but carry a
+large common LO Doppler offset (~+5.3 to +10 kHz), and gnss-rcv only reports the
+~35 dB-Hz noise floor — no ephemeris decodes. Open issue, not a format problem
+(format above is confirmed against the bundled gnss-sdr `.conf`).
+
 ## gioveAandB_short.bin
 http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/
 Real int8 samples (one signed byte per sample) at 16367600 Hz, IF=4130400 Hz:

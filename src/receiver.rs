@@ -103,6 +103,30 @@ pub struct Receiver {
     last_fix_sec: f64,
     exit_on_fix: bool,
     exit_req: Arc<AtomicBool>,
+    stats: RunStats,
+}
+
+/// Run-level work/perf counters, printed as a summary at end of `run_loop`.
+struct RunStats {
+    start: std::time::Instant,
+    msec_processed: usize, // 1 ms steps fed through process_step
+    fix_attempts: usize,   // solver called (>= 4 SVs after xcorr rejection)
+    fix_ok: usize,
+    fix_fail: usize,
+    xcorr_rejections: usize, // duplicate-ephemeris SVs dropped before solving
+}
+
+impl Default for RunStats {
+    fn default() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            msec_processed: 0,
+            fix_attempts: 0,
+            fix_ok: 0,
+            fix_fail: 0,
+            xcorr_rejections: 0,
+        }
+    }
 }
 
 /// Build the channel list. PRNs >= 120 are SBAS (geostationary augmentation)
@@ -240,6 +264,7 @@ impl Receiver {
             last_fix_sec: 0.0,
             exit_on_fix: cfg.exit_on_fix,
             exit_req,
+            stats: RunStats::default(),
         }
     }
 
@@ -287,7 +312,9 @@ impl Receiver {
             .map(|ch| ch.nav.eph)
             .collect();
 
+        let n_raw = ephs.len();
         let ephs = reject_cross_correlations(ephs);
+        self.stats.xcorr_rejections += n_raw - ephs.len();
 
         if ephs.len() < 4 {
             return;
@@ -298,12 +325,23 @@ impl Receiver {
             format!("attempting fix with {} SVs", ephs.len()).red()
         );
 
-        self.solver.compute_position(ts_sec, &ephs);
+        self.stats.fix_attempts += 1;
+        if self.solver.compute_position(ts_sec, &ephs) {
+            self.stats.fix_ok += 1;
+            for eph in &ephs {
+                if let Some(ch) = self.channels.get_mut(&eph.sv) {
+                    ch.stats.used_in_fix = true;
+                }
+            }
+        } else {
+            self.stats.fix_fail += 1;
+        }
         self.last_fix_sec = ts_sec;
     }
 
     fn process_step(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let (iq_vec, ts_sec) = self.fetch_samples_msec()?;
+        self.stats.msec_processed += 1;
 
         self.channels
             .par_iter_mut()
@@ -333,6 +371,76 @@ impl Receiver {
                 log::info!("{num_msec} msecs of iq-data processed");
                 break;
             }
+        }
+        self.print_stats();
+    }
+
+    fn print_stats(&self) {
+        let s = &self.stats;
+        let data_sec = s.msec_processed as f64 / 1000.0;
+        let wall = s.start.elapsed().as_secs_f64();
+        let rtf = if wall > 0.0 { data_sec / wall } else { 0.0 };
+
+        let mut chans: Vec<&Channel> = self.channels.values().collect();
+        chans.sort_by_key(|c| c.sv.prn);
+
+        let acquired = chans.iter().filter(|c| c.stats.locks > 0).count();
+        // "tracked" = held a *continuous* lock for >1s, to distinguish real SVs
+        // from the brief false locks every PRN gets during the search (those
+        // accumulate tracked time but never sustain a long streak).
+        let tracked = chans.iter().filter(|c| c.max_lock_secs() > 1.0).count();
+        let with_eph = chans.iter().filter(|c| c.is_ephemeris_complete()).count();
+        let used = chans.iter().filter(|c| c.stats.used_in_fix).count();
+
+        let sum = |f: fn(&Channel) -> u64| -> u64 { chans.iter().map(|c| f(c)).sum() };
+        let tot_acq = sum(|c| c.stats.acq_attempts);
+        let tot_acq_corr = sum(|c| c.stats.acq_corrs);
+        let tot_trk = sum(|c| c.stats.trk_periods);
+        let tot_sf = sum(|c| c.stats.subframes);
+        let tot_par = sum(|c| c.stats.parity_errors);
+
+        println!("\n===== run stats =====");
+        println!("data {data_sec:.1}s   wall {wall:.1}s   real-time {rtf:.1}x");
+        println!(
+            "funnel: searched {} -> acquired {} -> tracked {} -> ephemeris {} -> used-in-fix {}",
+            chans.len(),
+            acquired,
+            tracked,
+            with_eph,
+            used
+        );
+        println!(
+            "fixes: {} attempts, {} ok, {} failed   xcorr-rejected {}",
+            s.fix_attempts, s.fix_ok, s.fix_fail, s.xcorr_rejections
+        );
+        println!(
+            "work: {tot_acq} acq-attempts, {tot_acq_corr} acq-correlations, \
+             {tot_trk} tracking-periods, {tot_sf} subframes, {tot_par} parity-errors"
+        );
+
+        // Per-SV detail, only for PRNs that acquired at least once.
+        println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0 subfr parity eph fix");
+        for c in chans.iter().filter(|c| c.stats.locks > 0) {
+            let st = &c.stats;
+            let ttfl = if st.first_lock_ts > 0.0 {
+                format!("{:.1}", st.first_lock_ts)
+            } else {
+                "-".to_string()
+            };
+            println!(
+                "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
+                c.sv.to_string(),
+                st.locks,
+                st.lock_losses,
+                c.tracked_secs(),
+                c.max_lock_secs(),
+                ttfl,
+                st.peak_cn0,
+                st.subframes,
+                st.parity_errors,
+                if c.is_ephemeris_complete() { "y" } else { "-" },
+                if st.used_in_fix { "y" } else { "-" },
+            );
         }
     }
 }
