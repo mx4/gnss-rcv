@@ -37,8 +37,12 @@ const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 
-const DOPPLER_SPREAD_HZ: f64 = 8000.0;
-const DOPPLER_SPREAD_BINS: usize = 50;
+// Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
+// captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
+// still lands inside the window, on top of the +/-5 kHz of true GPS Doppler. The
+// bin count keeps the step at ~320 Hz (2*12000/75) so resolution is unchanged.
+const DOPPLER_SPREAD_HZ: f64 = 12000.0;
+const DOPPLER_SPREAD_BINS: usize = 75;
 const HISTORY_NUM: usize = 20000;
 const CN0_THRESHOLD_LOCKED: f64 = 35.0;
 const CN0_THRESHOLD_LOST: f64 = 29.0;
@@ -112,18 +116,18 @@ pub struct Acquisition {
 /// Plain counters bumped in the hot path (no locking).
 #[derive(Default, Clone)]
 pub struct ChannelStats {
-    pub acq_attempts: u64,       // completed acquisition attempts (T_ACQ blocks)
-    pub acq_corrs: u64,          // acquisition correlations done (= FFT pairs)
-    pub locks: u64,              // successful acquisitions -> tracking
-    pub lock_losses: u64,        // lost track (cn0 < threshold while tracking)
-    pub trk_periods: u64,        // code periods correlated while tracking (total)
-    pub trk_streak: u64,         // current continuous tracking run (periods)
-    pub max_trk_streak: u64,     // longest continuous tracking run (periods)
-    pub first_lock_ts: f64,      // ts_sec of first lock (0 = never)
-    pub peak_cn0: f64,           // best C/N0 seen while tracking
-    pub subframes: u64,          // LNAV subframes decoded (parity OK)
-    pub parity_errors: u64,      // LNAV parity failures
-    pub used_in_fix: bool,       // contributed to at least one successful fix
+    pub acq_attempts: u64,   // completed acquisition attempts (T_ACQ blocks)
+    pub acq_corrs: u64,      // acquisition correlations done (= FFT pairs)
+    pub locks: u64,          // successful acquisitions -> tracking
+    pub lock_losses: u64,    // lost track (cn0 < threshold while tracking)
+    pub trk_periods: u64,    // code periods correlated while tracking (total)
+    pub trk_streak: u64,     // current continuous tracking run (periods)
+    pub max_trk_streak: u64, // longest continuous tracking run (periods)
+    pub first_lock_ts: f64,  // ts_sec of first lock (0 = never)
+    pub peak_cn0: f64,       // best C/N0 seen while tracking
+    pub subframes: u64,      // LNAV subframes decoded (parity OK)
+    pub parity_errors: u64,  // LNAV parity failures
+    pub used_in_fix: bool,   // contributed to at least one successful fix
 }
 
 pub struct Channel {
@@ -493,24 +497,31 @@ impl Channel {
         if self.num_acq_samples as f64 * self.code_sec >= T_ACQ {
             let mut code_offset_idx = 0;
             let mut idx = 0;
-            let mut p_max = 0.0;
             let mut p_peak = 0.0;
             let mut p_total = 0.0;
 
+            // Pick the (Doppler, code-phase) cell with the highest correlation
+            // *peak* (standard acquisition: the global max of the 2D surface).
+            // Selecting the bin by total integrated power (sum over all code
+            // phases) instead biases toward whichever Doppler bin holds the most
+            // spread interference energy; with several strong SVs present (e.g.
+            // the CTTC capture) that steers acquisition to an interference bin
+            // near 0 Hz and misses the real auto-correlation peak.
             for i in 0..DOPPLER_SPREAD_BINS {
-                let p_sum = self.acq.sum_p[i].iter().sum();
                 let (j_peak, v_peak) = get_max_with_idx(&self.acq.sum_p[i]);
-
-                if p_sum > p_max {
+                if v_peak > p_peak {
                     idx = i;
-                    p_max = p_sum;
                     p_peak = v_peak;
                     code_offset_idx = j_peak;
                 }
-                p_total += p_sum;
+                p_total += self.acq.sum_p[i].iter().sum::<f64>();
             }
 
-            let doppler_hz = -DOPPLER_SPREAD_HZ + (idx as f64 + 0.5) * step_hz;
+            // Report the carrier frequency of the winning bin (the replicas are
+            // built at -SPREAD + i*step, line ~293), not the bin *center*: a
+            // +0.5*step here would seed tracking ~160 Hz off the frequency that
+            // actually produced the peak, hurting carrier pull-in / bit sync.
+            let doppler_hz = -DOPPLER_SPREAD_HZ + idx as f64 * step_hz;
             let code_off_sec = code_offset_idx as f64 / self.code_sp as f64 * self.code_sec;
             let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / DOPPLER_SPREAD_BINS as f64;
             let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();

@@ -247,6 +247,12 @@ pub struct PositionSolver {
 fn make_config() -> Config {
     let mut cfg = Config::default().with_navigation_method(Method::SPP);
     cfg.min_sv_elev = Some(0.0);
+    // gnss-rtk's default max_gdop (5.0) targets ultra-precise use and rejects
+    // perfectly valid marginal-geometry fixes -- e.g. the CTTC capture, which
+    // gnss-sdr itself solves at HDOP 4.4 (GDOP ~7-9). Relax it so a usable fix
+    // from a sparse/clustered SV set isn't thrown away. Good-geometry recordings
+    // (gpssim, nov3) sit well under this and are unaffected.
+    cfg.solver.max_gdop = 30.0;
     // Our pseudorange t_tx is anchored to the nav-message TOW, which is the
     // satellite's OWN clock reading. So pr_m = geom + c*dT_rx - c*clock_corr,
     // and gnss-rtk must ADD clock_corr back (sv_clock_bias = true, default).
@@ -269,7 +275,16 @@ fn make_solver(almanac: &Almanac, earth_frame: Frame, cfg: &Config) -> SolverIns
     let sb = Rc::new(ReceiverSpacebornBias);
     let eb = Rc::new(ReceiverEnvironmentalBias);
     let tim = ReceiverTime;
-    Solver::new_survey(almanac.clone(), earth_frame, cfg.clone(), eph, orb, sb, eb, tim)
+    Solver::new_survey(
+        almanac.clone(),
+        earth_frame,
+        cfg.clone(),
+        eph,
+        orb,
+        sb,
+        eb,
+        tim,
+    )
 }
 
 impl PositionSolver {
@@ -349,8 +364,7 @@ impl PositionSolver {
             // Ionosphere needs a receiver position for the pierce point; we only
             // have one once there's a previous fix, so before that leave it at 0
             // (a few metres, dwarfed by the first-fix transient anyway).
-            let iono_m = if iono_valid && self.last_fix_ecef.is_some() {
-                let rx_ecef = self.last_fix_ecef.unwrap();
+            let iono_m = if let (true, Some(rx_ecef)) = (iono_valid, self.last_fix_ecef) {
                 let sat = compute_sv_position_ecef(eph, now_gpst);
                 let (elev, azim) = elevation_azimuth(rx_ecef, sat);
                 let (lat, lon, _) =
