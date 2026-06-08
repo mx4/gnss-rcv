@@ -69,6 +69,7 @@ pub struct ReceiverConfig {
     pub sig: String,
     pub sats: String,
     pub sbas: bool,
+    pub qzss: bool,
     pub plots: bool,
     pub exit_on_fix: bool,
 }
@@ -86,6 +87,7 @@ impl Default for ReceiverConfig {
             sig: "L1CA".to_string(),
             sats: String::new(),
             sbas: false,
+            qzss: false,
             plots: false,
             exit_on_fix: false,
         }
@@ -129,14 +131,18 @@ impl Default for RunStats {
     }
 }
 
-/// Build the channel list. PRNs >= 120 are SBAS (geostationary augmentation)
-/// satellites; they share the L1 C/A code structure, so tag them as such — logs
-/// and plots then read e.g. `S123`, and since they never complete a GPS
-/// ephemeris the position solver leaves them out. `sbas` appends the legacy SBAS
-/// L1 block (PRN 120-138) for a detection sweep on top of whatever was selected.
-fn get_sat_list(sats: &str, sbas: bool) -> Vec<SV> {
+/// Build the channel list, tagging each PRN's constellation by its number:
+/// 193-202 are QZSS, 120-158 are SBAS, the rest GPS. All three share the L1 C/A
+/// Gold-code/LNAV machinery, so they acquire and decode through the same path;
+/// the tag drives the log/plot label (G/S/Q) and the solver. `sbas` appends the
+/// legacy SBAS L1 block (PRN 120-138) and `qzss` the QZSS block (PRN 193-202) on
+/// top of whatever was selected. (SBAS never completes a GPS ephemeris so the
+/// solver ignores it; QZSS does and `gnss-rtk` solves it.)
+fn get_sat_list(sats: &str, sbas: bool, qzss: bool) -> Vec<SV> {
     let sv_for_prn = |prn: u8| {
-        let cons = if prn >= 120 {
+        let cons = if (193..=202).contains(&prn) {
+            Constellation::QZSS
+        } else if prn >= 120 {
             Constellation::SBAS
         } else {
             Constellation::GPS
@@ -158,6 +164,11 @@ fn get_sat_list(sats: &str, sbas: bool) -> Vec<SV> {
     if sbas {
         for prn in 120..=138_u8 {
             sat_vec.push(SV::new(Constellation::SBAS, prn));
+        }
+    }
+    if qzss {
+        for prn in 193..=202_u8 {
+            sat_vec.push(SV::new(Constellation::QZSS, prn));
         }
     }
     sat_vec
@@ -246,7 +257,7 @@ impl Receiver {
     ) -> Self {
         let period_sp = (PERIOD_RCV * cfg.fs) as usize;
         let mut channels = HashMap::<SV, Channel>::new();
-        for sv in get_sat_list(&cfg.sats, cfg.sbas) {
+        for sv in get_sat_list(&cfg.sats, cfg.sbas, cfg.qzss) {
             channels.insert(
                 sv,
                 Channel::new(&cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
@@ -600,20 +611,41 @@ mod tests {
     }
 
     #[test]
-    fn sat_list_tags_sbas_and_appends_block() {
-        // Explicit list: PRN >= 120 is tagged SBAS, the rest GPS.
-        let l = get_sat_list("1,32,120,138", false);
-        assert_eq!(l.len(), 4);
-        assert_eq!(l[0].constellation, Constellation::GPS);
-        assert_eq!(l[1].constellation, Constellation::GPS);
-        assert_eq!(l[2].constellation, Constellation::SBAS);
-        assert_eq!(l[3].constellation, Constellation::SBAS);
+    fn sat_list_tags_constellations_and_appends_blocks() {
+        // Explicit list: PRN by number -> GPS / SBAS / QZSS.
+        let l = get_sat_list("1,32,120,138,193,202", false, false);
+        let cons: Vec<_> = l.iter().map(|s| s.constellation).collect();
+        assert_eq!(
+            cons,
+            vec![
+                Constellation::GPS,
+                Constellation::GPS,
+                Constellation::SBAS,
+                Constellation::SBAS,
+                Constellation::QZSS,
+                Constellation::QZSS,
+            ]
+        );
 
-        // --sbas appends the 120-138 block (19 PRNs) on top of the GPS default.
-        let l = get_sat_list("", true);
-        let sbas = l.iter().filter(|s| s.constellation == Constellation::SBAS);
+        // --sbas appends the 120-138 block (19 PRNs) on the GPS default.
+        let l = get_sat_list("", true, false);
         assert_eq!(l.len(), 32 + 19);
-        assert_eq!(sbas.count(), 19);
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::SBAS)
+                .count(),
+            19
+        );
+
+        // --qzss appends the 193-202 block (10 PRNs).
+        let l = get_sat_list("", false, true);
+        assert_eq!(l.len(), 32 + 10);
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::QZSS)
+                .count(),
+            10
+        );
     }
 
     #[test]

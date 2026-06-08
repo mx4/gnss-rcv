@@ -48,6 +48,8 @@ struct Options {
     sats: String,
     #[structopt(long, help = "also search the SBAS L1 block (PRN 120-138)")]
     sbas: bool,
+    #[structopt(long, help = "also search the QZSS L1 block (PRN 193-202)")]
+    qzss: bool,
     #[structopt(short = "-u", long, help = "use ui")]
     use_ui: bool,
     #[structopt(short = "-p", long, help = "write diagnostic plots to plots/")]
@@ -135,6 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sig: opt.sig.clone(),
         sats: opt.sats.clone(),
         sbas: opt.sbas,
+        qzss: opt.qzss,
         plots: opt.plots,
         exit_on_fix: opt.exit_on_fix,
     };
