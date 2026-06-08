@@ -559,12 +559,16 @@ impl Channel {
         let lo_u = lo as usize;
         let hi_u = (lo + n) as usize;
 
-        // Doppler-mix the received code period into a reused scratch buffer
-        // (no per-call allocation; doppler_shift mixes by phase recurrence).
-        let (doppler, phi, fs) = (self.trk.doppler_hz, self.trk.phi, self.fs);
+        // Mix the received code period down to baseband into a reused scratch
+        // buffer (no per-call allocation; doppler_shift mixes by phase
+        // recurrence). The carrier to remove is the full fi + doppler, not just
+        // the Doppler: with a non-zero intermediate frequency the signal sits at
+        // fi + doppler, so mixing by doppler alone leaves an fi residual that
+        // destroys the prompt (fi=0 baseband recordings are unaffected).
+        let (fc, phi, fs) = (self.fi + self.trk.doppler_hz, self.trk.phi, self.fs);
         self.trk.sig_buf.clear();
         self.trk.sig_buf.extend_from_slice(&iq_vec2[lo_u..hi_u]);
-        doppler_shift(&mut self.trk.sig_buf, doppler, phi, fs);
+        doppler_shift(&mut self.trk.sig_buf, fc, phi, fs);
 
         let pos = (SP_CORR * self.code_sec * self.fs / self.code_len as f64) as usize;
         let pos_neutral: usize = 80;

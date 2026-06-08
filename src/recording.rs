@@ -18,6 +18,8 @@ use crate::receiver::IQReader;
 pub enum IQFileType {
     TypePairFloat32,
     TypePairInt16,
+    // interleaved signed int8 I/Q (complex), e.g. HackRF / many SDRs.
+    TypePairInt8,
     TypeRtlSdrFile,
     TypeOneInt8,
     // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
@@ -31,6 +33,7 @@ impl FromStr for IQFileType {
         match input {
             "2xf32" => Ok(IQFileType::TypePairFloat32),
             "2xi16" => Ok(IQFileType::TypePairInt16),
+            "2xi8" => Ok(IQFileType::TypePairInt8),
             "rtlsdr-file" => Ok(IQFileType::TypeRtlSdrFile),
             "i8" => Ok(IQFileType::TypeOneInt8),
             "1bit" => Ok(IQFileType::TypeOneBit),
@@ -44,6 +47,7 @@ impl fmt::Display for IQFileType {
         match *self {
             IQFileType::TypePairFloat32 => write!(f, "2xf32"),
             IQFileType::TypePairInt16 => write!(f, "2xi16"),
+            IQFileType::TypePairInt8 => write!(f, "2xi8"),
             IQFileType::TypeRtlSdrFile => write!(f, "rtlsdr-file"),
             IQFileType::TypeOneInt8 => write!(f, "i8"),
             IQFileType::TypeOneBit => write!(f, "1bit"),
@@ -118,6 +122,14 @@ impl IQReader for IQRecording {
                     });
                 }
             }
+            IQFileType::TypePairInt8 => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    iq_vec.push(Complex64 {
+                        re: bytes[off] as i8 as f64 / i8::MAX as f64,
+                        im: bytes[off + 1] as i8 as f64 / i8::MAX as f64,
+                    });
+                }
+            }
             IQFileType::TypePairInt16 => {
                 for off in (0..bytes.len()).step_by(sample_size) {
                     let i = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
@@ -188,6 +200,7 @@ impl IQRecording {
         match file_type {
             IQFileType::TypeRtlSdrFile => 2,
             IQFileType::TypeOneInt8 => 1,
+            IQFileType::TypePairInt8 => 2,
             IQFileType::TypePairInt16 => 2 * 2,
             IQFileType::TypePairFloat32 => 2 * 4,
             // Sub-byte; not expressible here -- handled on its own read path.
