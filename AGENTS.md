@@ -98,6 +98,11 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 - `--num-msec N` bounds the run; `RUST_LOG=warn` cuts log noise.
 - `-p` / `--plots` enables per-SV PNG diagnostics in `plots/` (off by default — skipping saves I/O during headless runs).
 - `-x` / `--exit-on-fix` stops the run as soon as the first fix is computed (useful with long files; the fix test uses this).
+- `--json <path>` writes a machine-readable end-of-run summary (`fix`, `funnel`,
+  `stats`, per-SV `sats`) — the serialized twin of the `===== run stats =====`
+  block, built from the same data. `-` = stdout (pipe to `jq`; the human stats
+  and the `file: …` banner go to stderr in that mode), a file path keeps the
+  human stats on stdout. Prefer asserting on this over grepping logs.
 - A position fix needs ~3 subframes decoded (~20–40 s of IQ). Use `-x` to stop
   at the first fix, or `--num-msec` to bound a run that may never get one.
 
@@ -254,10 +259,86 @@ Without these gnss-rcv cannot integrate with any external tool:
 
 | Item | Notes |
 |---|---|
-| **Galileo E1** | BOC(1,1) correlator, 4092-chip memory codes, I/NAV FEC decoder. Highest ROI after GPS. |
+| **Galileo E1** | BOC(1,1) correlator, 4092-chip memory codes, I/NAV FEC decoder. Highest ROI after GPS. See detailed plan below. |
 | **GPS L2C / L5** | Dual-frequency → ionosphere-free combination; opens the door to PPP. |
 | **GLONASS L1** | FDMA (per-SV carrier); breaks single-IF assumption end-to-end. Hard. |
 | **BeiDou B1** | Completes global coverage. |
+
+#### Galileo E1 — implementation plan
+
+Key differences from GPS L1 C/A that drive every change:
+
+| Property | GPS L1 C/A | Galileo E1-B |
+|---|---|---|
+| Modulation | BPSK | BOC(1,1) — code × square-wave subcarrier at 1.023 MHz |
+| Code length | 1023 chips | 4092 chips (memory codes, not Gold codes) |
+| Code period | 1 ms | 4 ms |
+| Carrier | 1575.42 MHz | 1575.42 MHz (same — no RF changes) |
+| Nav data rate | 50 bps | 250 bps (before FEC) |
+| FEC | None (Hamming parity per word) | Rate-1/2 conv (K=7, G1=171₈, G2=133₈) + 8×30 block interleaver |
+| Frame check | 6-bit Hamming parity | CRC-24Q per page |
+| Full ephemeris | Subframes 1–3 (~60 s) | Word types 1–4 (~8 pages ≈ 16 s) |
+
+**Implementation order** (each step is independently testable):
+
+**Step 1 — `src/code.rs`: E1-B memory code generation**
+- `gen_e1b_code(prn: u8) -> Vec<i8>` — 4092-chip E1-B code per the Galileo OS SIS ICD §3.3.3.1.1.
+  The ICD defines the codes via a specific LFSR construction; pre-computing and storing as a
+  static table (4092 × 36 ints ≈ 150 KB) is the most practical first approach.
+- `gen_e1c_code(prn: u8)` — pilot channel code (optional; needed only for pilot-aided acquisition).
+- New arms in `gen_code` / `get_code_period` / `get_code_len` / `get_code_freq`:
+  `"E1B"` → `4e-3` / `4092` / `1575.42e6`.
+- Test: same autocorrelation peak + bounded off-peak cross-correlation properties as GPS Gold codes.
+
+**Step 2 — `src/channel.rs`: BOC(1,1) correlator**
+- During upsampling in `Channel::new`, multiply each sample by the BOC subcarrier:
+  `ref[i] = code[chip_i] * sign(sin(2π × 1.023e6 × i / fs))`.
+  At 2 samples/chip this reduces to the alternating pattern `[+code, −code]` per chip; the
+  `sin()` formula handles arbitrary sample rates correctly.
+- Increase non-coherent integration time: `T_ACQ = 0.04` (10 × 4 ms) for E1-B.
+- `nav_decode()` routing: branch on `sv.constellation == Constellation::Galileo` before the
+  LNAV path to call `nav_decode_inav()`.
+
+**Step 3 — `src/receiver.rs`: `--galileo` flag + PRN range**
+- Add `galileo: bool` to `Options` / `ReceiverConfig` (same pattern as `--qzss`).
+- In `get_sat_list`: when `galileo`, push `SV::new(Constellation::Galileo, prn)` for PRNs 1–36.
+  (Galileo PRNs 1–36 overlap with GPS 1–32, so they must be created with explicit `--galileo`,
+  never by default.)
+- Stats / cross-correlation rejection already work generically; no changes needed there.
+
+**Step 4 — `src/ephemeris.rs`: Galileo fields**
+- Add `bgd_e5a_e1: f64` and `bgd_e5b_e1: f64` (replaces `tgd` for Galileo; use `bgd_e5a_e1`
+  as the L1 group-delay correction for E1-only reception).
+- `is_valid()`: the GPS week range check `(2048..3000).contains(&self.week)` rejects Galileo
+  weeks; make it constellation-aware.
+- The orbital math (a, e, i0, M0, ω, Ω0, perturbations) is identical to GPS — no new fields.
+
+**Step 5 — `src/navigation.rs`: I/NAV decoder**
+New functions, all independently unit-testable with known I/NAV frames from the ICD:
+```
+nav_decode_inav()             — top-level: sync → FEC → CRC → word dispatch
+nav_sync_e1b_symbol()         — 1 symbol per 4 ms code period (vs 20 ms/bit for GPS)
+nav_viterbi_decode(symbols)   — rate-1/2 K=7 Viterbi, 500 channel symbols → 250 bits
+nav_deinterleave_8x30(bits)   — undo the 8×30 block interleaver before Viterbi
+nav_crc24q(data) -> bool      — CRC-24Q verification per page
+nav_decode_inav_word1..4()    — Keplerian elements from ICD Tables 25–29
+```
+Word type content:
+- **Word 1**: IODnav, t_oe, M0, e, √a
+- **Word 2**: IODnav, Ω0, i0, ω, i_dot
+- **Word 3**: IODnav, Ω_dot, Δn, C_uc/C_us/C_rc/C_rs, SISA
+- **Word 4**: IODnav, C_ic/C_is, t_oc, a_f0, a_f1, a_f2, BGD(E1,E5a), BGD(E1,E5b)
+
+The Viterbi decoder (~150 lines, rate-1/2 K=7) is the hardest single piece.
+Reference: Galileo OS SIS ICD (freely downloadable from ESA GSC), Tables 4 and 24–29.
+
+**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD**
+- Add `EARTH_MU_GAL = 3.986004418e14` (Galileo ICD value; GPS is `3.9860058e14` — differs
+  ~0.01 ppm → ~1 mm on SV position; use the right constant based on constellation).
+- `ReceiverSpacebornBias::group_delay`: return `eph.bgd_e5a_e1` for Galileo SVs.
+- GST → GPST: Galileo System Time differs from GPST by a constant offset carried in I/NAV
+  word type 6. For a first implementation, treat GST ≈ GPST (offset is sub-µs historically)
+  and refine once word-type-6 decoding is in place.
 
 ### D. Developer experience
 

@@ -103,7 +103,18 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
 - `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
 - `-p` / `--plots`: write per-SV diagnostic PNGs to `plots/` (off by default).
 - `-x` / `--exit-on-fix`: stop as soon as the first position fix is computed.
+- `--json <path>`: write a machine-readable end-of-run summary (fix, funnel,
+  per-SV table, work counters) to `<path>` — `-` means stdout, so it pipes
+  straight into `jq`. A file target still prints the human stats to stdout.
 - `-u`: open the UI; `-l <file>`: also write logs to a file.
+
+The JSON mirrors the `===== run stats =====` block, e.g.:
+```sh
+$ cargo run --release -- -f resources/gpssim_2xi16 -t 2xi16 -x --json - | jq '.fix'
+{ "lat": 46.2066, "lon": 6.1540, "alt_m": 622.6, "n_sv": 5 }
+```
+This is what turns a run into an assertion (truth check, regression diff) instead
+of grepping logs.
 
 ## Getting sample data
 
