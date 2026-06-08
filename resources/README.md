@@ -87,11 +87,51 @@ The classic [gnss-sdr](https://gnss-sdr.org) sample capture (Castelldefels, Spai
 ```
 RUST_LOG=info cargo run --release -- -f resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat -t 2xi16 --fs 4000000
 ```
-gnss-sdr fixes it (5 SVs @ 45-52 dB-Hz; bundled `.nmea` truth ≈ 41.275 N, 1.988 E).
-**gnss-rcv does NOT yet get a fix on it**: the real SVs are strong but carry a
-large common LO Doppler offset (~+5.3 to +10 kHz), and gnss-rcv only reports the
-~35 dB-Hz noise floor — no ephemeris decodes. Open issue, not a format problem
-(format above is confirmed against the bundled gnss-sdr `.conf`).
+**gnss-rcv fixes it at ≈ 41.274 N, 1.986 E** (bundled `.nmea` truth ≈ 41.275 N,
+1.988 E — within ~150 m). The SVs are strong (45-52 dB-Hz) but carry a large
+common LO Doppler offset (~+5 to +10 kHz); getting the fix needed the acquisition
+peak-selection fix, the ±12 kHz Doppler search, and a relaxed solver GDOP limit.
+(Note: it logs a 2032 GPST date — the GPS week-rollover bug; it does not affect
+the position.)
+
+## ION_RTLSDR_Bands-L1.rtlsdr
+source: https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8 (`fetch.sh ion-rtlsdr`)
+A real RTL-SDR L1 capture from the [ION GNSS SDR sample-data standard](https://sdr.ion.org/api-sample-data.html),
+rooftop antenna. uint8 offset-binary I/Q (the rtl_sdr native format), 2.048 MHz,
+baseband (fi=0), 60 s. This is the same format a live rtl-sdr dongle produces.
+```
+RUST_LOG=info cargo run --release -- -f resources/ION_RTLSDR_Bands-L1.rtlsdr -t rtlsdr-file --fs 2048000
+```
+**gnss-rcv fixes it at ≈ 52.177 N, 4.489 E** (Netherlands) at ~37 s, 11 SVs with
+ephemeris. Confirms the `rtlsdr-file` path works end-to-end on real dongle data.
+
+## ION_BladeRF_Bands-L1.2xi16
+source: https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16 (`fetch.sh ion-bladerf`)
+Another [ION sample](https://sdr.ion.org/api-sample-data.html): BladeRF front-end,
+complex int16 (two's complement), 10 MHz, baseband (fi=0), ~13 s.
+```
+RUST_LOG=info cargo run --release -- -f resources/ION_BladeRF_Bands-L1.2xi16 -t 2xi16 --fs 10000000
+```
+Acquires/tracks 13 SVs at ≥40 dB-Hz and decodes subframes cleanly, but ~13 s is
+too short to complete an ephemeris / get a fix (like the SigMF capture above).
+
+## ION_HackRF_Bands-L1.2xi8
+source: https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8 (`fetch.sh ion-hackrf`)
+HackRF front-end, **interleaved signed int8 I/Q** (complex), 10 MHz, IF 420 kHz,
+60 s. This file is what added the `2xi8` format type: it is signed complex int8,
+which none of the older types read (`i8` is real-only → 0 SVs; `rtlsdr-file` is
+*unsigned* offset-binary → wrong DC, ~7 SVs).
+```
+RUST_LOG=info cargo run --release -- -f resources/ION_HackRF_Bands-L1.2xi8 -t 2xi8 --fs 10000000 --fi 420000
+```
+With `-t 2xi8` it acquires/tracks **11 SVs at 45–51 dB-Hz**. It also surfaced a
+real tracking bug: the carrier de-rotation removed only the Doppler, not the
+intermediate frequency, so a non-zero `--fi` left a residual that gutted the
+prompt (acquisition cn0 ~48 collapsed to ~30 the moment tracking began). Fixed in
+[channel.rs](../src/channel.rs) by mixing tracking down by `fi + doppler` (a no-op
+for the fi=0 baseband captures). Now some SVs decode ephemeris, but it still does
+**not** get a full fix on this file — nav decode is intermittent (remaining open
+issue, separate from the carrier fix).
 
 ## gioveAandB_short.bin
 http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/

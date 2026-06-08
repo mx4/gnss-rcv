@@ -18,6 +18,9 @@ RESOURCES=(
   "jks-1bit|http://www.jks.com/gps/gps.samples.1bit.I.fs5456.if4092.bin|gps.samples.1bit.I.fs5456.if4092.bin|55791616|raw|-t 1bit --fs 5456000 --fi 1364000"
   "zenodo-sigmf|https://zenodo.org/records/6394603/files/GPS-L1-2022-03-27.sigmf-data?download=1|GPS-L1-2022-03-27.sigmf-data|240000000|raw|-t 2xi16 --fs 4000000  (~15s, too short for a fix)"
   "cttc|https://sourceforge.net/projects/gnss-sdr/files/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.tar.gz|2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat|0|tgz|-t 2xi16 --fs 4000000  (CTTC Spain 2013; ~1.1 GiB download)"
+  "ion-rtlsdr|https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8|ION_RTLSDR_Bands-L1.rtlsdr|245760000|raw|-t rtlsdr-file --fs 2048000  (ION rooftop RTL-SDR L1, 60s; fixes)"
+  "ion-bladerf|https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16|ION_BladeRF_Bands-L1.2xi16|527335424|raw|-t 2xi16 --fs 10000000  (ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix)"
+  "ion-hackrf|https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8|ION_HackRF_Bands-L1.2xi8|1200000000|raw|-t 2xi8 --fs 10000000 --fi 420000  (ION HackRF L1; acquires 11 SVs but doesn't nav-decode -- open issue)"
   "nov3|https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip|nov_3_time_18_48_st_ives|12699331696|zip|-t 2xf32  (main dev recording)"
 )
 

@@ -82,6 +82,7 @@ $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin -t <format>
 |---------------|-----------------------------------------------------|
 | `2xf32`       | interleaved float32 I/Q (default)                   |
 | `2xi16`       | interleaved int16 I/Q (e.g. `gps-sdr-sim -b 16`)    |
+| `2xi8`        | interleaved signed int8 I/Q (e.g. HackRF)           |
 | `i8`          | single int8, real-only                              |
 | `rtlsdr-file` | interleaved uint8 I/Q (an `rtl_sdr` capture)        |
 | `1bit`        | 8 hard-limited 1-bit real samples packed per byte   |
@@ -108,10 +109,11 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
 ### Download an existing recording
 Use the helper script to fetch downloadable recordings into `resources/`:
 ```sh
-$ ./resources/fetch.sh          # list what's available
-$ ./resources/fetch.sh nov3     # the main dev recording (2xf32, 12.7 GiB)
-$ ./resources/fetch.sh cttc     # gnss-sdr's CTTC Spain capture (2xi16, ~1.1 GiB)
-$ ./resources/fetch.sh all      # everything
+$ ./resources/fetch.sh            # list what's available
+$ ./resources/fetch.sh nov3       # the main dev recording (2xf32, 12.7 GiB)
+$ ./resources/fetch.sh cttc       # gnss-sdr's CTTC Spain capture (2xi16, ~1.1 GiB)
+$ ./resources/fetch.sh ion-rtlsdr # ION rooftop RTL-SDR L1 capture (246 MB, fixes)
+$ ./resources/fetch.sh all        # everything
 ```
 The recording used for most of the development is `nov_3_time_18_48_st_ives`
 ([gypsum release](https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip),
@@ -125,6 +127,27 @@ at 1575.42 MHz:
 
 Details on every recording: [resources/README.md](./resources/README.md).
 
+### Recordings tried
+Real-world IQ captures gnss-rcv has been run against, the exact settings, and the
+result (a ✅ fix is the computed lat/lon vs. the recording's true location):
+
+| recording | get it | settings | result |
+|---|---|---|---|
+| `gpssim_2xi16` (Geneva, simulated) | `gen_gpssim.sh` | `-t 2xi16` | ✅ **46.207, 6.156** (truth 46.2075, 6.1557) |
+| `nov_3_time_18_48_st_ives` | `fetch.sh nov3` | `-t 2xf32` | ✅ **52.334, −0.081** — St Ives, Cambs UK |
+| CTTC Spain 2013 | `fetch.sh cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
+| ION rooftop RTL-SDR | `fetch.sh ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
+| [TEXBAT](https://rnl-data.ae.utexas.edu/datastore/texbat/) `cleanStatic` | manual (44 GB; ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ **30.287, −97.736** — Austin TX |
+| `GPS-L1-2022-03-27.sigmf-data` | `fetch.sh zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
+| ION BladeRF (10 MHz) | `fetch.sh ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
+| ION HackRF (10 MHz, IF 420 kHz) | `fetch.sh ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks 11 SVs (45–51 dB-Hz), decodes some ephemeris; no full fix yet (intermittent nav decode — open) |
+| `gps.samples.1bit…` | `fetch.sh jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks ~7 SVs at a marginal ~30 dB-Hz; no fix |
+| `gioveAandB_short.bin` | [gfix.dk](http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/) (by hand) | `-t i8 --fs 16367600 --fi 4130400` | acquires/tracks; short — no fix |
+
+The [ION SDR sample collection](https://sdr.ion.org/api-sample-data.html) has more
+L1 captures (BladeRF, HackRF, LimeSDR, SiGe…), each with a `.sdrx` metadata file
+giving the rate/format/IF to map onto `-t`/`--fs`/`--fi`.
+
 ### Simulate a recording
 [gps-sdr-sim](https://github.com/osqzss/gps-sdr-sim) generates an IQ recording
 for a chosen date and location (2× int16 per sample, use `-t 2xi16`):
@@ -137,9 +160,12 @@ it downloads the matching broadcast ephemeris and runs gps-sdr-sim for you.
 
 ## Using an rtl-sdr device
 
-> **WIP / caveat:** I haven't been able to identify satellites using rtl-sdr
-> directly with my hardware setup — unclear whether it's a bug or my setup.
-> The recording-file path above is the well-tested one.
+> **WIP / caveat:** I haven't been able to identify satellites from my *own*
+> rtl-sdr dongle live yet. But gnss-rcv **does** get a fix from a real rtl-sdr
+> *recording* (the ION `ion-rtlsdr` sample above, `-t rtlsdr-file`), so the
+> receiver's rtl-sdr path works — the live-dongle trouble is almost certainly my
+> hardware/antenna/setup, not the code. The recording-file path is the
+> well-tested one.
 
 Install librtlsdr first: `sudo apt install librtlsdr-dev` (Linux) or
 `brew install librtlsdr` (macOS).
