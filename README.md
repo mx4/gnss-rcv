@@ -48,7 +48,7 @@ recording for a chosen date/location and checks the receiver recovers it (see
 cargo build --release
 
 # Get a recording — either download a real capture...
-./resources/fetch.sh nov3          # 12.7 GiB real rtl-sdr capture (2xf32)
+./resources/fetch.py nov3          # 12.7 GiB real rtl-sdr capture (2xf32)
 # ...or simulate one (needs gps-sdr-sim; downloads the ephemeris for you):
 ./resources/gen_gpssim.sh          # ~350 MiB, Geneva, ends in a verified fix
 
@@ -110,12 +110,16 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
 ### Download an existing recording
 Use the helper script to fetch downloadable recordings into `resources/`:
 ```sh
-$ ./resources/fetch.sh            # list what's available
-$ ./resources/fetch.sh nov3       # the main dev recording (2xf32, 12.7 GiB)
-$ ./resources/fetch.sh cttc       # gnss-sdr's CTTC Spain capture (2xi16, ~1.1 GiB)
-$ ./resources/fetch.sh ion-rtlsdr # ION rooftop RTL-SDR L1 capture (246 MB, fixes)
-$ ./resources/fetch.sh all        # everything
+$ ./resources/fetch.py            # list what's available (with constellation tags)
+$ ./resources/fetch.py nov3       # the main dev recording (2xf32, 12.7 GiB)
+$ ./resources/fetch.py cttc       # gnss-sdr's CTTC Spain capture (2xi16, ~1.1 GiB)
+$ ./resources/fetch.py qzss       # every recording carrying QZSS (a tag, not a name)
+$ ./resources/fetch.py all        # everything
 ```
+Each recording is tagged by the constellations in its samples — `gps` (all),
+`qzss` (verified present), `galileo` (wide enough to contain E1, decoding TBD). A
+positional argument can be a recording name, a tag, or `all`; `--tag <t>` filters
+the listing.
 The recording used for most of the development is `nov_3_time_18_48_st_ives`
 ([gypsum release](https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip),
 unzip into `resources/`, `-t 2xf32`). Another good one is gnss-sdr's classic
@@ -135,17 +139,17 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 | recording | get it | settings | result |
 |---|---|---|---|
 | `gpssim_2xi16` (Geneva, simulated) | `gen_gpssim.sh` | `-t 2xi16` | ✅ **46.207, 6.156** (truth 46.2075, 6.1557) |
-| `nov_3_time_18_48_st_ives` | `fetch.sh nov3` | `-t 2xf32` | ✅ **52.334, −0.081** — St Ives, Cambs UK |
-| CTTC Spain 2013 | `fetch.sh cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
-| ION rooftop RTL-SDR | `fetch.sh ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
-| ION LimeSDR (10 MHz, IF 420 kHz) | `fetch.sh ion-lime` | `-t 2xi16 --fs 10000000 --fi 420000` | ✅ **52.177, 4.488** — Netherlands (non-zero IF) |
+| `nov_3_time_18_48_st_ives` | `fetch.py nov3` | `-t 2xf32` | ✅ **52.334, −0.081** — St Ives, Cambs UK |
+| CTTC Spain 2013 | `fetch.py cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
+| ION rooftop RTL-SDR | `fetch.py ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
+| ION LimeSDR (10 MHz, IF 420 kHz) | `fetch.py ion-lime` | `-t 2xi16 --fs 10000000 --fi 420000` | ✅ **52.177, 4.488** — Netherlands (non-zero IF) |
 | [TEXBAT](https://rnl-data.ae.utexas.edu/datastore/texbat/) `cleanStatic` | manual (44 GB; ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ **30.287, −97.736** — Austin TX |
-| `GPS-L1-2022-03-27.sigmf-data` | `fetch.sh zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
-| ION BladeRF (10 MHz) | `fetch.sh ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
-| ION SJTU L1/E1 (SX3, 4-bit) | `fetch.sh sjtu` | `-t 4bit --fs 25000000 --fi 6250000` | Shanghai 🇨🇳 — tracks 15–29 SVs (45–50 dB-Hz), decodes subframes; 60 s but bit-sync too slow for a full ephemeris |
-| [PocketSDR](https://github.com/tomojitakasu/PocketSDR) L1/L6 (Tokyo) | `fetch.sh pocketsdr` | `-t i8 --fs 12000000 --fi 3000000 --qzss` | Tokyo 🇯🇵 — tracks 26 GPS + QZSS J194/J195/J199; decodes SF2–5 but ~30 s ends ~6 s short of an ephemeris |
-| ION HackRF (10 MHz, IF 420 kHz) | `fetch.sh ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks 11 SVs (45–51 dB-Hz), decodes some ephemeris; no full fix yet (intermittent nav decode — open) |
-| `gps.samples.1bit…` | `fetch.sh jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks ~7 SVs at a marginal ~30 dB-Hz; no fix |
+| `GPS-L1-2022-03-27.sigmf-data` | `fetch.py zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
+| ION BladeRF (10 MHz) | `fetch.py ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
+| ION SJTU L1/E1 (SX3, 4-bit) | `fetch.py sjtu` | `-t 4bit --fs 25000000 --fi 6250000` | Shanghai 🇨🇳 — tracks 15–29 SVs (45–50 dB-Hz), decodes subframes; 60 s but bit-sync too slow for a full ephemeris |
+| [PocketSDR](https://github.com/tomojitakasu/PocketSDR) L1/L6 (Tokyo) | `fetch.py pocketsdr` | `-t i8 --fs 12000000 --fi 3000000 --qzss` | Tokyo 🇯🇵 — tracks 26 GPS + QZSS J194/J195/J199; decodes SF2–5 but ~30 s ends ~6 s short of an ephemeris |
+| ION HackRF (10 MHz, IF 420 kHz) | `fetch.py ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks 11 SVs (45–51 dB-Hz), decodes some ephemeris; no full fix yet (intermittent nav decode — open) |
+| `gps.samples.1bit…` | `fetch.py jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks ~7 SVs at a marginal ~30 dB-Hz; no fix |
 | `gioveAandB_short.bin` | [gfix.dk](http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/) (by hand) | `-t i8 --fs 16367600 --fi 4130400` | acquires/tracks; short — no fix |
 
 The [ION SDR sample collection](https://sdr.ion.org/api-sample-data.html) has more

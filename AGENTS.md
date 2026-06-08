@@ -102,17 +102,20 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 
 ## Sample data
 
-`./resources/fetch.sh` is the IQ-recording provisioner: no args lists them;
-`fetch.sh <name>` downloads one (resuming/skipping if present) **and prints the
-exact command to run it**. `gpssim_2xi16` is *generated* by gps-sdr-sim
-(`./resources/gen_gpssim.sh`, needs gps-sdr-sim + network), not downloaded.
+`./resources/fetch.py` is the IQ-recording provisioner (Python 3, stdlib only;
+shells out to curl/unzip/tar): no args lists them with constellation tags;
+`fetch.py <name>` downloads one (resuming/skipping if present) **and prints the
+exact command to run it**. A positional arg can be a recording name, a tag
+(`gps`/`qzss`/`galileo`), or `all`; `--tag <t>` filters the listing.
+`gpssim_2xi16` is *generated* by gps-sdr-sim (`./resources/gen_gpssim.sh`, needs
+gps-sdr-sim + network), not downloaded.
 
 **Master validation list** — run these to check receiver stability across rates,
 formats and IFs. Each needs the right `-t` (and sometimes `--fs`/`--fi`); append
 `-x` to stop at the first fix. Per-recording truth/notes in
 [resources/README.md](resources/README.md):
 
-| `fetch.sh` name | flags | expected |
+| `fetch.py` name | flags | expected |
 |---|---|---|
 | `nov3` | `-t 2xf32` | ✅ fix 52.334, −0.081 (St Ives, Cambs) |
 | `cttc` | `-t 2xi16 --fs 4000000` | ✅ fix 41.274, 1.986 (Castelldefels) |

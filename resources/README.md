@@ -9,18 +9,18 @@ GPS-L1-2022-03-27.sigmf-data         # SigMF, complex int16, 4 MHz (too short fo
 gps.samples.1bit.I.fs5456.if4092.bin # 1-bit real, 5.456 MHz
 ```
 
-The downloadable recordings can be fetched with [fetch.sh](./fetch.sh):
+The downloadable recordings can be fetched with [fetch.py](./fetch.py):
 ```
-./resources/fetch.sh            # list what's available / already present
-./resources/fetch.sh jks-1bit   # fetch one (or several) by name
-./resources/fetch.sh all        # fetch everything (incl. the 12.7 GiB nov3)
+./resources/fetch.py            # list what's available / already present
+./resources/fetch.py jks-1bit   # fetch one (or several) by name
+./resources/fetch.py all        # fetch everything (incl. the 12.7 GiB nov3)
 ```
 
 ## nov_3_time_18_48_st_ives
 https://github.com/codyd51/gypsum/releases
 file-type: 2xf32
 Captured in the UK in Nov 2023.
-Download/unzip it with `./resources/fetch.sh nov3`.
+Download/unzip it with `./resources/fetch.py nov3`.
 
 ## Generating a recording with gps-sdr-sim ([gen_gpssim.sh](./gen_gpssim.sh))
 
@@ -83,7 +83,7 @@ Only ~15s long, so it is too short to decode an ephemeris / get a position fix.
 source: https://sourceforge.net/projects/gnss-sdr/files/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.tar.gz
 The classic [gnss-sdr](https://gnss-sdr.org) sample capture (Castelldefels, Spain,
 2013). Complex int16 (ishort), 4 MHz, baseband (L1 centered, fi=0), 100 s. The
-`.tar.gz` (~1.1 GiB) expands into a folder; fetch with `./resources/fetch.sh cttc`.
+`.tar.gz` (~1.1 GiB) expands into a folder; fetch with `./resources/fetch.py cttc`.
 ```
 RUST_LOG=info cargo run --release -- -f resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat -t 2xi16 --fs 4000000
 ```
@@ -95,7 +95,7 @@ peak-selection fix, the ±12 kHz Doppler search, and a relaxed solver GDOP limit
 the position.)
 
 ## ION_RTLSDR_Bands-L1.rtlsdr
-source: https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8 (`fetch.sh ion-rtlsdr`)
+source: https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8 (`fetch.py ion-rtlsdr`)
 A real RTL-SDR L1 capture from the [ION GNSS SDR sample-data standard](https://sdr.ion.org/api-sample-data.html),
 rooftop antenna. uint8 offset-binary I/Q (the rtl_sdr native format), 2.048 MHz,
 baseband (fi=0), 60 s. This is the same format a live rtl-sdr dongle produces.
@@ -106,7 +106,7 @@ RUST_LOG=info cargo run --release -- -f resources/ION_RTLSDR_Bands-L1.rtlsdr -t 
 ephemeris. Confirms the `rtlsdr-file` path works end-to-end on real dongle data.
 
 ## ION_BladeRF_Bands-L1.2xi16
-source: https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16 (`fetch.sh ion-bladerf`)
+source: https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16 (`fetch.py ion-bladerf`)
 Another [ION sample](https://sdr.ion.org/api-sample-data.html): BladeRF front-end,
 complex int16 (two's complement), 10 MHz, baseband (fi=0), ~13 s.
 ```
@@ -116,7 +116,7 @@ Acquires/tracks 13 SVs at ≥40 dB-Hz and decodes subframes cleanly, but ~13 s i
 too short to complete an ephemeris / get a fix (like the SigMF capture above).
 
 ## ION_LimeSDR_Bands-L1.2xi16
-source: https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16 (`fetch.sh ion-lime`)
+source: https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16 (`fetch.py ion-lime`)
 [ION sample](https://sdr.ion.org/api-sample-data.html): LimeSDR, complex int16,
 10 MHz, **IF 420 kHz** (same scene as the rtl-sdr capture above), 60 s.
 ```
@@ -127,7 +127,7 @@ This is the non-zero-IF check: it validates the tracking carrier de-rotation
 (mix by `fi + doppler`, see the HackRF note below) on a clean int16 recording.
 
 ## ION_HackRF_Bands-L1.2xi8
-source: https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8 (`fetch.sh ion-hackrf`)
+source: https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8 (`fetch.py ion-hackrf`)
 HackRF front-end, **interleaved signed int8 I/Q** (complex), 10 MHz, IF 420 kHz,
 60 s. This file is what added the `2xi8` format type: it is signed complex int8,
 which none of the older types read (`i8` is real-only → 0 SVs; `rtlsdr-file` is
@@ -168,7 +168,7 @@ sync, but at a marginal ~30 dB-Hz (near the 29 dB-Hz drop threshold) sync drops
 repeatedly, so it does not hold long enough to decode an ephemeris / get a fix.
 
 ## SJTU_Bands-L1E1.dat  (ION SJTU, Shanghai)
-source: https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat (`fetch.sh sjtu`)
+source: https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat (`fetch.py sjtu`)
 An [ION sample](https://sdr.ion.org/api-sample-data.html) recorded at Shanghai
 Jiao Tong University (truth 31.025 N, 121.439 E) with an **SX3 front-end**: signed
 **4-bit real** samples, 2 packed per byte (this is what the `4bit` format type is
@@ -192,7 +192,7 @@ is only ~35 dB-Hz, too weak." That was the fs error — at the correct 25 MHz th
 SVs are strong.)
 
 ## L1_20211226_082212_12MHz_I.bin  (PocketSDR, Tokyo)
-source: http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip (`fetch.sh pocketsdr`)
+source: http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip (`fetch.py pocketsdr`)
 A [PocketSDR](https://github.com/tomojitakasu/PocketSDR) capture (T. Takasu),
 recorded in Tokyo. The `.zip` holds an L1 and an L6 file; we use the L1 one:
 **real int8** (`-t i8`), fs **12 MHz**, IF **3 MHz (= fs/4)**, ~30 s. Download URL
