@@ -22,6 +22,9 @@ pub enum IQFileType {
     TypePairInt8,
     TypeRtlSdrFile,
     TypeOneInt8,
+    // signed 4-bit real samples, 2 packed per byte (high nibble first), I-only,
+    // e.g. the SX3 front-end (ION SJTU L1E1 capture).
+    TypeOne4Bit,
     // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
     // e.g. jks.com's gps.samples.1bit.I.fs5456.if4092.bin.
     TypeOneBit,
@@ -36,6 +39,7 @@ impl FromStr for IQFileType {
             "2xi8" => Ok(IQFileType::TypePairInt8),
             "rtlsdr-file" => Ok(IQFileType::TypeRtlSdrFile),
             "i8" => Ok(IQFileType::TypeOneInt8),
+            "4bit" => Ok(IQFileType::TypeOne4Bit),
             "1bit" => Ok(IQFileType::TypeOneBit),
             _ => Err(format!("Failed to parse {}", input).into()),
         }
@@ -50,6 +54,7 @@ impl fmt::Display for IQFileType {
             IQFileType::TypePairInt8 => write!(f, "2xi8"),
             IQFileType::TypeRtlSdrFile => write!(f, "rtlsdr-file"),
             IQFileType::TypeOneInt8 => write!(f, "i8"),
+            IQFileType::TypeOne4Bit => write!(f, "4bit"),
             IQFileType::TypeOneBit => write!(f, "1bit"),
         }
     }
@@ -81,6 +86,9 @@ impl IQReader for IQRecording {
         // integer-bytes-per-sample math below; handle them on a dedicated path.
         if let IQFileType::TypeOneBit = self.file_type {
             return self.get_iq_data_1bit(off_samples, num_samples);
+        }
+        if let IQFileType::TypeOne4Bit = self.file_type {
+            return self.get_iq_data_4bit(off_samples, num_samples);
         }
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
 
@@ -162,8 +170,9 @@ impl IQReader for IQRecording {
                     });
                 }
             }
-            // Returned early above via get_iq_data_1bit.
+            // Returned early above via get_iq_data_1bit / get_iq_data_4bit.
             IQFileType::TypeOneBit => unreachable!(),
+            IQFileType::TypeOne4Bit => unreachable!(),
         }
 
         Ok(iq_vec)
@@ -177,8 +186,9 @@ impl IQRecording {
             .map_err(|e| format!("{}: {e}", file_path.display()))?
             .len();
         let recording_duration_sec = match file_type {
-            // 8 samples per byte rather than an integer number of bytes/sample.
+            // sub-byte packings: 8 / 2 samples per byte respectively.
             IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
+            IQFileType::TypeOne4Bit => (file_size * 2) as f64 / fs,
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
         };
 
@@ -203,8 +213,9 @@ impl IQRecording {
             IQFileType::TypePairInt8 => 2,
             IQFileType::TypePairInt16 => 2 * 2,
             IQFileType::TypePairFloat32 => 2 * 4,
-            // Sub-byte; not expressible here -- handled on its own read path.
+            // Sub-byte; not expressible here -- handled on their own read paths.
             IQFileType::TypeOneBit => unreachable!("1-bit uses get_iq_data_1bit"),
+            IQFileType::TypeOne4Bit => unreachable!("4-bit uses get_iq_data_4bit"),
         }
     }
 
@@ -247,6 +258,56 @@ impl IQRecording {
                 let re = if (byte >> bit) & 1 == 1 { 1.0 } else { -1.0 };
                 iq_vec.push(Complex64 { re, im: 0.0 });
             }
+        }
+        Ok(iq_vec)
+    }
+
+    // Read signed 4-bit real samples, 2 per byte (high nibble first), I-only.
+    // Each nibble is two's-complement [-8, 7]. Reads are byte-aligned: num/off
+    // are even (period_sp = PERIOD_RCV * fs is even for fs a multiple of 2000).
+    fn get_iq_data_4bit(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+        assert!(
+            off_samples.is_multiple_of(2) && num_samples.is_multiple_of(2),
+            "4-bit reads must be 2-sample aligned (use an fs that is a multiple of 2000)"
+        );
+
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX; // force an initial seek
+        }
+        let reader = self.reader.as_mut().unwrap();
+
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples / 2) as u64))?;
+            self.pos_samples = off_samples;
+        }
+
+        let mut bytes = vec![0u8; num_samples / 2];
+        if reader.read_exact(&mut bytes).is_err() {
+            return Err("end of file".into());
+        }
+        self.pos_samples += num_samples;
+
+        // sign-extend a 4-bit nibble (0..15) to [-8, 7], then normalize by 8.
+        let nib = |n: u8| -> f64 {
+            let v = if n >= 8 { n as i32 - 16 } else { n as i32 };
+            v as f64 / 8.0
+        };
+        let mut iq_vec = Vec::with_capacity(num_samples);
+        for byte in bytes {
+            iq_vec.push(Complex64 {
+                re: nib(byte >> 4),
+                im: 0.0,
+            });
+            iq_vec.push(Complex64 {
+                re: nib(byte & 0x0f),
+                im: 0.0,
+            });
         }
         Ok(iq_vec)
     }
