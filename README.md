@@ -191,8 +191,6 @@ $ rtl_sdr -f 1575420000 -s 2046000 -n 20460000 output.bin   # 10 s of L1
 Any code contribution is welcome!
 
 ## TODO
-- [ ] use anise for Ephemerides and Almanac
-- [ ] use anise to compute SV position from keplerian elements
 - [ ] test + fix rtlsdr support
 - [ ] support SBAS, Galileo, QZSS, BeiDou
 - [ ] use the received Almanac to decide which satellites are in view

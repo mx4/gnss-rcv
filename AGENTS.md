@@ -6,10 +6,16 @@ device), then does acquisition → tracking → ephemeris decode → position fi
 ## Testing
 
 CI (Linux + macOS) gates every push/PR on three checks; keep all green locally
-before pushing:
-- **`cargo fmt --all -- --check`**
-- **`cargo clippy --release --all-targets -- -D warnings`**
-- **`cargo test --release`**
+before pushing. The full local gate (the three CI checks, plus the heavy
+`#[ignore]`'d end-to-end tests) is, in order — stop at the first failure, fix,
+re-run from the top:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --release --all-targets -- -D warnings
+cargo test --release
+cargo test --release -- --ignored
+```
 
 - **`cargo test --release`** — unit tests (incl. `synthetic_signal_acquires_and_tracks`,
   a hermetic acquisition→tracking test that synthesizes its own signal and needs
@@ -46,6 +52,37 @@ The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 run the gpssim integration tests — they are the regression signal that the end-
 to-end receiver still acquires, tracks, decodes, and solves.
 
+### Validating a positioning change
+
+The `gpssim_2xi16` fixture has known ground truth (Geneva, Jet d'Eau: lat
+46.2075, lon 6.1557; antenna ECEF `4396463.3, 474169.7, 4581510.0` — from the
+gps-sdr-sim run, see [resources/README.md](resources/README.md)). Use it to
+check pseudorange / transmit-time / solver changes:
+
+- Set `GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0"` to turn on the per-SV
+  `RESID` diagnostic in [solver.rs](src/solver.rs). Each SV's `resid` should be
+  ≈ a *common constant* (the receiver clock bias); the spread across SVs is the
+  geometry error (sub-km when timing is right, 100s of km when it isn't).
+- The end-of-run stats funnel
+  (`searched → acquired → tracked → ephemeris → used-in-fix`) shows where SVs
+  drop out.
+
+[`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one
+command: it builds release, runs to the first fix with `GNSS_TRUTH_ECEF` on,
+and prints the residual spread + the fix error vs truth. It **skips cleanly**
+(exit 0) when the fixture is absent. Read the result as: `resid` per SV ≈ a
+common constant (the rx clock bias); the **spread** is the geometry error
+(sub-km good, 100s of km means transmit-time/pseudorange is wrong); `fix error
+vs truth` should be well under the test's 0.02° (~2 km) gate.
+
+```sh
+./scripts/validate_fix.py
+# equivalent one-liner:
+GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
+  cargo run --release -- -f resources/gpssim_2xi16 -t 2xi16 \
+  --sats 1,2,3,4,6,9,17,19,28,31 -x 2>&1 | rg "RESID|position fix"
+```
+
 ## Build & manual runs
 
 - Build: `cargo build --release`
@@ -55,8 +92,8 @@ to-end receiver still acquires, tracks, decodes, and solves.
 
 ### Faster iteration
 - `--sats 5,10,12,...` restricts the satellite search (~2× faster; absent PRNs
-  otherwise run an FFT search every cycle). gpssim's PRNs are in
-  `resources/gpssim.txt`.
+  otherwise run an FFT search every cycle). The `gpssim_2xi16` fixture's PRNs are
+  `1,2,3,4,6,9,17,19,28,31` (truth + PRN list in `resources/gpssim_gen.meta`).
 - `--num-msec N` bounds the run; `RUST_LOG=warn` cuts log noise.
 - `-p` / `--plots` enables per-SV PNG diagnostics in `plots/` (off by default — skipping saves I/O during headless runs).
 - `-x` / `--exit-on-fix` stops the run as soon as the first fix is computed (useful with long files; the fix test uses this).
@@ -65,8 +102,21 @@ to-end receiver still acquires, tracks, decodes, and solves.
 
 ## Sample data
 
-`./resources/fetch.sh` downloads the downloadable IQ recordings (run it with no
-args to list them). `gpssim_2xi16` is *generated* by gps-sdr-sim, not downloaded.
+`./resources/fetch.sh` downloads the downloadable IQ recordings (`fetch.sh` with
+no args lists them; `fetch.sh <name>` downloads one, resuming/skipping if
+present). `gpssim_2xi16` is *generated* by gps-sdr-sim (`./resources/gen_gpssim.sh`,
+needs gps-sdr-sim + network), not downloaded. Each recording needs the right
+`-t` (and sometimes `--fs`/`--fi`) — wrong ones mean no acquisition (append `-x`
+to stop at the first fix; per-recording truth/notes in
+[resources/README.md](resources/README.md)):
+
+| name (`fetch.sh`) | file | run command |
+|---|---|---|
+| `nov3` | `nov_3_time_18_48_st_ives` | `cargo run --release -- -f resources/nov_3_time_18_48_st_ives -t 2xf32` |
+| `cttc` | `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/…SPAIN.dat` | `cargo run --release -- -f resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat -t 2xi16 --fs 4000000` |
+| `zenodo-sigmf` | `GPS-L1-2022-03-27.sigmf-data` | `cargo run --release -- -f resources/GPS-L1-2022-03-27.sigmf-data -t 2xi16 --fs 4000000` (≈15 s; too short for a fix) |
+| `jks-1bit` | `gps.samples.1bit.I.fs5456.if4092.bin` | `cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin -t 1bit --fs 5456000 --fi 1364000` |
+| (generated) | `gpssim_2xi16` | see [`scripts/validate_fix.py`](scripts/validate_fix.py) / "Validating a positioning change" |
 
 ## Improvement backlog
 
