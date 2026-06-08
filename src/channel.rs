@@ -1,6 +1,5 @@
 use colored::Colorize;
 use gnss_rs::sv::SV;
-use plotters::prelude::*;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex64;
 use std::collections::VecDeque;
@@ -11,9 +10,7 @@ const PI: f64 = std::f64::consts::PI;
 
 use crate::code::Code;
 use crate::navigation::Navigation;
-use crate::plots::plot_iq_scatter;
-use crate::plots::plot_time_graph;
-use crate::plots::plot_time_graph_with_sz;
+use crate::plots::plot_channel;
 use crate::state::ChannelState;
 use crate::state::GnssState;
 use crate::util::calc_correlation;
@@ -77,9 +74,10 @@ pub struct Tracking {
 pub struct History {
     last_log_ts: f64,
     last_plot_ts: f64,
-    code_phase_offset: VecDeque<f64>,
-    phi_error: VecDeque<f64>,
-    doppler_hz: VecDeque<f64>,
+    // pub(crate) so the plotting lives in plots.rs (see plots::plot_channel).
+    pub(crate) code_phase_offset: VecDeque<f64>,
+    pub(crate) phi_error: VecDeque<f64>,
+    pub(crate) doppler_hz: VecDeque<f64>,
     pub corr_p: VecDeque<Complex64>,
 }
 
@@ -174,113 +172,55 @@ impl Channel {
         self.nav.eph.is_valid()
     }
 
-    fn set_state(&mut self, state: State) {
-        let old_state = self
-            .pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .state
-            .clone();
-
-        self.pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .state = state.clone();
-
-        if state == State::Tracking && old_state == State::Idle
-            || state == State::Idle && old_state == State::Tracking
-        {
+    /// Apply `update` to this channel's shared `ChannelState` under one lock,
+    /// then fire the UI repaint callback if the channel is tracking. Centralizes
+    /// the lock / get_mut / update_func boilerplate the per-field updaters share.
+    fn publish<F: FnOnce(&mut ChannelState)>(&self, update: F) {
+        let tracking = {
+            let mut st = self.pub_state.lock().unwrap();
+            let cs = st.channels.get_mut(&self.sv).unwrap();
+            update(cs);
+            cs.state == State::Tracking
+        };
+        if tracking {
             (self.pub_state.lock().unwrap().update_func.func)();
         }
+    }
 
+    fn set_state(&mut self, state: State) {
+        // Fire the UI callback only on an Idle<->Tracking transition.
+        let transitioned = {
+            let mut st = self.pub_state.lock().unwrap();
+            let cs = st.channels.get_mut(&self.sv).unwrap();
+            let old_state = cs.state.clone();
+            cs.state = state.clone();
+            (state == State::Tracking && old_state == State::Idle)
+                || (state == State::Idle && old_state == State::Tracking)
+        };
+        if transitioned {
+            (self.pub_state.lock().unwrap().update_func.func)();
+        }
         self.state = state;
     }
 
-    fn update_state_phi(&mut self) {
-        let state = self
-            .pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .state
-            .clone();
-
-        self.pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .phi = self.trk.phi;
-
-        if state == State::Tracking {
-            (self.pub_state.lock().unwrap().update_func.func)();
-        }
+    fn update_state_phi(&self) {
+        let phi = self.trk.phi;
+        self.publish(|cs| cs.phi = phi);
     }
 
-    fn update_state_code_idx(&mut self) {
-        let state = self
-            .pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .state
-            .clone();
-
-        self.pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .code_idx = *self.hist.code_phase_offset.back().unwrap();
-
-        if state == State::Tracking {
-            (self.pub_state.lock().unwrap().update_func.func)();
-        }
+    fn update_state_code_idx(&self) {
+        let code_idx = *self.hist.code_phase_offset.back().unwrap();
+        self.publish(|cs| cs.code_idx = code_idx);
     }
-    fn update_state_doppler_hz(&mut self) {
-        let state = self
-            .pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .state
-            .clone();
 
-        self.pub_state
-            .lock()
-            .unwrap()
-            .channels
-            .get_mut(&self.sv)
-            .unwrap()
-            .doppler_hz = self.trk.doppler_hz;
-
-        if state == State::Tracking {
-            (self.pub_state.lock().unwrap().update_func.func)();
-        }
+    fn update_state_doppler_hz(&self) {
+        let doppler_hz = self.trk.doppler_hz;
+        self.publish(|cs| cs.doppler_hz = doppler_hz);
     }
-    fn update_state_cn0(&mut self) {
-        let need_update = {
-            let mut st = self.pub_state.lock().unwrap();
-            st.channels.get_mut(&self.sv).unwrap().cn0 = self.trk.cn0;
-            st.channels.get(&self.sv).unwrap().state == State::Tracking
-        };
-        if need_update {
-            (self.pub_state.lock().unwrap().update_func.func)();
-        }
+
+    fn update_state_cn0(&self) {
+        let cn0 = self.trk.cn0;
+        self.publish(|cs| cs.cn0 = cn0);
     }
 
     pub fn new(
@@ -490,40 +430,8 @@ impl Channel {
             return;
         }
 
-        self.plot_iq_scatter();
-        self.plot_code_phase_offset();
-        self.plot_phi_error();
-        self.plot_doppler_hz();
-        self.plot_nav_msg();
-
+        plot_channel(self.sv, &self.hist);
         self.hist.last_plot_ts = self.ts_sec;
-    }
-
-    fn plot_nav_msg(&self) {
-        let v_re: Vec<_> = self.hist.corr_p.iter().map(|c| c.re).collect();
-        plot_time_graph_with_sz(self.sv, "nav-msg", v_re.as_slice(), 0.001, &BLACK, 400, 200);
-    }
-
-    fn plot_code_phase_offset(&self) {
-        let v: Vec<f64> = self.hist.code_phase_offset.iter().copied().collect();
-        plot_time_graph(self.sv, "code-phase-offset", &v, 50.0, &BLUE);
-    }
-
-    fn plot_phi_error(&self) {
-        let v: Vec<f64> = self.hist.phi_error.iter().copied().collect();
-        plot_time_graph(self.sv, "phi-error", &v, 0.5, &BLACK);
-    }
-
-    fn plot_doppler_hz(&self) {
-        let v: Vec<f64> = self.hist.doppler_hz.iter().copied().collect();
-        plot_time_graph(self.sv, "doppler-hz", &v, 10.0, &BLACK);
-    }
-
-    fn plot_iq_scatter(&self) {
-        let len = self.hist.corr_p.len();
-        let n = usize::min(len, 2000);
-        let v: Vec<Complex64> = self.hist.corr_p.iter().skip(len - n).copied().collect();
-        plot_iq_scatter(self.sv, &v);
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex64]) {

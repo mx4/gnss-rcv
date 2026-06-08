@@ -3,6 +3,8 @@ use gnss_rs::sv::SV;
 use plotters::prelude::*;
 use rustfft::num_complex::Complex64;
 
+use crate::channel::History;
+
 const PLOT_FONT_SIZE: u32 = 15;
 const PLOT_SIZE_X: u32 = 200;
 const PLOT_SIZE_Y: u32 = 200;
@@ -95,6 +97,29 @@ pub fn plot_time_graph_with_sz(
             .map(|(idx, v)| Circle::new((idx as f64 * 0.001, *v), 1, color)),
     )
     .unwrap();
+}
+
+/// Render all per-channel diagnostic plots for `sv` from its rolling History
+/// (the receiver calls this on a throttle when `--plots` is enabled).
+pub fn plot_channel(sv: SV, hist: &History) {
+    // nav-msg: real part of the prompt correlator over time.
+    let nav: Vec<f64> = hist.corr_p.iter().map(|c| c.re).collect();
+    plot_time_graph_with_sz(sv, "nav-msg", &nav, 0.001, &BLACK, 400, 200);
+
+    let code_phase: Vec<f64> = hist.code_phase_offset.iter().copied().collect();
+    plot_time_graph(sv, "code-phase-offset", &code_phase, 50.0, &BLUE);
+
+    let phi_err: Vec<f64> = hist.phi_error.iter().copied().collect();
+    plot_time_graph(sv, "phi-error", &phi_err, 0.5, &BLACK);
+
+    let doppler: Vec<f64> = hist.doppler_hz.iter().copied().collect();
+    plot_time_graph(sv, "doppler-hz", &doppler, 10.0, &BLACK);
+
+    // iq-scatter: the most recent (<=2000) prompt correlator samples.
+    let len = hist.corr_p.len();
+    let n = usize::min(len, 2000);
+    let iq: Vec<Complex64> = hist.corr_p.iter().skip(len - n).copied().collect();
+    plot_iq_scatter(sv, &iq);
 }
 
 pub fn plot_iq_scatter(sv: SV, series: &[Complex64]) {
