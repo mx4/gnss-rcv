@@ -60,6 +60,11 @@ struct Options {
         help = "stop as soon as the first position fix is computed"
     )]
     exit_on_fix: bool,
+    #[structopt(
+        long,
+        help = "write an end-of-run JSON summary to <path> ('-' = stdout)"
+    )]
+    json: Option<PathBuf>,
 }
 
 fn init_logging(log_file: &PathBuf) {
@@ -140,6 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         qzss: opt.qzss,
         plots: opt.plots,
         exit_on_fix: opt.exit_on_fix,
+        json: opt.json.clone(),
     };
     let mut receiver = Receiver::new(
         &config,
@@ -151,7 +157,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     receiver.run_loop(opt.num_msec);
 
-    println!("GNSS terminating: {:.2} sec", ts.elapsed().as_secs_f32());
+    // Keep stdout clean for `--json -` (so the run pipes straight into jq); the
+    // status line goes to stderr in that case.
+    let term = format!("GNSS terminating: {:.2} sec", ts.elapsed().as_secs_f32());
+    if opt.json.as_deref() == Some(std::path::Path::new("-")) {
+        eprintln!("{term}");
+    } else {
+        println!("{term}");
+    }
     exit_req.store(true, Ordering::SeqCst);
 
     Ok(())

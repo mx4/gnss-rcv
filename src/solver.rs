@@ -333,6 +333,14 @@ impl PositionSolver {
         self.last_fix_ecef.is_some()
     }
 
+    /// The last computed fix as (latitude°, longitude°, altitude m), if any.
+    pub fn last_fix_geodetic(&self) -> Option<(f64, f64, f64)> {
+        self.last_fix_ecef.map(|e| {
+            let (lat, lon, h) = ecef2geodetic(e[0], e[1], e[2], Ellipsoid::WGS84);
+            (lat * 180.0 / PI, lon * 180.0 / PI, h)
+        })
+    }
+
     /// Returns true if a position was resolved this call.
     pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
         {

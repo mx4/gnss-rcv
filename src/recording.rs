@@ -192,7 +192,8 @@ impl IQRecording {
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
         };
 
-        println!(
+        // Diagnostic banner -> stderr (log), so stdout stays clean for `--json -`.
+        log::warn!(
             "file: {} -- {file_type} {} duration: {:.1} secs",
             file_path.display().to_string().green(),
             ByteSize::b(file_size).to_string().bold(),

@@ -3,6 +3,7 @@ use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use rayon::prelude::*;
 use rustfft::num_complex::Complex64;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -72,6 +73,8 @@ pub struct ReceiverConfig {
     pub qzss: bool,
     pub plots: bool,
     pub exit_on_fix: bool,
+    /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
+    pub json: Option<PathBuf>,
 }
 
 impl Default for ReceiverConfig {
@@ -90,6 +93,7 @@ impl Default for ReceiverConfig {
             qzss: false,
             plots: false,
             exit_on_fix: false,
+            json: None,
         }
     }
 }
@@ -106,6 +110,7 @@ pub struct Receiver {
     exit_on_fix: bool,
     exit_req: Arc<AtomicBool>,
     stats: RunStats,
+    json_out: Option<PathBuf>,
 }
 
 /// Run-level work/perf counters, printed as a summary at end of `run_loop`.
@@ -129,6 +134,81 @@ impl Default for RunStats {
             xcorr_rejections: 0,
         }
     }
+}
+
+/// Machine-readable end-of-run summary — the `--json` twin of the `print_stats`
+/// block. Built once in `run_loop`; serialized to a file or stdout and used to
+/// drive the human print, so the two never drift.
+#[derive(Serialize)]
+struct RunSummary {
+    /// The last computed position fix, if any was solved during the run.
+    fix: Option<JsonFix>,
+    funnel: JsonFunnel,
+    stats: JsonStats,
+    /// One entry per PRN that locked at least once (the per-SV table).
+    sats: Vec<JsonSat>,
+}
+
+#[derive(Serialize)]
+struct JsonFix {
+    lat: f64,
+    lon: f64,
+    alt_m: f64,
+    n_sv: usize,
+}
+
+#[derive(Serialize)]
+struct JsonFunnel {
+    searched: usize,
+    acquired: usize,
+    tracked: usize,
+    ephemeris: usize,
+    used_in_fix: usize,
+}
+
+#[derive(Serialize)]
+struct JsonStats {
+    data_sec: f64,
+    wall_sec: f64,
+    real_time_x: f64,
+    fix_attempts: usize,
+    fix_ok: usize,
+    fix_fail: usize,
+    xcorr_rejected: usize,
+    acq_attempts: u64,
+    acq_correlations: u64,
+    tracking_periods: u64,
+    subframes: u64,
+    parity_errors: u64,
+}
+
+#[derive(Serialize)]
+struct JsonSat {
+    sv: String,
+    prn: u8,
+    locks: u64,
+    losses: u64,
+    tracked_s: f64,
+    max_lock_s: f64,
+    /// Time-to-first-lock (s); None if the PRN never locked long enough.
+    ttfl_s: Option<f64>,
+    cn0: f64,
+    subframes: u64,
+    parity_errors: u64,
+    ephemeris: bool,
+    used_in_fix: bool,
+}
+
+/// Render `summary` as JSON to `path` (`-` = stdout).
+fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(summary).expect("serialize run summary");
+    if path == Path::new("-") {
+        println!("{json}");
+    } else {
+        std::fs::write(path, format!("{json}\n"))?;
+        log::warn!("wrote JSON summary to {}", path.display());
+    }
+    Ok(())
 }
 
 /// Build the channel list, tagging each PRN's constellation by its number:
@@ -276,6 +356,7 @@ impl Receiver {
             exit_on_fix: cfg.exit_on_fix,
             exit_req,
             stats: RunStats::default(),
+            json_out: cfg.json.clone(),
         }
     }
 
@@ -383,10 +464,25 @@ impl Receiver {
                 break;
             }
         }
-        self.print_stats();
+        let summary = self.build_summary();
+        // `--json -` emits *only* the JSON object on stdout (pipe-friendly, e.g.
+        // `| jq`); a file target keeps the human stats on stdout and writes the
+        // JSON alongside.
+        let json_stdout = matches!(&self.json_out, Some(p) if p.as_path() == Path::new("-"));
+        if !json_stdout {
+            print_summary(&summary);
+        }
+        if let Some(path) = &self.json_out
+            && let Err(e) = write_json_summary(&summary, path)
+        {
+            log::error!("failed to write JSON summary to {}: {e}", path.display());
+        }
     }
 
-    fn print_stats(&self) {
+    /// Compute the end-of-run summary (funnel, work counters, per-SV table, last
+    /// fix) once; both the human print and the JSON output render from it, so the
+    /// two never drift.
+    fn build_summary(&self) -> RunSummary {
         let s = &self.stats;
         let data_sec = s.msec_processed as f64 / 1000.0;
         let wall = s.start.elapsed().as_secs_f64();
@@ -404,55 +500,110 @@ impl Receiver {
         let used = chans.iter().filter(|c| c.stats.used_in_fix).count();
 
         let sum = |f: fn(&Channel) -> u64| -> u64 { chans.iter().map(|c| f(c)).sum() };
-        let tot_acq = sum(|c| c.stats.acq_attempts);
-        let tot_acq_corr = sum(|c| c.stats.acq_corrs);
-        let tot_trk = sum(|c| c.stats.trk_periods);
-        let tot_sf = sum(|c| c.stats.subframes);
-        let tot_par = sum(|c| c.stats.parity_errors);
-
-        println!("\n===== run stats =====");
-        println!("data {data_sec:.1}s   wall {wall:.1}s   real-time {rtf:.1}x");
-        println!(
-            "funnel: searched {} -> acquired {} -> tracked {} -> ephemeris {} -> used-in-fix {}",
-            chans.len(),
-            acquired,
-            tracked,
-            with_eph,
-            used
-        );
-        println!(
-            "fixes: {} attempts, {} ok, {} failed   xcorr-rejected {}",
-            s.fix_attempts, s.fix_ok, s.fix_fail, s.xcorr_rejections
-        );
-        println!(
-            "work: {tot_acq} acq-attempts, {tot_acq_corr} acq-correlations, \
-             {tot_trk} tracking-periods, {tot_sf} subframes, {tot_par} parity-errors"
-        );
 
         // Per-SV detail, only for PRNs that acquired at least once.
-        println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0 subfr parity eph fix");
-        for c in chans.iter().filter(|c| c.stats.locks > 0) {
-            let st = &c.stats;
-            let ttfl = if st.first_lock_ts > 0.0 {
-                format!("{:.1}", st.first_lock_ts)
-            } else {
-                "-".to_string()
-            };
-            println!(
-                "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
-                c.sv.to_string(),
-                st.locks,
-                st.lock_losses,
-                c.tracked_secs(),
-                c.max_lock_secs(),
-                ttfl,
-                st.peak_cn0,
-                st.subframes,
-                st.parity_errors,
-                if c.is_ephemeris_complete() { "y" } else { "-" },
-                if st.used_in_fix { "y" } else { "-" },
-            );
+        let sats = chans
+            .iter()
+            .filter(|c| c.stats.locks > 0)
+            .map(|c| {
+                let st = &c.stats;
+                JsonSat {
+                    sv: c.sv.to_string(),
+                    prn: c.sv.prn,
+                    locks: st.locks,
+                    losses: st.lock_losses,
+                    tracked_s: c.tracked_secs(),
+                    max_lock_s: c.max_lock_secs(),
+                    ttfl_s: (st.first_lock_ts > 0.0).then_some(st.first_lock_ts),
+                    cn0: st.peak_cn0,
+                    subframes: st.subframes,
+                    parity_errors: st.parity_errors,
+                    ephemeris: c.is_ephemeris_complete(),
+                    used_in_fix: st.used_in_fix,
+                }
+            })
+            .collect();
+
+        let fix = self
+            .solver
+            .last_fix_geodetic()
+            .map(|(lat, lon, alt_m)| JsonFix {
+                lat,
+                lon,
+                alt_m,
+                n_sv: used,
+            });
+
+        RunSummary {
+            fix,
+            funnel: JsonFunnel {
+                searched: chans.len(),
+                acquired,
+                tracked,
+                ephemeris: with_eph,
+                used_in_fix: used,
+            },
+            stats: JsonStats {
+                data_sec,
+                wall_sec: wall,
+                real_time_x: rtf,
+                fix_attempts: s.fix_attempts,
+                fix_ok: s.fix_ok,
+                fix_fail: s.fix_fail,
+                xcorr_rejected: s.xcorr_rejections,
+                acq_attempts: sum(|c| c.stats.acq_attempts),
+                acq_correlations: sum(|c| c.stats.acq_corrs),
+                tracking_periods: sum(|c| c.stats.trk_periods),
+                subframes: sum(|c| c.stats.subframes),
+                parity_errors: sum(|c| c.stats.parity_errors),
+            },
+            sats,
         }
+    }
+}
+
+/// Render the run summary as the human `===== run stats =====` block.
+fn print_summary(sum: &RunSummary) {
+    let st = &sum.stats;
+    let f = &sum.funnel;
+    println!("\n===== run stats =====");
+    println!(
+        "data {:.1}s   wall {:.1}s   real-time {:.1}x",
+        st.data_sec, st.wall_sec, st.real_time_x
+    );
+    println!(
+        "funnel: searched {} -> acquired {} -> tracked {} -> ephemeris {} -> used-in-fix {}",
+        f.searched, f.acquired, f.tracked, f.ephemeris, f.used_in_fix
+    );
+    println!(
+        "fixes: {} attempts, {} ok, {} failed   xcorr-rejected {}",
+        st.fix_attempts, st.fix_ok, st.fix_fail, st.xcorr_rejected
+    );
+    println!(
+        "work: {} acq-attempts, {} acq-correlations, {} tracking-periods, {} subframes, {} parity-errors",
+        st.acq_attempts, st.acq_correlations, st.tracking_periods, st.subframes, st.parity_errors
+    );
+
+    println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0 subfr parity eph fix");
+    for s in &sum.sats {
+        let ttfl = s
+            .ttfl_s
+            .map(|v| format!("{v:.1}"))
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
+            s.sv,
+            s.locks,
+            s.losses,
+            s.tracked_s,
+            s.max_lock_s,
+            ttfl,
+            s.cn0,
+            s.subframes,
+            s.parity_errors,
+            if s.ephemeris { "y" } else { "-" },
+            if s.used_in_fix { "y" } else { "-" },
+        );
     }
 }
 

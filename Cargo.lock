@@ -2086,6 +2086,7 @@ dependencies = [
  "rtlsdr_mt",
  "rustfft",
  "serde",
+ "serde_json",
  "structopt",
 ]
 
