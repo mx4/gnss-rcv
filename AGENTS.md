@@ -70,8 +70,11 @@ check pseudorange / transmit-time / solver changes:
 
 [`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one
 command: it builds release, runs to the first fix with `GNSS_TRUTH_ECEF` on,
-and prints the residual spread + the fix error vs truth. It **skips cleanly**
-(exit 0) when the fixture is absent. Read the result as: `resid` per SV ≈ a
+reads the `--json` summary (fix + funnel) from stdout plus the `RESID` stderr
+diagnostic, and prints the residual spread + the fix error vs truth with a
+**PASS/FAIL** verdict (non-zero exit when the fix is missing or worse than the
+~2 km gate). It **skips cleanly** (exit 0) when the fixture is absent. Read the
+result as: `resid` per SV ≈ a
 common constant (the rx clock bias); the **spread** is the geometry error
 (sub-km good, 100s of km means transmit-time/pseudorange is wrong); `fix error
 vs truth` should be well under the test's 0.02° (~2 km) gate.
