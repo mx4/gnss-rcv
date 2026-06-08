@@ -6,7 +6,7 @@ use gnss_rtk::prelude::{
     Orbit, OrbitSource, Rc, SatelliteClockCorrection, Solver, SpacebornBias, UserParameters,
     UserProfile, Vector3,
 };
-use map_3d::{Ellipsoid, ecef2geodetic, geodetic2ecef};
+use map_3d::{Ellipsoid, ecef2geodetic};
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
@@ -238,18 +238,11 @@ type SolverInstance = Solver<
 
 pub struct PositionSolver {
     solver: SolverInstance,
-    cfg: Config,
-    almanac: Almanac,
-    earth_frame: Frame,
-    apriori_ecef: Vector3<f64>,
+    // Last fix, used only as the receiver position for the ionosphere pierce
+    // point; the solver itself needs no a-priori (it bootstraps via Bancroft).
     last_fix_ecef: Option<Vector3<f64>>,
-    recenter_count: usize,
-    converged: bool,
     pub_state: Arc<Mutex<GnssState>>,
 }
-
-const RECENTER_DIST_M: f64 = 30_000.0;
-const MAX_RECENTERS: usize = 10;
 
 fn make_config() -> Config {
     let mut cfg = Config::default().with_navigation_method(Method::SPP);
@@ -267,82 +260,35 @@ fn make_config() -> Config {
     cfg
 }
 
-fn make_solver(
-    almanac: &Almanac,
-    earth_frame: Frame,
-    cfg: &Config,
-    apriori_ecef: Option<Vector3<f64>>,
-) -> SolverInstance {
+// Build a solver with no a-priori position: it bootstraps the first epoch with
+// Bancroft (closed-form) from the pseudoranges alone, then the Kalman filter
+// carries the state forward. Works anywhere on Earth without a starting guess.
+fn make_solver(almanac: &Almanac, earth_frame: Frame, cfg: &Config) -> SolverInstance {
     let eph = Rc::new(NullEph);
     let orb = Rc::new(ReceiverOrbitSource);
     let sb = Rc::new(ReceiverSpacebornBias);
     let eb = Rc::new(ReceiverEnvironmentalBias);
     let tim = ReceiverTime;
-    match apriori_ecef {
-        Some(p) => Solver::new(
-            almanac.clone(),
-            earth_frame,
-            cfg.clone(),
-            eph,
-            orb,
-            sb,
-            eb,
-            tim,
-            Some((p[0], p[1], p[2])),
-        ),
-        None => Solver::new_survey(
-            almanac.clone(),
-            earth_frame,
-            cfg.clone(),
-            eph,
-            orb,
-            sb,
-            eb,
-            tim,
-        ),
-    }
+    Solver::new_survey(almanac.clone(), earth_frame, cfg.clone(), eph, orb, sb, eb, tim)
 }
 
 impl PositionSolver {
     #[allow(clippy::new_without_default)]
     pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
-        let (x, y, z) = geodetic2ecef(
-            46.5_f64.to_radians(),
-            6.6_f64.to_radians(),
-            0.0,
-            Ellipsoid::WGS84,
-        );
-        let apriori_ecef = Vector3::new(x, y, z);
         let cfg = make_config();
         let almanac = Almanac::until_2035().expect("Almanac");
         let earth_frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
-        let solver = make_solver(&almanac, earth_frame, &cfg, None);
+        let solver = make_solver(&almanac, earth_frame, &cfg);
 
         Self {
             solver,
-            cfg,
-            almanac,
-            earth_frame,
-            apriori_ecef,
             last_fix_ecef: None,
-            recenter_count: 0,
-            converged: false,
             pub_state,
         }
     }
 
     pub fn has_fix(&self) -> bool {
         self.last_fix_ecef.is_some()
-    }
-
-    fn relinearize(&mut self) {
-        self.solver.reset();
-        self.solver = make_solver(
-            &self.almanac,
-            self.earth_frame,
-            &self.cfg,
-            Some(self.apriori_ecef),
-        );
     }
 
     /// Returns true if a position was resolved this call.
@@ -400,8 +346,11 @@ impl PositionSolver {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
 
-            let rx_ecef = self.last_fix_ecef.unwrap_or(self.apriori_ecef);
-            let iono_m = if iono_valid {
+            // Ionosphere needs a receiver position for the pierce point; we only
+            // have one once there's a previous fix, so before that leave it at 0
+            // (a few metres, dwarfed by the first-fix transient anyway).
+            let iono_m = if iono_valid && self.last_fix_ecef.is_some() {
+                let rx_ecef = self.last_fix_ecef.unwrap();
                 let sat = compute_sv_position_ecef(eph, now_gpst);
                 let (elev, azim) = elevation_azimuth(rx_ecef, sat);
                 let (lat, lon, _) =
@@ -467,23 +416,6 @@ impl PositionSolver {
             Ok(pvt) => {
                 let pos = Vector3::new(pvt.pos_m.0, pvt.pos_m.1, pvt.pos_m.2);
                 self.last_fix_ecef = Some(pos);
-
-                let dist = (pos - self.apriori_ecef).norm();
-                if !self.converged {
-                    if dist > RECENTER_DIST_M && self.recenter_count < MAX_RECENTERS {
-                        self.apriori_ecef = pos;
-                        self.relinearize();
-                        let _ = self.solver.ppp(now_gpst, params, &pool);
-                        self.recenter_count += 1;
-                        log::warn!(
-                            "re-centered apriori (#{}) at {:.0} km",
-                            self.recenter_count,
-                            dist / 1000.0
-                        );
-                    } else {
-                        self.converged = true;
-                    }
-                }
 
                 let lat = pvt.lat_long_alt_deg_deg_m.0;
                 // gnss-rtk reports longitude in [0, 360); wrap to [-180, 180] so
