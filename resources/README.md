@@ -166,3 +166,43 @@ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin -t 1bit
 Acquires and tracks ~7 SVs (G01/G09/G21/G25/G29/G30/G31) and reaches bit/frame
 sync, but at a marginal ~30 dB-Hz (near the 29 dB-Hz drop threshold) sync drops
 repeatedly, so it does not hold long enough to decode an ephemeris / get a fix.
+
+## SJTU_Bands-L1E1.dat  (ION SJTU, Shanghai)
+source: https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat (`fetch.sh sjtu`)
+An [ION sample](https://sdr.ion.org/api-sample-data.html) recorded at Shanghai
+Jiao Tong University (truth 31.025 N, 121.439 E) with an **SX3 front-end**: signed
+**4-bit real** samples, 2 packed per byte (this is what the `4bit` format type is
+for). The `.sdrx` says `freqbase 12.5 MHz` with `ratefactor 2`, i.e. the actual
+**fs = 25 MHz**, and an L1 IF of **6.25 MHz (= fs/4)** — *not* the literal
+`translatedfreq 6.25` read as-is at fs 12.5 (that lands on Nyquist and acquires
+nothing). 60 s long.
+```
+cargo run --release -- -f resources/SJTU_Bands-L1E1.dat -t 4bit --fs 25000000 --fi 6250000
+```
+Acquires/tracks **15–29 GPS SVs at 45–50 dB-Hz** (G05 ≈ 50, G02 ≈ 49, G29 ≈ 47)
+with many holding lock the full 60 s, and decodes LNAV subframes (e.g. G05
+subframe-5, svid 14). It does **not** complete a full ephemeris within 60 s:
+bit-sync is slow here (~8 s on the SVs that do sync, and several strong SVs never
+sync), so SF1+2+3 of one frame aren't all captured — an open nav-decode issue,
+not a signal one. Being an Asia-Pacific (China) L1+E1 capture it is also the
+foundation recording for QZSS/BeiDou/Galileo work.
+
+(Historical note: an earlier pass mis-read fs as 12.5 MHz and concluded "SJTU GPS
+is only ~35 dB-Hz, too weak." That was the fs error — at the correct 25 MHz the
+SVs are strong.)
+
+## L1_20211226_082212_12MHz_I.bin  (PocketSDR, Tokyo)
+source: http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip (`fetch.sh pocketsdr`)
+A [PocketSDR](https://github.com/tomojitakasu/PocketSDR) capture (T. Takasu),
+recorded in Tokyo. The `.zip` holds an L1 and an L6 file; we use the L1 one:
+**real int8** (`-t i8`), fs **12 MHz**, IF **3 MHz (= fs/4)**, ~30 s. Download URL
+comes from `sample/L1L6_20211226_082212_12MHz.link` in the PocketSDR repo.
+```
+cargo run --release -- -f resources/L1_20211226_082212_12MHz_I.bin -t i8 --fs 12000000 --fi 3000000 --qzss
+```
+Acquires/tracks **26 GPS SVs** (G26 ≈ 48, G31 ≈ 48) and decodes ephemeris fields
+cleanly (G16/G27/G31 subframes 2→3→4→5). With `--qzss` it also acquires the
+regional **QZSS** birds — J194 ≈ 48, J195 ≈ 45, J199 ≈ 40 — through the same L1
+C/A path, tagged with their RINEX `J` prefix (this is the recording that
+validates the QZSS foundation). ~30 s is ~6 s short of capturing SF1 of a full
+frame, so it does not complete an ephemeris / fix.

@@ -86,6 +86,7 @@ $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin -t <format>
 | `i8`          | single int8, real-only                              |
 | `rtlsdr-file` | interleaved uint8 I/Q (an `rtl_sdr` capture)        |
 | `1bit`        | 8 hard-limited 1-bit real samples packed per byte   |
+| `4bit`        | 2 signed 4-bit real samples packed per byte (SX3)   |
 
 ### Sample rate & intermediate frequency
 The PRN code is resampled to the actual rate, so any sampling frequency works.
@@ -141,6 +142,8 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 | [TEXBAT](https://rnl-data.ae.utexas.edu/datastore/texbat/) `cleanStatic` | manual (44 GB; ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ **30.287, −97.736** — Austin TX |
 | `GPS-L1-2022-03-27.sigmf-data` | `fetch.sh zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
 | ION BladeRF (10 MHz) | `fetch.sh ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
+| ION SJTU L1/E1 (SX3, 4-bit) | `fetch.sh sjtu` | `-t 4bit --fs 25000000 --fi 6250000` | Shanghai 🇨🇳 — tracks 15–29 SVs (45–50 dB-Hz), decodes subframes; 60 s but bit-sync too slow for a full ephemeris |
+| [PocketSDR](https://github.com/tomojitakasu/PocketSDR) L1/L6 (Tokyo) | `fetch.sh pocketsdr` | `-t i8 --fs 12000000 --fi 3000000 --qzss` | Tokyo 🇯🇵 — tracks 26 GPS + QZSS J194/J195/J199; decodes SF2–5 but ~30 s ends ~6 s short of an ephemeris |
 | ION HackRF (10 MHz, IF 420 kHz) | `fetch.sh ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks 11 SVs (45–51 dB-Hz), decodes some ephemeris; no full fix yet (intermittent nav decode — open) |
 | `gps.samples.1bit…` | `fetch.sh jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks ~7 SVs at a marginal ~30 dB-Hz; no fix |
 | `gioveAandB_short.bin` | [gfix.dk](http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/) (by hand) | `-t i8 --fs 16367600 --fi 4130400` | acquires/tracks; short — no fix |

@@ -87,7 +87,7 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 
 - Build: `cargo build --release`
 - Run: `RUST_LOG=info cargo run --release -- -f <file> -t <type> [--fs <hz> --fi <hz>]`
-- IQ formats (`-t`): `2xf32` (default), `2xi16`, `2xi8`, `i8`, `rtlsdr-file`, `1bit`.
+- IQ formats (`-t`): `2xf32` (default), `2xi16`, `2xi8`, `i8`, `rtlsdr-file`, `1bit`, `4bit`.
   Sample rate / IF are set with `--fs` / `--fi` (defaults 2.046 MHz / 0 Hz).
 
 ### Faster iteration
@@ -122,6 +122,8 @@ formats and IFs. Each needs the right `-t` (and sometimes `--fs`/`--fi`); append
 | `ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks; partial nav decode, no full fix (open) |
 | `zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks; ~15 s — too short for a fix |
 | `jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks marginal ~30 dB-Hz; no fix |
+| `sjtu` | `-t 4bit --fs 25000000 --fi 6250000` | Shanghai; tracks 15–29 SVs 45–50 dB-Hz, decodes subframes; slow bit-sync, no full fix in 60 s |
+| `pocketsdr` | `-t i8 --fs 12000000 --fi 3000000 --qzss` | Tokyo; tracks 26 GPS + QZSS J194/195/199, decodes SF2–5; ~30 s, ~6 s short of an ephemeris |
 | (generated) `gpssim_2xi16` | `-t 2xi16` | ✅ fix 46.207, 6.156 (Geneva); the integration test |
 | TEXBAT `cleanStatic` (manual; 44 GB, ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ fix 30.287, −97.736 (Austin TX) |
 

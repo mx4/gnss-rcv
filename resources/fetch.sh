@@ -22,6 +22,8 @@ RESOURCES=(
   "ion-bladerf|https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16|ION_BladeRF_Bands-L1.2xi16|527335424|raw|-t 2xi16 --fs 10000000  (ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix)"
   "ion-lime|https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16|ION_LimeSDR_Bands-L1.2xi16|2459077760|raw|-t 2xi16 --fs 10000000 --fi 420000  (ION LimeSDR L1, 10 MHz IF 420 kHz, 60s; fixes)"
   "ion-hackrf|https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8|ION_HackRF_Bands-L1.2xi8|1200000000|raw|-t 2xi8 --fs 10000000 --fi 420000  (ION HackRF L1; acquires 11 SVs but doesn't nav-decode -- open issue)"
+  "sjtu|https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat|SJTU_Bands-L1E1.dat|749899776|raw|-t 4bit --fs 25000000 --fi 6250000  (ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs, no full fix)"
+  "pocketsdr|http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip|L1_20211226_082212_12MHz_I.bin|364904448|zip|-t i8 --fs 12000000 --fi 3000000 --qzss  (PocketSDR Tokyo L1, ~30s; tracks GPS + QZSS J194/195/199)"
   "nov3|https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip|nov_3_time_18_48_st_ives|12699331696|zip|-t 2xf32  (main dev recording)"
 )
 
