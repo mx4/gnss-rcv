@@ -225,6 +225,14 @@ $ rtl_sdr -f 1575420000 -s 2046000 -n 20460000 output.bin   # 10 s of L1
 Any code contribution is welcome!
 
 ## TODO
-- [ ] test + fix rtlsdr support
-- [ ] support SBAS, Galileo, QZSS, BeiDou
-- [ ] use the received Almanac to decide which satellites are in view
+Short list; the detailed, evidence-ranked backlog + feature roadmap live in
+[AGENTS.md](AGENTS.md).
+- [x] SBAS detection and QZSS L1 C/A (acquires, tracks, decodes and solves
+      through the existing GPS path)
+- [x] Saastamoinen troposphere correction in the solver
+- [x] Hermetic synthetic-signal tests ([`src/synth.rs`](src/synth.rs) — multi-SV
+      L1CA with Doppler / C/N0 noise, no recording needed)
+- [ ] Galileo E1 and BeiDou B1
+- [ ] test + fix live rtl-sdr device support
+- [ ] use the decoded almanac to predict which satellites are in view
+- [ ] era-aware GPS week-rollover; resolve the per-SV ~0.5 ms pseudorange bias

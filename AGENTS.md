@@ -17,10 +17,11 @@ cargo test --release
 cargo test --release -- --ignored
 ```
 
-- **`cargo test --release`** — unit tests (incl. `synthetic_signal_acquires_and_tracks`,
-  a hermetic acquisition→tracking test that synthesizes its own signal and needs
-  no recording) + the fast integration test `acquires_and_tracks_gpssim` (~0.6 s).
-  Run this after any change.
+- **`cargo test --release`** — unit tests (incl. the hermetic synthetic-signal
+  acquire/track tests `synthetic_signal_acquires_and_tracks` and
+  `synthetic_noisy_multi_sv_acquires_and_tracks`, which synthesize their own IQ
+  via [`synth.rs`](src/synth.rs) and need no recording) + the fast integration
+  test `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
 - **`cargo test --release -- --ignored`** — also runs the heavy
   `computes_position_fix_gpssim` (~3 s; pipeline until the first fix, via
   `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below).
@@ -147,9 +148,12 @@ guesses. Tackle roughly top-to-bottom.
 - ~~`-x`/`--exit-on-fix`~~, ~~`-p`/`--plots` (opt-in plotting)~~.
 - ~~**CI gate**~~: Linux/macOS CI now runs fmt + clippy (`-D warnings`) + test,
   not just `cargo build`.
-- ~~**Mock `IQReader`** + hermetic DSP test~~: `MockIQReader` + a synthetic-signal
-  helper drive a channel acquisition→tracking with no recording
-  (`synthetic_signal_acquires_and_tracks`).
+- ~~**Mock `IQReader`** + synthetic-signal generator~~: [`synth.rs`](src/synth.rs)
+  renders multi-SV L1CA IQ (Doppler, fractional code phase, C/N0-scaled AWGN,
+  optional 50 bps nav bits) into `MockIQReader`, driving the real acquisition→
+  tracking path with no recording. Covered by `synthetic_signal_acquires_and_tracks`
+  (clean) and `synthetic_noisy_multi_sv_acquires_and_tracks` (3 SVs in one AWGN
+  realization); also a controlled bench for the slow-bit-sync issue.
 - ~~**`ReceiverConfig` struct**~~: `Receiver::new(&ReceiverConfig, ...)` (+
   `with_feed` for injected sources); callers build a struct with
   `..Default::default()` instead of a dozen positional args.
