@@ -111,7 +111,8 @@ USE_COLOR = (
 _CODES = {
     "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
     "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
-    "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m", "grey": "\033[90m",
+    "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m",
+    # deliberately no bright-black (90): Solarized Dark renders it == background.
 }
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -184,7 +185,10 @@ def tags_plain(rec: Rec) -> str:
 
 
 def hr(width: int = 78, ch: str = "─") -> str:
-    return paint(ch * width, "grey")
+    # NB: never bright-black (\033[90m) -- Solarized maps it to base03, which IS
+    # the background on the dark theme, so such text renders invisible. Use the
+    # `dim` attribute (faint, but never background-equal) for de-emphasis.
+    return paint(ch * width, "dim")
 
 
 def print_list(recs: List[Rec], tag_filter=None) -> None:
@@ -193,9 +197,9 @@ def print_list(recs: List[Rec], tag_filter=None) -> None:
     legend = "tags: " + " ".join(paint(t, TAG_COLOR[t]) for t in TAGS)
     print()
     print("  " + paint(title, "bold"))
-    print("  " + paint(sub, "grey") + "    " + legend)
+    print("  " + paint(sub, "dim") + "    " + legend)
     if tag_filter:
-        print("  " + paint("filtered to tag: " + paint(tag_filter, TAG_COLOR[tag_filter]), "grey"))
+        print("  " + paint("filtered to tag: ", "dim") + paint(tag_filter, TAG_COLOR[tag_filter]))
     print(hr())
 
     name_w = max((len(r.name) for r in recs), default=4)
@@ -211,23 +215,23 @@ def print_list(recs: List[Rec], tag_filter=None) -> None:
             disk += filesize(dest_path(r))
             icon = paint("✓", "green", "bold")
         else:
-            icon = paint("·", "grey")
+            icon = paint("·", "dim")
         line = "  %s  %s  %s  %s  %s" % (
             icon,
-            pad(paint(r.name, "bold" if here else "dim"), name_w),
+            pad(paint(r.name, "bold") if here else r.name, name_w),
             pad(tag_chips(r), tags_w),
             rpad(human(r.size), size_w),
-            paint(r.dest, "grey"),
+            r.dest,  # default fg: a filename must stay readable on any theme
         )
         print(line)
-        print("       " + paint("↳ " + r.note, "grey", "dim"))
+        print("       " + paint("↳ " + r.note, "dim"))
 
     print(hr())
     summary = "%d recordings · %s present (%s on disk) · %d missing" % (
         len(recs), paint(str(present), "green"), human(disk), len(recs) - present,
     )
     print("  " + summary)
-    print("  " + paint("note: gioveAandB_short.bin (gfix.dk) blocks scripted downloads — fetch by hand", "grey", "dim"))
+    print("  " + paint("note: gioveAandB_short.bin (gfix.dk) blocks scripted downloads — fetch by hand", "dim"))
     print()
 
 
