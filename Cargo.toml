@@ -5,7 +5,19 @@ authors = ["Maxime Austruy <austruym@gmail.com>"]
 edition = "2024"
 
 [profile.release]
-debug = true
+# line-tables-only keeps file:line in panic/coredump backtraces but skips the
+# heavy per-variable debuginfo, so every incremental release link is faster.
+debug = "line-tables-only"
+
+# Make debug builds actually runnable: lightly optimize our own crate and fully
+# optimize dependencies (a one-time cost, then cached). `cargo run`/`cargo test`
+# without --release then exercise the DSP at a usable rate while compiling much
+# faster than release -- shrinking the edit→run loop.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
