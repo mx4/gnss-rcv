@@ -87,7 +87,7 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 
 - Build: `cargo build --release`
 - Run: `RUST_LOG=info cargo run --release -- -f <file> -t <type> [--fs <hz> --fi <hz>]`
-- IQ formats (`-t`): `2xf32` (default), `2xi16`, `i8`, `rtlsdr-file`, `1bit`.
+- IQ formats (`-t`): `2xf32` (default), `2xi16`, `2xi8`, `i8`, `rtlsdr-file`, `1bit`.
   Sample rate / IF are set with `--fs` / `--fi` (defaults 2.046 MHz / 0 Hz).
 
 ### Faster iteration
@@ -102,21 +102,30 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 
 ## Sample data
 
-`./resources/fetch.sh` downloads the downloadable IQ recordings (`fetch.sh` with
-no args lists them; `fetch.sh <name>` downloads one, resuming/skipping if
-present). `gpssim_2xi16` is *generated* by gps-sdr-sim (`./resources/gen_gpssim.sh`,
-needs gps-sdr-sim + network), not downloaded. Each recording needs the right
-`-t` (and sometimes `--fs`/`--fi`) — wrong ones mean no acquisition (append `-x`
-to stop at the first fix; per-recording truth/notes in
-[resources/README.md](resources/README.md)):
+`./resources/fetch.sh` is the IQ-recording provisioner: no args lists them;
+`fetch.sh <name>` downloads one (resuming/skipping if present) **and prints the
+exact command to run it**. `gpssim_2xi16` is *generated* by gps-sdr-sim
+(`./resources/gen_gpssim.sh`, needs gps-sdr-sim + network), not downloaded.
 
-| name (`fetch.sh`) | file | run command |
+**Master validation list** — run these to check receiver stability across rates,
+formats and IFs. Each needs the right `-t` (and sometimes `--fs`/`--fi`); append
+`-x` to stop at the first fix. Per-recording truth/notes in
+[resources/README.md](resources/README.md):
+
+| `fetch.sh` name | flags | expected |
 |---|---|---|
-| `nov3` | `nov_3_time_18_48_st_ives` | `cargo run --release -- -f resources/nov_3_time_18_48_st_ives -t 2xf32` |
-| `cttc` | `2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/…SPAIN.dat` | `cargo run --release -- -f resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat -t 2xi16 --fs 4000000` |
-| `zenodo-sigmf` | `GPS-L1-2022-03-27.sigmf-data` | `cargo run --release -- -f resources/GPS-L1-2022-03-27.sigmf-data -t 2xi16 --fs 4000000` (≈15 s; too short for a fix) |
-| `jks-1bit` | `gps.samples.1bit.I.fs5456.if4092.bin` | `cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin -t 1bit --fs 5456000 --fi 1364000` |
-| (generated) | `gpssim_2xi16` | see [`scripts/validate_fix.py`](scripts/validate_fix.py) / "Validating a positioning change" |
+| `nov3` | `-t 2xf32` | ✅ fix 52.334, −0.081 (St Ives, Cambs) |
+| `cttc` | `-t 2xi16 --fs 4000000` | ✅ fix 41.274, 1.986 (Castelldefels) |
+| `ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ fix 52.177, 4.489 (Netherlands) |
+| `ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs; ~13 s — too short for a fix |
+| `ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks; partial nav decode, no full fix (open) |
+| `zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks; ~15 s — too short for a fix |
+| `jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks marginal ~30 dB-Hz; no fix |
+| (generated) `gpssim_2xi16` | `-t 2xi16` | ✅ fix 46.207, 6.156 (Geneva); the integration test |
+| TEXBAT `cleanStatic` (manual; 44 GB, ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ fix 30.287, −97.736 (Austin TX) |
+
+For the generated `gpssim_2xi16` positioning regression see
+[`scripts/validate_fix.py`](scripts/validate_fix.py) / "Validating a positioning change".
 
 ## Improvement backlog
 

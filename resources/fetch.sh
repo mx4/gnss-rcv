@@ -39,6 +39,14 @@ is_present() { # dest size -> 0 if present (size 0 means existence-only)
   [ "$2" = "0" ] || [ "$(filesize "$1")" = "$2" ]
 }
 
+# dest, run-hint -> print the ready-to-run command (the run-hint is "<flags>
+# (note)"; drop the parenthetical note and prepend the actual file path).
+runcmd() {
+  local flags
+  flags="$(printf '%s' "$2" | sed -E 's/\(.*//; s/[[:space:]]+$//')"
+  printf "  cargo run --release -- -f resources/%s %s\n" "$1" "$flags"
+}
+
 list() {
   echo "Downloadable IQ recordings (./resources/fetch.sh <name>... | all):"
   echo
@@ -59,7 +67,8 @@ fetch_one() {
     [ "$name" = "$want" ] || continue
 
     if is_present "$dest" "$size"; then
-      echo "$name: already present, skipping"
+      echo "$name: already present, run with:"
+      runcmd "$dest" "$run"
       return 0
     fi
     echo "$name: downloading -> resources/$dest"
@@ -86,7 +95,8 @@ fetch_one() {
         ;;
     esac
     [ -f "$dest" ] || { echo "$name: '$dest' missing after extract" >&2; return 1; }
-    echo "$name: done"
+    echo "$name: done, run with:"
+    runcmd "$dest" "$run"
     return 0
   done
   echo "unknown resource: $want" >&2
