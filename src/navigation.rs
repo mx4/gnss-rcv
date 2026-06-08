@@ -2,7 +2,7 @@ use crate::{
     channel::Channel,
     constants::{P2_24, P2_27, P2_30},
     ephemeris::Ephemeris,
-    util::{bits_equal, bits_opposed, getbits, getbitu, hex_str, setbitu, xor_bits},
+    util::{bits_equal, bits_opposed, getbits, getbits2, getbitu, hex_str, setbitu, xor_bits},
 };
 use colored::Colorize;
 use gnss_rs::sv::SV;
@@ -180,7 +180,30 @@ impl Channel {
                     }
                 }
             } else if svid == 55 {
-                // page 17: special message
+                // page 17: special message -- 22 eight-bit ASCII characters
+                // packed across words 3-10 (two in word 3, three each in words
+                // 4-9, two in word 10).
+                const MSG_BITS: [usize; 22] = [
+                    68, 76, 90, 98, 106, 120, 128, 136, 150, 158, 166, 180, 188, 196, 210, 218,
+                    226, 240, 248, 256, 270, 278,
+                ];
+                let msg: String = MSG_BITS
+                    .iter()
+                    .map(|&p| getbitu(buf, p, 8) as u8)
+                    .map(|c| {
+                        if (0x20..0x7f).contains(&c) {
+                            c as char
+                        } else {
+                            '.'
+                        }
+                    })
+                    .collect();
+                log::warn!(
+                    "{}: {} (SF4 p17): \"{}\"",
+                    self.sv,
+                    "special msg".blue(),
+                    msg
+                );
             } else if svid == 56 {
                 /* page 18 */
                 // handle iono, utc and leap seconds
@@ -199,9 +222,29 @@ impl Channel {
                 pub_state.iono_beta = [ion[4], ion[5], ion[6], ion[7]];
                 pub_state.ion_adj = true;
 
-                // Page 18 also carries UTC (A0/A1/tot/WNt) and leap seconds; we
-                // only flag that it was received, as nothing consumes them yet.
+                // Page 18 also carries the GPS->UTC conversion (A0/A1, ref time
+                // tot/WNt) and the leap-second count: dt_ls is the current
+                // GPS-UTC offset; if it differs from dt_lsf a leap second is
+                // scheduled at week wn_lsf, day-of-week dn.
+                let a1 = getbits(buf, 150, 24) as f64 * 2.0_f64.powi(-50);
+                let a0 = getbits2(buf, 180, 24, 210, 8) as f64 * P2_30;
+                let tot = getbitu(buf, 218, 8) * 4096;
+                let wnt = getbitu(buf, 226, 8);
+                let dt_ls = getbits(buf, 240, 8);
+                let wn_lsf = getbitu(buf, 248, 8);
+                let dn = getbitu(buf, 256, 8);
+                let dt_lsf = getbits(buf, 270, 8);
                 pub_state.utc_adj = true;
+                let leap = if dt_ls != dt_lsf {
+                    format!(" -- LEAP SECOND scheduled: {dt_lsf}s at week {wn_lsf} day {dn}")
+                } else {
+                    String::new()
+                };
+                log::warn!(
+                    "{}: {} (SF4 p18): leap={dt_ls}s A0={a0:+.3e}s A1={a1:+.3e}s/s tot={tot} WNt={wnt}{leap}",
+                    self.sv,
+                    "UTC/leap".blue(),
+                );
             }
         }
 
