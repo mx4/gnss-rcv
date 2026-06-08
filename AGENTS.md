@@ -91,6 +91,10 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
 
 - Build: `cargo build --release`
 - Run: `RUST_LOG=info cargo run --release -- -f <file> -t <type> [--fs <hz> --fi <hz>]`
+- For iteration you can **drop `--release`**: the dev profile optimizes deps
+  (`opt-level=3`) and our crate (`opt-level=1`), so a debug build compiles in
+  ~1.5 s (vs ~7.4 s release) and still runs the DSP fast enough (it solves the
+  gpssim fixture in ~3.6 s, same fix). Use `--release` for the final check.
 - IQ formats (`-t`): `2xf32` (default), `2xi16`, `2xi8`, `i8`, `rtlsdr-file`, `1bit`, `4bit`.
   Sample rate / IF are set with `--fs` / `--fi` (defaults 2.046 MHz / 0 Hz).
 
@@ -108,6 +112,9 @@ GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0" RUST_LOG=warn \
   human stats on stdout. Prefer asserting on this over grepping logs.
 - A position fix needs ~3 subframes decoded (~20–40 s of IQ). Use `-x` to stop
   at the first fix, or `--num-msec` to bound a run that may never get one.
+- `examples/bitsync_bench.rs` drives the receiver with a *synthetic* SV (chosen
+  C/N0, toggling 50 bps, optional fs/fi) and no recording, to study nav bit-sync
+  in isolation: `RUST_LOG=info cargo run --release --example bitsync_bench -- 45`.
 
 ## Sample data
 
@@ -257,6 +264,7 @@ Without these gnss-rcv cannot integrate with any external tool:
 | **Troposphere model** (Saastamoinen) | ✅ Done — standard-atmosphere ZHD+ZWD, slant-mapped, applied per SV in `solver.rs`. |
 | **Per-SV ~0.5 ms bias** | Open; residual visible in `validate_fix.py` spread. |
 | **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers to ~2038; needs a date-anchored resolver (known real-world recordings already show "2032 GPST"). |
+| **Sustained nav bit-sync on marginal recordings** | Open. The bit-sync *logic* is sound — a clean synthetic SV holds sync with zero loss at 40–50 dB-Hz in both the 2.046 MHz and SJTU 25 MHz/fi=fs/4 regimes (`examples/bitsync_bench.rs`). But SJTU/HackRF lose sync after ~1 subframe: degraded real prompt-I (the 20 ms coherent nav integration `nav_mean_ip` collapses below `THRESHOLD_LOST`) **plus** a brittle recovery path — a single failed frame-sync check hard-resets both `bit_sync` and `nav_sync` (navigation.rs ~471), forcing a full ~7 s re-sync, so 3 *consecutive* clean subframes rarely line up. Fix: gentler sync recovery (hysteresis / don't hard-reset on one miss) and/or tighter carrier tracking; validate that the recordings that already fix still do. |
 
 ### C. Constellation & frequency gaps
 
