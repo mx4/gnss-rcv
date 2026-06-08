@@ -416,7 +416,7 @@ impl Channel {
         }
     }
 
-    fn nav_test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
+    pub(crate) fn nav_test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
         const MASK: [u32; 6] = [
             0x2EC7CD2, 0x1763E69, 0x2BB1F34, 0x15D8F9A, 0x1AEC7CD, 0x22DEA27,
         ];

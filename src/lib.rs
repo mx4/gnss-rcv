@@ -5,6 +5,7 @@ pub mod code;
 pub mod constants;
 pub mod device;
 pub mod ephemeris;
+pub mod lnav;
 pub mod navigation;
 pub mod network;
 pub mod plots;
