@@ -220,3 +220,55 @@ The rest are correct refactors but mostly scaffolding until there's a second
   which breaks the single-IF assumption end-to-end. Both rank well below QZSS.
 - Trait-based ionosphere model (Klobuchar / NeQuick / none) in
   [solver.rs](src/solver.rs).
+
+## Feature roadmap
+
+Gap analysis (2026-06) — missing pieces for developer-cornerstone status.
+The "Improvement backlog" above covers code quality; this covers capability.
+Items are roughly ordered by leverage.
+
+### A. Standard output interfaces — highest-leverage gap
+
+Without these gnss-rcv cannot integrate with any external tool:
+
+| Item | Impact |
+|---|---|
+| **NMEA output** (`$GPGGA`, `$GPRMC`) | Universal interface — chart plotters, GIS, autopilots, loggers. Add `--nmea <port/file/->`. |
+| **RINEX observation file** | Post-processing with rtklib/BERN/PPP services; needs raw pseudoranges+Doppler per epoch. |
+| **Structured observation log** | Line-per-epoch JSON/CSV `(tow, sv, pseudorange, cn0, doppler)` for Python/MATLAB algorithm work. |
+| **RTCM3** | Interop with RTK base stations and NTRIP correction streams. |
+
+### B. Accuracy — open issues
+
+| Item | Status |
+|---|---|
+| **Troposphere model** (Saastamoinen) | ✅ Done — standard-atmosphere ZHD+ZWD, slant-mapped, applied per SV in `solver.rs`. |
+| **Per-SV ~0.5 ms bias** | Open; residual visible in `validate_fix.py` spread. |
+| **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers to ~2038; needs a date-anchored resolver (known real-world recordings already show "2032 GPST"). |
+
+### C. Constellation & frequency gaps
+
+| Item | Notes |
+|---|---|
+| **Galileo E1** | BOC(1,1) correlator, 4092-chip memory codes, I/NAV FEC decoder. Highest ROI after GPS. |
+| **GPS L2C / L5** | Dual-frequency → ionosphere-free combination; opens the door to PPP. |
+| **GLONASS L1** | FDMA (per-SV carrier); breaks single-IF assumption end-to-end. Hard. |
+| **BeiDou B1** | Completes global coverage. |
+
+### D. Developer experience
+
+| Item | Notes |
+|---|---|
+| **SigMF `.meta` auto-config** | Parse the JSON sidecar to set `--fs`/`--fi`/center_freq automatically instead of requiring manual flags. |
+| **Config file (TOML)** | Save per-recording profiles; avoids long CLI commands. |
+| **Interactive time-series in UI** | Live scrolling CN0/Doppler/code-phase in the egui window; more useful than `--plots` PNGs. |
+| **NTRIP client** | Fetch DGNSS/RTK corrections from a public caster (IGS, EUREF) for differential positioning. |
+| **SoapySDR abstraction** | Cover USRP, HackRF, LimeSDR, BladeRF live; currently only RTL-SDR. |
+| **SBAS correction decoding** | The `--sbas` flag acquires SBAS SVs but MT1–MT6 messages are not decoded; applying them would bring single-frequency accuracy to ~1 m. |
+
+### E. Library & API surface
+
+`src/lib.rs` is ~20 lines; no stable embeddable API. For downstream use:
+- Clean `pub` API with docstrings on `Channel`, `Receiver`, `Ephemeris`.
+- A `Measurement` type exposing `(sv, t_tx, pseudorange, carrier_phase, cn0, doppler)` per epoch — the atom every GNSS algorithm consumes.
+- `#[no_std]` compatibility for embedded targets (long-term).

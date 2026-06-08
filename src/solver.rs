@@ -126,6 +126,30 @@ fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Saastamoinen troposphere slant delay (metres) using a standard atmosphere.
+///
+/// Computes the zenith hydrostatic delay (ZHD) from standard-atmosphere
+/// pressure at the given height, adds a simplified zenith wet delay (ZWD),
+/// and maps to the slant path with 1/sin(elevation). Returns 0 for elevations
+/// below 5° to avoid blow-up near the horizon.
+///
+/// Reference: Saastamoinen (1973); standard atmosphere (ICAO).
+fn saastamoinen_tropo_m(lat: f64, h_m: f64, elev: f64) -> f64 {
+    if elev < 5.0_f64.to_radians() {
+        return 0.0;
+    }
+    // Standard atmosphere: surface pressure at height h_m [hPa].
+    let p_hpa = 1013.25 * (1.0 - 2.2558e-5 * h_m).powf(5.2568);
+    // Saastamoinen gravity correction (latitude- and height-dependent).
+    let f = 1.0 - 2.66e-3 * (2.0 * lat).cos() - 2.8e-4 * (h_m / 1000.0);
+    // Zenith hydrostatic delay [m].
+    let zhd = 2.2779e-3 * p_hpa / f;
+    // Zenith wet delay [m]: typical mid-latitude value, decays with altitude.
+    let zwd = 0.1 * (-h_m / 2000.0).exp();
+    // Slant delay via simple 1/sin(elevation) mapping.
+    (zhd + zwd) / elev.sin()
+}
+
 fn klobuchar_l1_delay_m(
     alpha: &[f64; 4],
     beta: &[f64; 4],
@@ -261,6 +285,9 @@ fn make_config() -> Config {
     // disable gnss-rtk's own relativistic clock model to avoid double-counting.
     // TGD is likewise supplied via group_delay (sv_total_group_delay = true).
     cfg.modeling.relativistic_clock_bias = false;
+    // Both troposphere and ionosphere are applied directly to the pseudorange
+    // (saastamoinen_tropo_m / klobuchar_l1_delay_m in compute_position) so
+    // gnss-rtk's own models are disabled to avoid double-counting.
     cfg.modeling.tropospheric_bias = false;
     cfg.modeling.ionospheric_bias = false;
     cfg
@@ -361,21 +388,24 @@ impl PositionSolver {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
 
-            // Ionosphere needs a receiver position for the pierce point; we only
-            // have one once there's a previous fix, so before that leave it at 0
-            // (a few metres, dwarfed by the first-fix transient anyway).
-            let iono_m = if let (true, Some(rx_ecef)) = (iono_valid, self.last_fix_ecef) {
+            // Ionosphere and troposphere both need a receiver position (pierce
+            // point / elevation angle). We have one once there's a previous fix;
+            // before that both corrections are 0 (a few metres, dwarfed by the
+            // first-fix transient anyway).
+            let (iono_m, tropo_m) = if let Some(rx_ecef) = self.last_fix_ecef {
                 let sat = compute_sv_position_ecef(eph, now_gpst);
                 let (elev, azim) = elevation_azimuth(rx_ecef, sat);
-                let (lat, lon, _) =
+                let (lat, lon, h_m) =
                     ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
-                if elev > 0.0 {
+                let iono = if iono_valid && elev > 0.0 {
                     klobuchar_l1_delay_m(&iono_alpha, &iono_beta, lat, lon, elev, azim, gps_sod)
                 } else {
                     0.0
-                }
+                };
+                let tropo = saastamoinen_tropo_m(lat, h_m, elev);
+                (iono, tropo)
             } else {
-                0.0
+                (0.0, 0.0)
             };
 
             log::warn!(
@@ -384,11 +414,13 @@ impl PositionSolver {
                 eph.code_off_sec
             );
             log::warn!(
-                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m",
+                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m tropo={tropo_m:.1}m",
                 eph.sv,
                 pseudo_range_sec * 1000.0,
                 eph.tgd,
             );
+
+            let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m;
 
             if let Some(truth) = truth_ecef {
                 let we = EARTH_ROTATION_RATE * pseudo_range_sec;
@@ -398,7 +430,6 @@ impl PositionSolver {
                 let geom =
                     ((sx - truth[0]).powi(2) + (sy - truth[1]).powi(2) + (sz - truth[2]).powi(2))
                         .sqrt();
-                let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m;
                 let clk_m = clock_corr * SPEED_OF_LIGHT;
                 // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.
                 // residual = pr_m + clk_m - geom = c*dT_rx (common-mode rx clock).
@@ -411,8 +442,6 @@ impl PositionSolver {
                     (pr_m + clk_m - geom) / 1000.0
                 );
             }
-
-            let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m;
             pool.push(Candidate::new(
                 eph.sv,
                 now_gpst,
