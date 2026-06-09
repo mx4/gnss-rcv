@@ -630,7 +630,7 @@ fn print_summary(sum: &RunSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::synth::{SynthSv, synth_l1ca};
+    use crate::synth::{SynthE1Sv, SynthSv, synth_e1, synth_l1ca};
 
     #[test]
     fn mock_reader_serves_slices_and_eof() {
@@ -731,6 +731,45 @@ mod tests {
                 ch.get_cn0()
             );
         }
+    }
+
+    // Hermetic Galileo E1-B regression: a synthetic BOC(1,1) signal must drive a
+    // channel from Acquisition into Tracking — the E1 analogue of
+    // `synthetic_signal_acquires_and_tracks`, exercising the BOC correlator and
+    // the signal-aware 4 ms code period with no recording.
+    #[test]
+    fn synthetic_e1_acquires_and_tracks() {
+        let (fs, fi) = (4_092_000.0, 0.0); // 2 samples / BOC sub-chip
+        let prn = 1u8;
+        let svs = [SynthE1Sv::new(prn, 800.0, 1000.0, 0.0)]; // noiseless, some Doppler
+        let sig = synth_e1(&svs, fs, fi, 400, None); // 400 ms: acquire + track E1's 4 ms code
+
+        let cfg = ReceiverConfig {
+            sats: prn.to_string(),
+            sig: Signal::GalileoE1b,
+            fs,
+            fi,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(MockIQReader::new(sig)),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        );
+        rx.run_loop(0);
+
+        let sv = SV::new(Constellation::Galileo, prn);
+        let ch = &rx.channels[&sv];
+        assert!(
+            ch.is_state_tracking(),
+            "synthetic E1 signal for {sv} should reach Tracking"
+        );
+        assert!(
+            ch.get_cn0() > 45.0,
+            "a noiseless E1 signal should track at very high C/N0, got {:.1}",
+            ch.get_cn0()
+        );
     }
 
     // Regression: a code phase of exactly 0 makes the first tracking step wrap

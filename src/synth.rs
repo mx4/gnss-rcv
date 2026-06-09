@@ -16,12 +16,16 @@
 use rustfft::num_complex::Complex64;
 use std::f64::consts::TAU;
 
-use crate::code::{Code, L1CA_CODE_LEN};
+use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
 
 /// L1 C/A chip rate (1023 chips / 1 ms).
 const CODE_RATE_HZ: f64 = 1_023_000.0;
 /// L1 carrier, used to stretch the code rate by the carrier Doppler.
 const L1_HZ: f64 = 1_575_420_000.0;
+/// Galileo E1 BOC(1,1) sub-chip rate (8184 sub-chips / 4 ms).
+const E1_SUBCHIP_RATE_HZ: f64 = 2_046_000.0;
+/// E1-B/C BOC code length in sub-chips (4092 chips × 2).
+const E1_BOC_LEN: usize = 2 * E1_CODE_LEN;
 /// One nav data bit lasts 20 ms (50 bps) = 20 code periods.
 const NAV_BIT_SEC: f64 = 0.020;
 
@@ -135,6 +139,98 @@ pub fn synth_l1ca(
             } else {
                 let bi = (t / NAV_BIT_SEC) as usize % s.nav_bits.len();
                 s.nav_bits[bi] as f64
+            };
+            let phase = TAU * (fi + s.doppler_hz) * t;
+            x += Complex64::from_polar(amp[k] * c * b, phase);
+        }
+        if let Some(rng) = rng.as_mut() {
+            x += Complex64::new(rng.gauss() * nstd, rng.gauss() * nstd);
+        }
+        out.push(x);
+    }
+    out
+}
+
+/// One synthetic Galileo E1-B satellite. Like [`SynthSv`] but the spreading code
+/// is the BOC(1,1) E1-B memory code and the data is the I/NAV **symbol** stream
+/// (250 sym/s = one symbol per 4 ms code period), e.g. from
+/// [`crate::galileo_inav::encode_inav_stream`].
+#[derive(Clone)]
+pub struct SynthE1Sv {
+    pub prn: u8,
+    pub doppler_hz: f64,
+    /// Initial code phase in BOC sub-chips (0..8184, may be fractional).
+    pub code_phase_subchips: f64,
+    pub cn0_dbhz: f64,
+    /// I/NAV symbols (0/1). Empty = held at 0 (no data), which still acquires and
+    /// tracks; supply a stream to exercise frame sync / ephemeris decode.
+    pub symbols: Vec<u8>,
+}
+
+impl SynthE1Sv {
+    pub fn new(prn: u8, doppler_hz: f64, code_phase_subchips: f64, cn0_dbhz: f64) -> Self {
+        Self {
+            prn,
+            doppler_hz,
+            code_phase_subchips,
+            cn0_dbhz,
+            symbols: Vec::new(),
+        }
+    }
+
+    pub fn with_symbols(mut self, symbols: Vec<u8>) -> Self {
+        self.symbols = symbols;
+        self
+    }
+}
+
+/// Like [`synth_l1ca`] but for Galileo E1-B: BOC(1,1) code at the 2.046 Msps
+/// sub-chip rate, modulated by each SV's I/NAV symbol stream (one symbol per 4 ms
+/// code period). Symbol bit 0 → +1 (positive prompt-I, which the receiver reads
+/// back as 0), bit 1 → −1.
+pub fn synth_e1(
+    svs: &[SynthE1Sv],
+    fs: f64,
+    fi: f64,
+    num_msec: usize,
+    seed: Option<u64>,
+) -> Vec<Complex64> {
+    let code_sp = (fs * 1e-3) as usize;
+    let n_total = code_sp * num_msec;
+
+    let codes: Vec<Vec<i8>> = svs
+        .iter()
+        .map(|s| Signal::GalileoE1b.spreading_code(s.prn).expect("E1-B code"))
+        .collect();
+    let subchip_rate: Vec<f64> = svs
+        .iter()
+        .map(|s| E1_SUBCHIP_RATE_HZ * (1.0 + s.doppler_hz / L1_HZ))
+        .collect();
+    let amp: Vec<f64> = svs
+        .iter()
+        .map(|s| match seed {
+            None => 1.0,
+            Some(_) => (10f64.powf(s.cn0_dbhz / 10.0) / fs).sqrt(),
+        })
+        .collect();
+
+    let mut rng = seed.map(Rng);
+    let nstd = 0.5f64.sqrt();
+    let inv_fs = 1.0 / fs;
+    let mut out = Vec::with_capacity(n_total);
+    for n in 0..n_total {
+        let t = n as f64 * inv_fs;
+        let mut x = Complex64::new(0.0, 0.0);
+        for (k, s) in svs.iter().enumerate() {
+            let pos = s.code_phase_subchips + subchip_rate[k] * t;
+            let c = codes[k][pos.rem_euclid(E1_BOC_LEN as f64) as usize] as f64;
+            // One I/NAV symbol per code period (every 8184 sub-chips).
+            let b = if s.symbols.is_empty() {
+                1.0
+            } else {
+                let period = (pos / E1_BOC_LEN as f64).floor() as i64;
+                let idx = period.rem_euclid(s.symbols.len() as i64) as usize;
+                if s.symbols[idx] == 0 { 1.0 } else { -1.0 }
             };
             let phase = TAU * (fi + s.doppler_hz) * t;
             x += Complex64::from_polar(amp[k] * c * b, phase);
