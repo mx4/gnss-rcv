@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 
-use crate::code::Code;
+use crate::code::Signal;
 use crate::receiver::IQReader;
 
 pub struct RtlSdrDevice {
@@ -69,7 +69,7 @@ impl IQReader for RtlSdrDevice {
 
 impl RtlSdrDevice {
     #[allow(clippy::result_unit_err)]
-    pub fn new(sig: &str, fs: f64) -> Result<RtlSdrDevice, ()> {
+    pub fn new(sig: Signal, fs: f64) -> Result<RtlSdrDevice, ()> {
         let devices = rtlsdr_mt::devices();
 
         for dev in devices {
@@ -100,7 +100,7 @@ impl RtlSdrDevice {
             .set_bias_tee(1)
             .expect("Failed to set bias tee");
         m.controller
-            .set_center_freq(Code::get_code_freq(sig) as u32)
+            .set_center_freq(sig.carrier_hz() as u32)
             .expect("Failed to change center freq");
         m.controller
             .set_sample_rate(fs as u32)

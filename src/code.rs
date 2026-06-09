@@ -1,4 +1,9 @@
+use std::fmt;
+use std::str::FromStr;
+
 pub const L1CA_CODE_LEN: usize = 1023;
+/// Galileo E1-B/E1-C primary "memory" code length (chips), 4 ms at 1.023 Mcps.
+pub const E1_CODE_LEN: usize = 4092;
 
 pub struct Code {}
 
@@ -50,27 +55,6 @@ impl Code {
         }
     }
 
-    pub fn get_code_period(sig: &str) -> f64 {
-        match sig {
-            "L1CA" => 1e-3,
-            _ => 0.0,
-        }
-    }
-
-    pub fn get_code_len(sig: &str) -> usize {
-        match sig {
-            "L1CA" => L1CA_CODE_LEN,
-            _ => 0,
-        }
-    }
-
-    pub fn get_code_freq(sig: &str) -> f64 {
-        match sig {
-            "L1CA" => 1575.42e6,
-            _ => 0.0,
-        }
-    }
-
     pub fn print_l1ca_codes() {
         println!("generating gold codes for L1CA");
         for i in 1..=32 {
@@ -80,9 +64,143 @@ impl Code {
     }
 }
 
+/// BOC(1,1) sub-carrier modulation: a square subcarrier at the chip rate splits
+/// each chip into two opposite-sign half-chips (+c, -c), doubling the length.
+/// This is the standard BOC(1,1) replica used for Galileo E1 (the OS signal is
+/// CBOC, but BOC(1,1) carries ~99% of the power and is what most receivers use).
+pub fn boc11(code: &[i8]) -> Vec<i8> {
+    let mut out = Vec::with_capacity(code.len() * 2);
+    for &c in code {
+        out.push(c);
+        out.push(-c);
+    }
+    out
+}
+
+/// Galileo E1-B (data) / E1-C (pilot) primary "memory" codes, length 4092.
+/// Unlike GPS Gold codes these are not LFSR-generated -- they are tabulated in
+/// the Galileo OS SIS ICD (Annex C, hex) and still need to be embedded. Returns
+/// `None` until then. `pilot` selects E1-C, else E1-B.
+fn e1_primary_code(_prn: u8, _pilot: bool) -> Option<Vec<i8>> {
+    // TODO(galileo): embed the E1-B/E1-C primary code tables from the OS SIS ICD
+    // (or generate from its reference, as gnss-sdr does in galileo_e1_signal_*).
+    None
+}
+
+/// Which GNSS signal a channel is configured for. Carries the per-signal
+/// parameters (carrier, code length/period, spreading code) that used to be
+/// looked up from a `"L1CA"` string -- this is the seam for adding Galileo E1
+/// and other signals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// GPS / QZSS / SBAS L1 C/A: 1023-chip Gold code, 1 ms, BPSK.
+    L1ca,
+    /// Galileo E1-B (data): 4092-chip memory code, 4 ms, BOC(1,1).
+    GalileoE1b,
+    /// Galileo E1-C (pilot): 4092-chip memory code, 4 ms, BOC(1,1).
+    GalileoE1c,
+}
+
+impl Signal {
+    /// Carrier frequency (Hz). All of these share the L1 band (1575.42 MHz).
+    pub fn carrier_hz(&self) -> f64 {
+        1_575_420_000.0
+    }
+
+    /// Primary-code period (s): one full spreading-code repetition.
+    pub fn code_period_s(&self) -> f64 {
+        match self {
+            Signal::L1ca => 1e-3,
+            Signal::GalileoE1b | Signal::GalileoE1c => 4e-3,
+        }
+    }
+
+    /// Length of the spreading replica `spreading_code` returns (the correlator
+    /// resamples this to the sample rate). For BOC(1,1) it is twice the primary
+    /// chip count (two sub-chips per chip).
+    pub fn code_len(&self) -> usize {
+        match self {
+            Signal::L1ca => L1CA_CODE_LEN,
+            Signal::GalileoE1b | Signal::GalileoE1c => 2 * E1_CODE_LEN,
+        }
+    }
+
+    /// True for BOC(1,1)-modulated signals (square subcarrier at the chip rate),
+    /// false for plain BPSK like L1 C/A.
+    pub fn is_boc11(&self) -> bool {
+        matches!(self, Signal::GalileoE1b | Signal::GalileoE1c)
+    }
+
+    /// The bipolar (±1) spreading replica for `prn`, already modulated by its
+    /// subcarrier (BOC(1,1) for E1). `None` when the code is not yet available
+    /// (the E1 memory codes still need to be embedded).
+    pub fn spreading_code(&self, prn: u8) -> Option<Vec<i8>> {
+        match self {
+            Signal::L1ca => Code::gen_code("L1CA", prn),
+            Signal::GalileoE1b => e1_primary_code(prn, false).map(|c| boc11(&c)),
+            Signal::GalileoE1c => e1_primary_code(prn, true).map(|c| boc11(&c)),
+        }
+    }
+}
+
+impl FromStr for Signal {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "L1CA" | "L1C/A" => Ok(Signal::L1ca),
+            "E1B" => Ok(Signal::GalileoE1b),
+            "E1C" => Ok(Signal::GalileoE1c),
+            _ => Err(format!("unknown signal '{s}' (have: L1CA, E1B, E1C)")),
+        }
+    }
+}
+
+impl fmt::Display for Signal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Signal::L1ca => "L1CA",
+                Signal::GalileoE1b => "E1B",
+                Signal::GalileoE1c => "E1C",
+            }
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boc11_doubles_and_alternates() {
+        // each chip c -> (c, -c): one full BOC(1,1) subcarrier period per chip.
+        assert_eq!(boc11(&[1, -1, 1]), vec![1, -1, -1, 1, 1, -1]);
+        let l1 = Signal::L1ca.spreading_code(1).unwrap();
+        assert_eq!(boc11(&l1).len(), 2 * l1.len());
+    }
+
+    #[test]
+    fn signal_params_and_parsing() {
+        assert_eq!(Signal::from_str("L1CA").unwrap(), Signal::L1ca);
+        assert_eq!(Signal::from_str("E1B").unwrap(), Signal::GalileoE1b);
+        assert!(Signal::from_str("XYZ").is_err());
+
+        let l1 = Signal::L1ca;
+        assert_eq!(l1.code_len(), L1CA_CODE_LEN);
+        assert_eq!(l1.code_period_s(), 1e-3);
+        assert!(!l1.is_boc11());
+        assert_eq!(l1.spreading_code(5).unwrap().len(), L1CA_CODE_LEN);
+
+        let e1 = Signal::GalileoE1b;
+        assert_eq!(e1.code_len(), 2 * E1_CODE_LEN); // BOC sub-chips
+        assert_eq!(e1.code_period_s(), 4e-3);
+        assert!(e1.is_boc11());
+        assert_eq!(e1.carrier_hz(), l1.carrier_hz()); // shared L1 band
+        // E1 spreading code is stubbed until the ICD memory codes are embedded.
+        assert!(e1.spreading_code(1).is_none());
+    }
 
     // Circular correlation of `a` against `b` shifted by `shift` chips.
     fn circ_corr(a: &[i8], b: &[i8], shift: usize) -> i32 {

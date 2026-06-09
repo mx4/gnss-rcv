@@ -11,6 +11,7 @@ use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 
 use crate::channel::State;
+use crate::code::Signal;
 use crate::receiver::{Receiver, ReceiverConfig};
 use crate::recording::IQFileType;
 use crate::state::GnssState;
@@ -49,7 +50,7 @@ fn async_receive(
     needs_stop: Arc<AtomicBool>,
     file: PathBuf,
     iq_file_type: IQFileType,
-    sig: &str,
+    sig: Signal,
     pub_state: Arc<Mutex<GnssState>>,
 ) {
     log::info!("start_receiving");
@@ -59,7 +60,7 @@ fn async_receive(
     let config = ReceiverConfig {
         file,
         iq_file_type,
-        sig: sig.to_string(),
+        sig,
         ..Default::default()
     };
     let receiver = Receiver::new(&config, needs_stop.clone(), pub_state);
@@ -97,7 +98,7 @@ impl GnssRcvApp {
 
         self.pub_state = Arc::new(Mutex::new(GnssState::new()));
         let pub_state = self.pub_state.clone();
-        let sig = "L1CA";
+        let sig = Signal::L1ca;
         let ctx_clone = ctx.clone();
         let iq_file_type = if self.iq_file_choice == 0 {
             IQFileType::TypePairFloat32

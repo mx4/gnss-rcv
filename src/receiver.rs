@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::channel::Channel;
+use crate::code::Signal;
 use crate::device::RtlSdrDevice;
 use crate::ephemeris::Ephemeris as RxEphemeris;
 use crate::network::RtlSdrTcp;
@@ -67,7 +68,7 @@ pub struct ReceiverConfig {
     pub fs: f64,
     pub fi: f64,
     pub off_msec: usize,
-    pub sig: String,
+    pub sig: Signal,
     pub sats: String,
     pub sbas: bool,
     pub qzss: bool,
@@ -87,7 +88,7 @@ impl Default for ReceiverConfig {
             fs: 2_046_000.0,
             fi: 0.0,
             off_msec: 0,
-            sig: "L1CA".to_string(),
+            sig: Signal::L1ca,
             sats: String::new(),
             sbas: false,
             qzss: false,
@@ -288,7 +289,7 @@ fn reject_cross_correlations(mut ephs: Vec<RxEphemeris>) -> Vec<RxEphemeris> {
 fn get_iq_feed(
     use_device: bool,
     hostname: &str,
-    sig: &str,
+    sig: Signal,
     fs: f64,
     file: &Path,
     iq_file_type: &IQFileType,
@@ -317,7 +318,7 @@ impl Receiver {
         let iq_feed = get_iq_feed(
             cfg.use_device,
             &cfg.hostname,
-            &cfg.sig,
+            cfg.sig,
             cfg.fs,
             &cfg.file,
             &cfg.iq_file_type,
@@ -340,7 +341,7 @@ impl Receiver {
         for sv in get_sat_list(&cfg.sats, cfg.sbas, cfg.qzss) {
             channels.insert(
                 sv,
-                Channel::new(&cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
+                Channel::new(cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
             );
         }
 

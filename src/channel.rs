@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 const PI: f64 = std::f64::consts::PI;
 
-use crate::code::Code;
+use crate::code::Signal;
 use crate::navigation::Navigation;
 use crate::plots::plot_channel;
 use crate::state::ChannelState;
@@ -258,16 +258,21 @@ impl Channel {
     }
 
     pub fn new(
-        sig: &str,
+        sig: Signal,
         sv: SV,
         fs: f64,
         fi: f64,
         plots: bool,
         pub_state: Arc<Mutex<GnssState>>,
     ) -> Self {
-        let code_buf = Code::gen_code(sig, sv.prn).unwrap();
-        let code_sec = Code::get_code_period(sig);
-        let code_len = Code::get_code_len(sig);
+        let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
+            panic!(
+                "no spreading code for {sig} PRN {} (Galileo E1 codes pending)",
+                sv.prn
+            )
+        });
+        let code_sec = sig.code_period_s();
+        let code_len = sig.code_len();
         let code_sp = (fs * code_sec) as usize;
         let mut fft_planner = FftPlanner::new();
 
@@ -308,7 +313,7 @@ impl Channel {
             plots,
             fft_planner,
             ts_sec: 0.0,
-            fc: Code::get_code_freq(sig),
+            fc: sig.carrier_hz(),
             fs,
             fi,
             code_sec,

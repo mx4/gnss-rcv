@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 use structopt::StructOpt;
 
-use gnss_rcv::code::Code;
+use gnss_rcv::code::Signal;
 use gnss_rcv::plots::plot_remove_old_graph;
 use gnss_rcv::receiver::{Receiver, ReceiverConfig};
 use gnss_rcv::recording::IQFileType;
@@ -28,8 +28,8 @@ struct Options {
     file: PathBuf,
     #[structopt(short = "s", long, help = "host for rtl-sdr-tcp", default_value = "")]
     hostname: String,
-    #[structopt(long, help = "signal: L1CA, etc.", default_value = "L1CA")]
-    sig: String,
+    #[structopt(long, help = "signal: L1CA, E1B, E1C", default_value = "L1CA")]
+    sig: Signal,
     #[structopt(short = "d", long, help = "use rtl-sdr device")]
     use_device: bool,
     #[structopt(short = "l", long, help = "path to log file", default_value = "")]
@@ -122,8 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     log::warn!(
         "gnss-rcv: using signal {} frequency: {:.1} MHz",
-        &opt.sig,
-        Code::get_code_freq(&opt.sig) / 1_000_000.0
+        opt.sig,
+        opt.sig.carrier_hz() / 1_000_000.0
     );
 
     if opt.use_ui {
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs: opt.fs,
         fi: opt.fi,
         off_msec: opt.off_msec,
-        sig: opt.sig.clone(),
+        sig: opt.sig,
         sats: opt.sats.clone(),
         sbas: opt.sbas,
         qzss: opt.qzss,

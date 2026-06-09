@@ -11,7 +11,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crate::code::Code;
+use crate::code::Signal;
 use crate::receiver::IQReader;
 
 pub struct RtlSdrTcp {
@@ -89,7 +89,7 @@ impl RtlSdrTcp {
     pub fn new(
         hostname: &str,
         exit_req: Arc<AtomicBool>,
-        sig: &str,
+        sig: Signal,
         fs: f64,
     ) -> std::io::Result<RtlSdrTcp> {
         let mut socket = TcpStream::connect(hostname)?;
@@ -112,7 +112,7 @@ impl RtlSdrTcp {
         // set automatic gain control
         rtl_sdr_send_cmd(&mut socket, 0x8, 1)?;
         // set center frequency
-        rtl_sdr_send_cmd(&mut socket, 0x1, Code::get_code_freq(sig) as u32)?;
+        rtl_sdr_send_cmd(&mut socket, 0x1, sig.carrier_hz() as u32)?;
         // set sample rate
         rtl_sdr_send_cmd(&mut socket, 0x2, fs as u32)?;
 
