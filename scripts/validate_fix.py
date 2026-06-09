@@ -5,10 +5,10 @@ Two checks, each skipping cleanly when its recording is absent:
 
   - GPS fix (gps-sdr-sim fixture): position within the ~2 km gate vs known truth,
     plus the per-SV RESID spread (the geometry-error diagnostic).
-  - Galileo E1-B I/NAV decode (a wideband L1 capture): Galileo SVs track and decode
-    CRC-valid I/NAV words. A *fix* isn't possible yet (ephemeris extraction + the
-    solver are still ahead), so this checks the decode chain; it will graduate to a
-    fix assertion once those land.
+  - Galileo E1-B I/NAV decode + fix (wideband L1 captures): Galileo SVs track and
+    decode CRC-valid I/NAV words; a recording long enough to complete >=4 ephemerides
+    also asserts a real Galileo-only position fix vs the site's known truth (shorter
+    recordings assert only the decode chain).
 
 Returns non-zero if any *present* recording's check fails, so it doubles as a CI /
 pre-commit assertion. Usage: ./scripts/validate_fix.py
@@ -99,43 +99,85 @@ def validate_gps_fix():
     return "PASS" if ok else "FAIL"
 
 
-# --- Galileo E1-B: acquire -> track -> CRC-valid I/NAV words -----------------
+# --- Galileo E1-B: acquire -> track -> decode I/NAV -> position fix -----------
 
-# Wideband L1 recordings known to carry decodable Galileo E1-B I/NAV; the first
-# one present is used. (file, format args)
+# Wideband L1 recordings carrying decodable Galileo E1-B I/NAV. Every present one
+# is checked: (file, fmt_args, num_msec, fix_expectation_or_None).
+#
+# fix_expectation = dict(lat, lon, gate_km, alt_band_m, min_eph), checked against
+# the JSON `fix` object when the recording is long enough to complete >=min_eph
+# ephemerides. The LimeSDR truth (52.177, 4.488, Netherlands) is the same antenna
+# site as that capture's GPS/RTL-SDR fixes; the Galileo-only fix lands ~4 km off,
+# within the open per-SV ~0.5 ms pseudorange bias, so the gate is looser than the
+# GPS 2 km. Recordings too short to complete an ephemeris (PocketSDR ~30 s) pass
+# on the decode chain alone.
 GAL_CANDIDATES = [
-    ("resources/L1_20211226_082212_12MHz_I.bin", ["-t", "i8", "--fs", "12M", "--fi", "3M"]),  # PocketSDR
-    ("resources/ION_LimeSDR_Bands-L1.2xi16", ["-t", "2xi16", "--fs", "10M", "--fi", "420K"]),  # ION LimeSDR
+    ("resources/L1_20211226_082212_12MHz_I.bin",
+     ["-t", "i8", "--fs", "12M", "--fi", "3M"], 20000, None),  # PocketSDR (~30 s: decode only)
+    ("resources/ION_LimeSDR_Bands-L1.2xi16",
+     ["-t", "2xi16", "--fs", "10M", "--fi", "420K"], 60000,
+     {"lat": 52.177, "lon": 4.488, "gate_km": 6.0, "alt_band_m": (-500.0, 2000.0), "min_eph": 4}),  # ION LimeSDR
 ]
 GAL_MIN_TRACKED = 2
 GAL_MIN_WORDS = 3  # CRC-valid I/NAV words across all SVs
 
 
-def validate_galileo_decode():
-    """-> 'PASS' / 'FAIL' / 'SKIP'."""
-    print("\n=== Galileo E1-B I/NAV decode ===")
-    fixture = next(((f, a) for f, a in GAL_CANDIDATES if os.path.isfile(f)), None)
-    if fixture is None:
-        print("SKIP: no Galileo recording present -- fetch one with ./resources/fetch.py pocketsdr")
-        return "SKIP"
-    path, fmt_args = fixture
-    print(f"using {path}")
-
-    summary, _ = run_json(["-f", path, *fmt_args, "--sig", "E1B", "--num-msec", "3000"])
+def _check_galileo_recording(path, fmt_args, num_msec, fix_exp):
+    """Run one Galileo recording; -> True on pass. Always checks the decode chain;
+    also asserts a position fix when `fix_exp` is given."""
+    print(f"\nusing {path} ({num_msec // 1000}s)")
+    summary, _ = run_json(["-f", path, *fmt_args, "--sig", "E1B", "--num-msec", str(num_msec)])
     if summary is None:
-        print("FAIL: could not parse --json output")
-        return "FAIL"
+        print("  FAIL: could not parse --json output")
+        return False
     print_funnel(summary)
 
     tracked = summary.get("funnel", {}).get("tracked", 0)
     # I/NAV words are counted in the per-SV "subframes" field.
     words = sum(s.get("subframes", 0) for s in summary.get("sats", []))
     decoders = [s["sv"] for s in summary.get("sats", []) if s.get("subframes", 0) > 0]
-    print(f"tracked {tracked} SVs; {words} CRC-valid I/NAV words from {', '.join(decoders) or 'none'}")
-
+    print(f"  tracked {tracked} SVs; {words} CRC-valid I/NAV words from {', '.join(decoders) or 'none'}")
     ok = tracked >= GAL_MIN_TRACKED and words >= GAL_MIN_WORDS
-    print(f"RESULT: {'PASS' if ok else 'FAIL'} (need >= {GAL_MIN_TRACKED} tracked & >= {GAL_MIN_WORDS} words)")
-    return "PASS" if ok else "FAIL"
+    if not ok:
+        print(f"  decode FAIL (need >= {GAL_MIN_TRACKED} tracked & >= {GAL_MIN_WORDS} words)")
+
+    if fix_exp is not None:
+        eph = summary.get("funnel", {}).get("ephemeris", 0)
+        fix = summary.get("fix")
+        if eph < fix_exp["min_eph"]:
+            print(f"  fix FAIL: {eph} ephemerides (need >= {fix_exp['min_eph']})")
+            ok = False
+        elif not fix:
+            print("  fix FAIL: NO FIX (check the funnel / RUST_LOG=info for detail)")
+            ok = False
+        else:
+            lat, lon, alt = fix["lat"], fix["lon"], fix["alt_m"]
+            km = math.hypot(
+                (lat - fix_exp["lat"]) * 111.0,
+                (lon - fix_exp["lon"]) * 111.0 * math.cos(math.radians(fix_exp["lat"])),
+            )
+            lo, hi = fix_exp["alt_band_m"]
+            print(f"  fix: {lat:.6f}, {lon:.6f}  alt {alt:.1f} m  ({fix['n_sv']} SVs)  "
+                  f"error ~{km:.1f} km (gate {fix_exp['gate_km']:.1f})")
+            if km > fix_exp["gate_km"]:
+                print(f"  fix FAIL: {km:.1f} km > gate {fix_exp['gate_km']:.1f} km")
+                ok = False
+            if not (lo <= alt <= hi):
+                print(f"  fix FAIL: altitude {alt:.1f} m outside [{lo:.0f}, {hi:.0f}] m")
+                ok = False
+
+    print(f"  RESULT: {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+def validate_galileo_decode():
+    """-> 'PASS' / 'FAIL' / 'SKIP'."""
+    print("\n=== Galileo E1-B I/NAV decode + fix ===")
+    present = [c for c in GAL_CANDIDATES if os.path.isfile(c[0])]
+    if not present:
+        print("SKIP: no Galileo recording present -- fetch one with ./resources/fetch.py pocketsdr")
+        return "SKIP"
+    return "PASS" if all(_check_galileo_recording(*c) for c in present) else "FAIL"
 
 
 def main() -> int:

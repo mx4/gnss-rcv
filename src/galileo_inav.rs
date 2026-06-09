@@ -149,7 +149,25 @@ pub struct InavWord {
 #[derive(Default)]
 pub struct InavDecoder {
     buf: Vec<u8>,
+    n_seen: usize,                 // total symbols ever pushed (for absolute parity)
     pending_even: Option<Vec<u8>>, // the 114-bit even page-part frame, awaiting its odd
+}
+
+/// Carrier-recovery ambiguity of a page part: a constant polarity flip (`pol`,
+/// the Costas 180° ambiguity) and an alternating (−1)ⁿ symbol flip (`alt`).
+///
+/// The (−1)ⁿ case is a Costas-loop **false lock at half the symbol rate**: a
+/// residual carrier error of ±125 Hz (= 250 sym/s ÷ 2) rotates the constellation
+/// by π every 4 ms symbol, which the prompt `atan(Q/I)` discriminator and the
+/// `atan(cross/dot)` FLL both fold to zero error — so tracking holds a strong,
+/// stable lock while every symbol is multiplied by (−1)ⁿ. It is deterministic
+/// per SV (acquisition is deterministic) and independent of C/N0, so even the
+/// strongest SV can land in it. Code/DLL tracking is unaffected; only the symbol
+/// stream is, so we resolve it here at frame sync rather than in the loops.
+#[derive(Clone, Copy)]
+struct Ambiguity {
+    pol: u8, // 0 = upright, 1 = carrier-inverted
+    alt: u8, // 1 = symbols carry a (−1)ⁿ half-rate flip to undo
 }
 
 impl InavDecoder {
@@ -160,19 +178,20 @@ impl InavDecoder {
     /// Feed one I/NAV symbol (0/1); returns a word once an even+odd page passes CRC.
     pub fn push_symbol(&mut self, sym: u8) -> Option<InavWord> {
         self.buf.push(sym & 1);
+        self.n_seen += 1;
         if self.buf.len() < PAGE_PART_SYMBOLS {
             return None;
         }
-        // The front must be a preamble (normal or carrier-inverted); else slide one.
-        let pol = match preamble_polarity(&self.buf[..PREAMBLE.len()]) {
-            Some(p) => p,
-            None => {
-                self.buf.remove(0);
-                return None;
-            }
+        // Absolute index (hence (−1)ⁿ parity) of the symbol now at the front.
+        let parity0 = ((self.n_seen - self.buf.len()) & 1) as u8;
+        // The front must be a preamble — upright or carrier-inverted, and with or
+        // without the half-rate (−1)ⁿ flip; else slide one symbol and retry.
+        let Some(amb) = match_preamble(&self.buf[..PREAMBLE.len()], parity0) else {
+            self.buf.remove(0);
+            return None;
         };
         let part: Vec<u8> = self.buf.drain(..PAGE_PART_SYMBOLS).collect();
-        self.assemble(decode_page_part(&part, pol))
+        self.assemble(decode_page_part(&part, amb, parity0))
     }
 
     fn assemble(&mut self, frame: Vec<u8>) -> Option<InavWord> {
@@ -197,20 +216,40 @@ impl InavDecoder {
     }
 }
 
-fn preamble_polarity(syms: &[u8]) -> Option<u8> {
-    if syms.iter().zip(PREAMBLE).all(|(&a, b)| a == b) {
-        Some(0)
-    } else if syms.iter().zip(PREAMBLE).all(|(&a, b)| a ^ 1 == b) {
-        Some(1)
-    } else {
-        None
+/// Match the 10-symbol front against the preamble under every carrier-recovery
+/// ambiguity: upright/inverted (`pol`) × with/without the half-rate (−1)ⁿ flip
+/// (`alt`). `parity0` is the absolute (−1)ⁿ parity of the first symbol, so the
+/// flip lines up with the same parity used when the whole part is decoded. The
+/// upright (alt = 0) hypotheses are tried first so a clean lock is undisturbed;
+/// CRC-24Q is the real gate, so the extra hypotheses only cost the rare wasted
+/// decode on a chance match.
+fn match_preamble(syms: &[u8], parity0: u8) -> Option<Ambiguity> {
+    for alt in [0u8, 1] {
+        for pol in [0u8, 1] {
+            if syms
+                .iter()
+                .zip(PREAMBLE)
+                .enumerate()
+                .all(|(j, (&a, b))| a ^ pol ^ (alt & ((parity0 + j as u8) & 1)) == b)
+            {
+                return Some(Ambiguity { pol, alt });
+            }
+        }
     }
+    None
 }
 
-/// Strip the preamble, undo the carrier polarity, de-interleave and Viterbi-decode
-/// one 250-symbol page part into its 114-bit frame (120 decoded bits less 6 tail).
-fn decode_page_part(part: &[u8], pol: u8) -> Vec<u8> {
-    let encoded: Vec<u8> = part[PREAMBLE.len()..].iter().map(|&s| s ^ pol).collect();
+/// Strip the preamble, undo the carrier ambiguity (constant polarity and any
+/// half-rate (−1)ⁿ flip), de-interleave and Viterbi-decode one 250-symbol page
+/// part into its 114-bit frame (120 decoded bits less 6 tail). `parity0` is the
+/// absolute (−1)ⁿ parity of `part[0]`; the FEC symbols start `PREAMBLE.len()`
+/// (an even count) later, so they share that parity.
+fn decode_page_part(part: &[u8], amb: Ambiguity, parity0: u8) -> Vec<u8> {
+    let encoded: Vec<u8> = part[PREAMBLE.len()..]
+        .iter()
+        .enumerate()
+        .map(|(j, &s)| s ^ amb.pol ^ (amb.alt & ((parity0 + j as u8) & 1)))
+        .collect();
     let mut bits = viterbi_decode(&deinterleave(&encoded), 120);
     bits.truncate(114);
     bits
@@ -341,7 +380,8 @@ mod tests {
 
     // Build an even+odd page pair carrying a known 128-bit word with a valid CRC,
     // render them to symbols (preamble + FEC + interleave), and check the streaming
-    // decoder recovers the word -- at both carrier polarities.
+    // decoder recovers the word -- under every carrier-recovery ambiguity: both
+    // polarities (Costas 180°) and with/without the half-rate (−1)ⁿ false-lock flip.
     #[test]
     fn inav_decoder_recovers_a_crc_valid_word() {
         let mut word = [0u8; 128];
@@ -378,16 +418,22 @@ mod tests {
         let odd = make_part(&page[114..]);
 
         for invert in [false, true] {
-            let mut dec = InavDecoder::new();
-            let mut got = None;
-            for &s in even.iter().chain(odd.iter()) {
-                if let Some(w) = dec.push_symbol(s ^ invert as u8) {
-                    got = Some(w);
+            for half_rate in [false, true] {
+                let mut dec = InavDecoder::new();
+                let mut got = None;
+                // half_rate multiplies the symbol stream by (−1)ⁿ over the absolute
+                // symbol index, the Costas half-symbol-rate false lock the decoder
+                // must transparently undo.
+                for (k, &s) in even.iter().chain(odd.iter()).enumerate() {
+                    let flip = half_rate as u8 & (k & 1) as u8;
+                    if let Some(w) = dec.push_symbol(s ^ invert as u8 ^ flip) {
+                        got = Some(w);
+                    }
                 }
+                let w = got.expect("a CRC-valid word");
+                assert_eq!(w.word_type, 4, "invert={invert} half_rate={half_rate}");
+                assert_eq!(w.bits, word, "invert={invert} half_rate={half_rate}");
             }
-            let w = got.expect("a CRC-valid word");
-            assert_eq!(w.word_type, 4, "invert={invert}");
-            assert_eq!(w.bits, word, "invert={invert}");
         }
     }
 

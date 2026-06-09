@@ -83,11 +83,11 @@ recording's check fails:
   error vs truth with a **PASS/FAIL** verdict (gate ~2 km). Read it as: `resid`
   per SV ≈ a common constant (the rx clock bias); the **spread** is the geometry
   error (sub-km good, 100s of km means transmit-time/pseudorange is wrong).
-- **Galileo E1-B I/NAV decode** (PocketSDR, else ION LimeSDR): asserts Galileo
-  SVs track and decode CRC-valid I/NAV words. (The ephemeris extraction now lands
-  too — E09/E11 complete a valid orbit on LimeSDR — but a Galileo *fix* still
-  needs the GST→GPST time + solver feed, so this guards the decode chain; it
-  graduates to a fix assertion once those land.)
+- **Galileo E1-B I/NAV decode + fix** (every present recording): asserts Galileo
+  SVs track and decode CRC-valid I/NAV words; on a recording long enough to
+  complete ≥4 ephemerides (ION LimeSDR, 60 s) it also asserts a real Galileo-only
+  position fix (~4 km from the 52.177, 4.488 site truth — within the open per-SV
+  ~0.5 ms bias). Short recordings (PocketSDR ~30 s) assert only the decode chain.
 
 ```sh
 ./scripts/validate_fix.py
@@ -293,24 +293,34 @@ Without these gnss-rcv cannot integrate with any external tool:
 
 #### Galileo E1 — implementation plan
 
-**Progress — E1-B acquires *and tracks*.** `code::Signal` replaced the `"L1CA"`
-string; the E1-B/E1-C primary memory codes are embedded
+**Progress — E1-B acquires, tracks, decodes, and *fixes*.** `code::Signal`
+replaced the `"L1CA"` string; the E1-B/E1-C primary memory codes are embedded
 ([`galileo_e1_codes.rs`](src/galileo_e1_codes.rs)) and BOC(1,1)-modulated
 (`code::boc11()`); the receiver steps the signal's 4 ms code period; and
 `get_sat_list` tags Galileo PRNs from the signal. On the ION LimeSDR capture
-`--sig E1B` locks **E01/E04/E11** and holds a **40 s lock at 43–48 dB-Hz**. The
-**I/NAV page decoder** ([`galileo_inav.rs`](src/galileo_inav.rs)) is in and
-**decodes real, CRC-valid words**: per-4 ms symbols → preamble sync (with
-polarity) → de-interleave → Viterbi → even/odd page assembly → CRC-24Q → 128-bit
-word. On LimeSDR it pulls word types 1–5/0/6/9/10 from E01/E04/E09/E11. The
-**ephemeris extraction** from word types 1–5 is now in too
-(`galileo_inav::decode_ephemeris_word`, Steps 4–5): on LimeSDR **E09 and E11
-complete a physically valid orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km).
-The **time + solver wiring** (Step 6) is in as well — GST week+TOW → absolute
-epochs, constellation-aware µ, and the shared transmit-time anchor — so a complete
-Galileo ephemeris feeds gnss-rtk. **Remaining for an E1 *fix*:** the capture yields
-only **2 Galileo SVs with a complete ephemeris in 61 s** (a fix needs 4); the gap
-is recording SV count / simultaneous GPS+Galileo tracking, not the decode/solve path.
+`--sig E1B` locks **E01/E04/E09/E11/E19** and holds a **60 s lock at 37–49 dB-Hz**.
+The **I/NAV page decoder** ([`galileo_inav.rs`](src/galileo_inav.rs)) is in and
+**decodes real, CRC-valid words**: per-4 ms symbols → preamble sync (with polarity
+*and the (−1)ⁿ half-rate ambiguity*) → de-interleave → Viterbi → even/odd page
+assembly → CRC-24Q → 128-bit word. The **ephemeris extraction** from word types
+1–5 (`galileo_inav::decode_ephemeris_word`, Steps 4–5) and the **time + solver
+wiring** (Step 6 — GST week+TOW → absolute epochs, constellation-aware µ, shared
+transmit-time anchor) are both in. **All 5 SVs now complete a physically valid
+orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km) and feed gnss-rtk to produce a
+**Galileo-only fix ~4 km from the 52.177, 4.488 site truth** (within the open
+per-SV ~0.5 ms bias).
+
+The earlier "only 2 SVs (E09/E11) complete an ephemeris" was **not** a data
+limitation — it was a decode bug. E01/E04/E19 held a strong continuous lock
+(E01 the *strongest* at 47.8 dB-Hz) yet decoded zero CRC-valid words because
+their carrier had settled into a **Costas-loop false lock at half the symbol
+rate** (±125 Hz = 250 sym/s ÷ 2): a π/symbol rotation that the `atan(Q/I)`
+prompt discriminator and the `atan(cross/dot)` FLL both fold to zero error, so
+tracking is happy while every symbol is multiplied by (−1)ⁿ — deterministic per
+SV, independent of C/N0. The fix resolves the ambiguity at frame sync
+(`InavDecoder::match_preamble` tries the de-alternated stream alongside the
+polarity hypotheses); code/DLL tracking and the code-phase pseudorange are
+unaffected by the carrier error, so the decoder layer is the right place for it.
 
 Key differences from GPS L1 C/A that drive every change:
 
@@ -337,7 +347,7 @@ Key differences from GPS L1 C/A that drive every change:
 - `code::boc11()` produces the `[+code, −code]` per-chip replica, returned by
   `spreading_code()`, so `Channel::new`'s resampling already consumes it — E1-B
   acquires *and* tracks as-is (the GPS-only DLL assertion `n == 10` was removed;
-  the loops are otherwise period-generic — E01/E04/E11 hold a 40 s lock).
+  the loops are otherwise period-generic — all 5 LimeSDR SVs hold a 60 s lock).
 - Left: `nav_decode()` routing — branch on `Constellation::Galileo` before the
   LNAV path, feeding the I/NAV symbol (sign of prompt-I, one per 4 ms code
   period) to a `nav_decode_inav()` built on [`galileo_inav.rs`](src/galileo_inav.rs).
@@ -370,11 +380,11 @@ the orbit/clock per word type, `ubits`/`sbits` reading the ICD bit layout
 
 Tested by `decodes_inav_words_into_a_valid_ephemeris` (hermetic — locks every
 offset, scale, the 60 s LSBs, and signedness) and confirmed on the LimeSDR
-capture (E09/E11 orbits complete, is_valid). The Viterbi decoder (rate-1/2 K=7)
+capture (all 5 SVs' orbits complete, is_valid). The Viterbi decoder (rate-1/2 K=7)
 was the hardest single piece. Reference: Galileo OS SIS ICD (ESA GSC), Tables 4
 and 24–29.
 
-**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD** ✅ DONE (no fix yet)
+**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD** ✅ DONE — fix lands
 - `EARTH_MU_GAL = 3.986004418e14` added; `solver::earth_mu(sv)` picks GTRF vs WGS-84
   µ in the Kepler solve and the relativistic clock term (~1 mm difference).
 - BGD: `group_delay` already returns `eph.tgd`, which the I/NAV decoder fills with
@@ -385,11 +395,13 @@ and 24–29.
   The transmit anchor is shared with GPS (`Channel::nav_anchor_tx`), pinned on a
   word-type-5 page so the TOW and code-period count are captured together.
 - Carrier::L1 already covers Galileo E1 (1575.42 MHz) in gnss-rtk — no change needed.
-- **Blocked on data, not code:** the 61 s LimeSDR capture completes only 2 Galileo
-  ephemerides (E09/E11); a fix needs ≥4 SVs. Validated indirectly: correct UTC
-  epoch + anchoring on real data, and solver unit tests (`earth_mu_is_constellation_specific`,
-  `galileo_ephemeris_computes_a_meo_position`). A fix needs a denser/longer Galileo
-  recording, or simultaneous GPS+Galileo tracking (see C, multi-signal-per-run).
+- **A real Galileo-only fix lands.** Once the half-rate false-lock decode bug was
+  fixed (see the progress note above), the 61 s LimeSDR capture completes **all 5
+  Galileo ephemerides** (E01/E04/E09/E11/E19) and `validate_fix.py` asserts a fix
+  ~4 km from the 52.177, 4.488 site truth (within the open per-SV ~0.5 ms bias).
+  Also covered by solver unit tests (`earth_mu_is_constellation_specific`,
+  `galileo_ephemeris_computes_a_meo_position`). Tightening the fix accuracy now
+  rides on the same per-SV ~0.5 ms pseudorange bias as GPS (see B).
 
 ### D. Developer experience
 
