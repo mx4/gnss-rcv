@@ -77,14 +77,30 @@ pub fn boc11(code: &[i8]) -> Vec<i8> {
     out
 }
 
-/// Galileo E1-B (data) / E1-C (pilot) primary "memory" codes, length 4092.
-/// Unlike GPS Gold codes these are not LFSR-generated -- they are tabulated in
-/// the Galileo OS SIS ICD (Annex C, hex) and still need to be embedded. Returns
-/// `None` until then. `pilot` selects E1-C, else E1-B.
-fn e1_primary_code(_prn: u8, _pilot: bool) -> Option<Vec<i8>> {
-    // TODO(galileo): embed the E1-B/E1-C primary code tables from the OS SIS ICD
-    // (or generate from its reference, as gnss-sdr does in galileo_e1_signal_*).
-    None
+/// Galileo E1-B (data) / E1-C (pilot) primary "memory" code for `prn` (1..=50),
+/// length 4092 chips, bipolar (±1). Unlike GPS Gold codes these are not
+/// LFSR-generated -- they are the published memory codes from the Galileo OS SIS
+/// ICD (Annex C), embedded as hex in [galileo_e1_codes](crate::galileo_e1_codes).
+/// `pilot` selects E1-C, else E1-B. The bit→chip sign is `0 → +1, 1 → -1`; a
+/// global sign is immaterial to acquisition (it is just a data-polarity flip).
+fn e1_primary_code(prn: u8, pilot: bool) -> Option<Vec<i8>> {
+    use crate::galileo_e1_codes::{E1B_HEX, E1C_HEX};
+    let idx = (prn as usize).checked_sub(1)?;
+    let hex = if pilot {
+        E1C_HEX.get(idx)?
+    } else {
+        E1B_HEX.get(idx)?
+    };
+    let mut code = Vec::with_capacity(E1_CODE_LEN);
+    for ch in hex.bytes() {
+        let nib = (ch as char).to_digit(16)? as u8;
+        for b in (0..4).rev() {
+            // MSB first: 0 -> +1, 1 -> -1.
+            code.push(1 - 2 * ((nib >> b) & 1) as i8);
+        }
+    }
+    debug_assert_eq!(code.len(), E1_CODE_LEN);
+    Some(code)
 }
 
 /// Which GNSS signal a channel is configured for. Carries the per-signal
@@ -198,8 +214,40 @@ mod tests {
         assert_eq!(e1.code_period_s(), 4e-3);
         assert!(e1.is_boc11());
         assert_eq!(e1.carrier_hz(), l1.carrier_hz()); // shared L1 band
-        // E1 spreading code is stubbed until the ICD memory codes are embedded.
-        assert!(e1.spreading_code(1).is_none());
+        // E1 spreading code = BOC(1,1)-modulated 4092-chip primary -> 8184 sub-chips.
+        assert_eq!(e1.spreading_code(1).unwrap().len(), 2 * E1_CODE_LEN);
+    }
+
+    #[test]
+    fn e1_primary_codes_are_valid() {
+        // Embedded ICD memory codes: bipolar, length 4092, balanced, with a
+        // strong zero-shift autocorrelation peak and much smaller off-peak.
+        for prn in [1u8, 11, 36] {
+            let code = e1_primary_code(prn, false).unwrap();
+            assert_eq!(code.len(), E1_CODE_LEN);
+            assert!(code.iter().all(|&c| c == 1 || c == -1), "bipolar");
+            let sum: i32 = code.iter().map(|&c| c as i32).sum();
+            assert!(sum.abs() < 200, "roughly balanced, sum={sum}");
+        }
+        // Full circular autocorrelation for one PRN: peak == 4092, off-peak << peak.
+        let code = e1_primary_code(1, false).unwrap();
+        let n = code.len();
+        let mut max_off = 0i32;
+        for s in 1..n {
+            let v: i32 = (0..n)
+                .map(|i| code[i] as i32 * code[(i + s) % n] as i32)
+                .sum();
+            max_off = max_off.max(v.abs());
+        }
+        assert_eq!(n as i32, E1_CODE_LEN as i32);
+        assert!(
+            max_off < n as i32 / 4,
+            "off-peak {max_off} should be << {n}"
+        );
+
+        // E1-C (pilot) is embedded too; PRNs are 1..=50.
+        assert_eq!(e1_primary_code(1, true).unwrap().len(), E1_CODE_LEN);
+        assert!(e1_primary_code(51, false).is_none());
     }
 
     // Circular correlation of `a` against `b` shifted by `shift` chips.

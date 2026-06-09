@@ -20,8 +20,6 @@ use crate::recording::IQRecording;
 use crate::solver::PositionSolver;
 use crate::state::GnssState;
 
-const PERIOD_RCV: f64 = 0.001;
-
 pub trait IQReader {
     fn get_iq_data(
         &mut self,
@@ -101,7 +99,9 @@ impl Default for ReceiverConfig {
 
 pub struct Receiver {
     iq_feed: Box<dyn IQReader>,
-    period_sp: usize, // samples per period
+    period_sp: usize, // samples per code period (signal-dependent)
+    fs: f64,
+    code_period_s: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
     off_samples: usize,
     cached_iq_vec: Vec<Complex64>,
     cached_ts_sec_tail: f64,
@@ -219,7 +219,21 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// legacy SBAS L1 block (PRN 120-138) and `qzss` the QZSS block (PRN 193-202) on
 /// top of whatever was selected. (SBAS never completes a GPS ephemeris so the
 /// solver ignores it; QZSS does and `gnss-rtk` solves it.)
-fn get_sat_list(sats: &str, sbas: bool, qzss: bool) -> Vec<SV> {
+fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
+    // Galileo signals (E1B/E1C): the constellation follows the *signal*, not the
+    // PRN number (E1 PRNs 1..=36 overlap GPS), so tag every selected PRN Galileo.
+    if matches!(sig, Signal::GalileoE1b | Signal::GalileoE1c) {
+        let prns: Vec<u8> = if sats.is_empty() {
+            (1..=36).collect()
+        } else {
+            sats.split(',').map(|s| s.parse().unwrap()).collect()
+        };
+        return prns
+            .into_iter()
+            .map(|prn| SV::new(Constellation::Galileo, prn))
+            .collect();
+    }
+
     let sv_for_prn = |prn: u8| {
         let cons = if (193..=202).contains(&prn) {
             Constellation::QZSS
@@ -336,9 +350,12 @@ impl Receiver {
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Self {
-        let period_sp = (PERIOD_RCV * cfg.fs) as usize;
+        // The receiver steps one spreading-code period at a time; that period is
+        // the signal's, not a hardcoded 1 ms (E1 is 4 ms).
+        let code_period_s = cfg.sig.code_period_s();
+        let period_sp = (code_period_s * cfg.fs) as usize;
         let mut channels = HashMap::<SV, Channel>::new();
-        for sv in get_sat_list(&cfg.sats, cfg.sbas, cfg.qzss) {
+        for sv in get_sat_list(&cfg.sats, cfg.sig, cfg.sbas, cfg.qzss) {
             channels.insert(
                 sv,
                 Channel::new(cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
@@ -348,6 +365,8 @@ impl Receiver {
         Self {
             iq_feed,
             period_sp,
+            fs: cfg.fs,
+            code_period_s,
             off_samples: cfg.off_msec * period_sp,
             cached_iq_vec: Vec::<Complex64>::new(),
             cached_ts_sec_tail: 0.0,
@@ -372,7 +391,7 @@ impl Receiver {
 
         self.off_samples += num_samples;
         self.cached_iq_vec.append(&mut iq_vec);
-        self.cached_ts_sec_tail += num_samples as f64 / (1000.0 * self.period_sp as f64);
+        self.cached_ts_sec_tail += num_samples as f64 / self.fs;
 
         if self.cached_iq_vec.len() > 2 * self.period_sp {
             let num_samples = self.period_sp;
@@ -387,7 +406,7 @@ impl Receiver {
 
         Ok((
             self.cached_iq_vec[len - 2 * self.period_sp..].to_vec(),
-            self.cached_ts_sec_tail - 0.001,
+            self.cached_ts_sec_tail - self.code_period_s,
         ))
     }
 
@@ -485,7 +504,7 @@ impl Receiver {
     /// two never drift.
     fn build_summary(&self) -> RunSummary {
         let s = &self.stats;
-        let data_sec = s.msec_processed as f64 / 1000.0;
+        let data_sec = s.msec_processed as f64 * self.code_period_s;
         let wall = s.start.elapsed().as_secs_f64();
         let rtf = if wall > 0.0 { data_sec / wall } else { 0.0 };
 
@@ -782,7 +801,7 @@ mod tests {
     #[test]
     fn sat_list_tags_constellations_and_appends_blocks() {
         // Explicit list: PRN by number -> GPS / SBAS / QZSS.
-        let l = get_sat_list("1,32,120,138,193,202", false, false);
+        let l = get_sat_list("1,32,120,138,193,202", Signal::L1ca, false, false);
         let cons: Vec<_> = l.iter().map(|s| s.constellation).collect();
         assert_eq!(
             cons,
@@ -797,7 +816,7 @@ mod tests {
         );
 
         // --sbas appends the 120-138 block (19 PRNs) on the GPS default.
-        let l = get_sat_list("", true, false);
+        let l = get_sat_list("", Signal::L1ca, true, false);
         assert_eq!(l.len(), 32 + 19);
         assert_eq!(
             l.iter()
@@ -807,7 +826,7 @@ mod tests {
         );
 
         // --qzss appends the 193-202 block (10 PRNs).
-        let l = get_sat_list("", false, true);
+        let l = get_sat_list("", Signal::L1ca, false, true);
         assert_eq!(l.len(), 32 + 10);
         assert_eq!(
             l.iter()
@@ -815,6 +834,14 @@ mod tests {
                 .count(),
             10
         );
+
+        // A Galileo signal tags every PRN Galileo (default block 1..=36).
+        let l = get_sat_list("", Signal::GalileoE1b, false, false);
+        assert_eq!(l.len(), 36);
+        assert!(l.iter().all(|s| s.constellation == Constellation::Galileo));
+        let l = get_sat_list("4,11", Signal::GalileoE1c, false, false);
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0], SV::new(Constellation::Galileo, 4));
     }
 
     #[test]
