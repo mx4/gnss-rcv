@@ -11,7 +11,7 @@
 
 use crate::channel::Channel;
 use crate::ephemeris::Ephemeris;
-use crate::galileo_inav::InavDecoder;
+use crate::galileo_inav::{InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
@@ -56,16 +56,31 @@ impl Channel {
     }
 
     /// Galileo E1-B I/NAV: feed one symbol per 4 ms code period (the sign of
-    /// prompt-I) to the page decoder; on a CRC-valid word, log its type. (The
-    /// ephemeris field extraction from word types 1-5 is the next step.)
+    /// prompt-I) to the page decoder; each CRC-valid word fills the ephemeris
+    /// (orbit/clock from word types 1-4, BGD + GST week from type 5). Once every
+    /// orbit/clock field is in, `eph.is_valid()` holds — logged once.
     fn nav_decode_inav(&mut self) {
         let Some(&c_p) = self.hist.corr_p.back() else {
             return;
         };
         let sym = (c_p.re >= 0.0) as u8;
-        if let Some(word) = self.nav.inav.push_symbol(sym) {
-            self.stats.subframes += 1;
-            log::warn!("{}: I/NAV word type {} (CRC ok)", self.sv, word.word_type);
+        let Some(word) = self.nav.inav.push_symbol(sym) else {
+            return;
+        };
+        self.stats.subframes += 1;
+        let was_valid = self.nav.eph.is_valid();
+        decode_ephemeris_word(&mut self.nav.eph, &word);
+        if self.nav.eph.ts_sec == 0.0 {
+            self.nav.eph.ts_sec = self.ts_sec; // timestamp the first word in
+        }
+        log::warn!("{}: I/NAV word type {} (CRC ok)", self.sv, word.word_type);
+        if !was_valid && self.nav.eph.is_valid() {
+            log::warn!(
+                "{}: Galileo ephemeris complete (GST week {}, toe {} s)",
+                self.sv,
+                self.nav.eph.week,
+                self.nav.eph.toe
+            );
         }
     }
 }

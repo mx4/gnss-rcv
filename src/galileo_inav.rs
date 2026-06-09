@@ -6,7 +6,12 @@
 //! G2 inverted), carrying 120 bits (114 data + 6 tail). A **CRC-24Q** protects the
 //! assembled page. This module is those primitives -- the de-interleaver, the
 //! Viterbi decoder, and the CRC -- with the page/word assembly and the ephemeris
-//! field extraction still to come on top.
+//! field extraction layered on top ([`InavDecoder`] / [`decode_ephemeris_word`]).
+
+use crate::constants::{
+    P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_43, P2_46, P2_59, SC2RAD,
+};
+use crate::ephemeris::Ephemeris;
 
 /// Galileo I/NAV convolutional code, K=7, rate 1/2.
 const G1: u32 = 0o171; // 1111001
@@ -216,6 +221,73 @@ fn bits_to_u32(bits: &[u8]) -> u32 {
         .fold(0u32, |acc, &b| (acc << 1) | (b & 1) as u32)
 }
 
+/// Read `len` unsigned bits (MSB first) from the one-bit-per-byte `bits`, at
+/// 0-indexed `pos`.
+fn ubits(bits: &[u8], pos: usize, len: usize) -> u32 {
+    bits[pos..pos + len]
+        .iter()
+        .fold(0u32, |a, &b| (a << 1) | (b & 1) as u32)
+}
+
+/// Like [`ubits`] but two's-complement sign-extended to `i32`.
+fn sbits(bits: &[u8], pos: usize, len: usize) -> i32 {
+    let shift = 32 - len;
+    ((ubits(bits, pos, len) << shift) as i32) >> shift
+}
+
+/// Fill `eph` from one CRC-valid I/NAV word: types 1-4 carry the orbit+clock,
+/// type 5 the BGD and the GST week. Galileo broadcasts the same Keplerian set as
+/// GPS LNAV but with its own bit layout and scale factors (finer af0/af1/af2,
+/// t0e/t0c in 60 s units, week taken from the GST). Word types 0 / 6-10 / 16
+/// carry spare / UTC / almanac / reduced-CED data and are skipped here. Once
+/// types 1-5 have all landed, `eph.is_valid()` holds and the solver can use it.
+///
+/// Field offsets and scales follow the Galileo OS SIS ICD (cross-checked against
+/// gnss-sdr's `Galileo_INAV.h`); positions there are 1-indexed in the 128-bit word.
+pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
+    let b = &word.bits[..];
+    let u = |start: usize, len: usize| ubits(b, start - 1, len);
+    let s = |start: usize, len: usize| sbits(b, start - 1, len) as f64;
+    match word.word_type {
+        1 => {
+            eph.iode = u(7, 10); // IODnav
+            eph.toe = u(17, 14) * 60; // t0e, 60 s LSB
+            eph.m0 = s(31, 32) * P2_31 * SC2RAD;
+            eph.ecc = u(63, 32) as f64 * P2_33;
+            let sqrt_a = u(95, 32) as f64 * P2_19;
+            eph.a = sqrt_a * sqrt_a;
+        }
+        2 => {
+            eph.omg0 = s(17, 32) * P2_31 * SC2RAD;
+            eph.i0 = s(49, 32) * P2_31 * SC2RAD;
+            eph.omg = s(81, 32) * P2_31 * SC2RAD;
+            eph.i_dot = s(113, 14) * P2_43 * SC2RAD;
+        }
+        3 => {
+            eph.omg_dot = s(17, 24) * P2_43 * SC2RAD;
+            eph.deln = s(41, 16) * P2_43 * SC2RAD;
+            eph.cuc = s(57, 16) * P2_29;
+            eph.cus = s(73, 16) * P2_29;
+            eph.crc = s(89, 16) * P2_5;
+            eph.crs = s(105, 16) * P2_5;
+        }
+        4 => {
+            eph.cic = s(23, 16) * P2_29;
+            eph.cis = s(39, 16) * P2_29;
+            eph.toc = u(55, 14) * 60; // t0c, 60 s LSB
+            eph.f0 = s(69, 31) * P2_34;
+            eph.f1 = s(100, 21) * P2_46;
+            eph.f2 = s(121, 6) * P2_59;
+        }
+        5 => {
+            eph.tgd = s(48, 10) * P2_32; // BGD(E1,E5a): the E1 group delay
+            eph.week = u(74, 12); // GST week number
+            eph.tow = u(86, 20); // GST time of week [s]
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +389,121 @@ mod tests {
             assert_eq!(w.word_type, 4, "invert={invert}");
             assert_eq!(w.bits, word, "invert={invert}");
         }
+    }
+
+    // Pack `val` into one-bit-per-byte `bits` (MSB first) at 0-indexed `pos`.
+    fn set_ubits(bits: &mut [u8], pos: usize, len: usize, val: u32) {
+        for (i, b) in bits[pos..pos + len].iter_mut().enumerate() {
+            *b = ((val >> (len - 1 - i)) & 1) as u8;
+        }
+    }
+
+    // Build an I/NAV word of `word_type` with fields at their 1-indexed {start,len}.
+    fn make_word(word_type: u8, fields: &[(usize, usize, u32)]) -> InavWord {
+        let mut bits = [0u8; 128];
+        set_ubits(&mut bits, 0, 6, word_type as u32);
+        for &(start, len, val) in fields {
+            set_ubits(&mut bits, start - 1, len, val);
+        }
+        InavWord { word_type, bits }
+    }
+
+    // Feed canned word types 1-5 (raw fields -> realistic Galileo MEO ephemeris)
+    // through the extractor and lock the bit offsets, scales, signedness, and the
+    // is_valid() gate.
+    #[test]
+    fn decodes_inav_words_into_a_valid_ephemeris() {
+        let mut eph = Ephemeris::default();
+
+        let e_raw = 2_000_000u32; // ecc = e_raw * 2^-33 ~ 2.3e-4
+        let sqrta_raw = 2_852_500_000u32; // a ~ 29.6e6 m (Galileo MEO)
+        let i0_raw = 668_504_000u32; // i0 ~ 0.978 rad (~56 deg)
+        let omgdot_raw = (-2000_i32 as u32) & 0x00FF_FFFF; // negative, 24-bit
+
+        // Word 1: IODnav, t0e (60 s LSB), M0, e, sqrtA.
+        decode_ephemeris_word(
+            &mut eph,
+            &make_word(
+                1,
+                &[
+                    (7, 10, 100),
+                    (17, 14, 600), // -> toe 36000 s
+                    (31, 32, 0x1000_0000),
+                    (63, 32, e_raw),
+                    (95, 32, sqrta_raw),
+                ],
+            ),
+        );
+        // Word 2: Omega0, i0, omega, iDOT.
+        decode_ephemeris_word(
+            &mut eph,
+            &make_word(
+                2,
+                &[
+                    (17, 32, 0x2000_0000),
+                    (49, 32, i0_raw),
+                    (81, 32, 0x0800_0000),
+                    (113, 14, 8),
+                ],
+            ),
+        );
+        // Word 3: OmegaDot (signed, negative), deltaN, Cuc/Cus/Crc/Crs.
+        decode_ephemeris_word(
+            &mut eph,
+            &make_word(
+                3,
+                &[
+                    (17, 24, omgdot_raw),
+                    (41, 16, 300),
+                    (57, 16, 100),
+                    (73, 16, 100),
+                    (89, 16, 200),
+                    (105, 16, 200),
+                ],
+            ),
+        );
+        // Word 4: Cic, Cis, t0c (60 s LSB), af0, af1, af2.
+        decode_ephemeris_word(
+            &mut eph,
+            &make_word(
+                4,
+                &[
+                    (23, 16, 50),
+                    (39, 16, 50),
+                    (55, 14, 600), // -> toc 36000 s
+                    (69, 31, 1000),
+                    (100, 21, 10),
+                    (121, 6, 1),
+                ],
+            ),
+        );
+        // Word 5: BGD(E1,E5a), GST week, GST TOW.
+        decode_ephemeris_word(
+            &mut eph,
+            &make_word(5, &[(48, 10, 20), (74, 12, 1300), (86, 20, 36_000)]),
+        );
+
+        // The channel timestamps the first word in; emulate so is_valid() passes.
+        eph.ts_sec = 1.0;
+        assert!(
+            eph.is_valid(),
+            "word types 1-5 must yield a valid ephemeris"
+        );
+
+        // Offsets + 60 s LSB:
+        assert_eq!(eph.iode, 100);
+        assert_eq!(eph.toe, 36_000);
+        assert_eq!(eph.toc, 36_000);
+        assert_eq!(eph.week, 1300); // GST week, from word 5 only
+        assert_eq!(eph.tow, 36_000);
+        // Scales:
+        let sqrt_a = sqrta_raw as f64 * P2_19;
+        assert!((eph.a - sqrt_a * sqrt_a).abs() < 1.0);
+        assert!((29.0e6..30.0e6).contains(&eph.a), "a={}", eph.a);
+        assert!((eph.ecc - e_raw as f64 * P2_33).abs() < 1e-18);
+        assert!((eph.i0 - i0_raw as f64 * P2_31 * SC2RAD).abs() < 1e-12);
+        assert!((eph.f0 - 1000.0 * P2_34).abs() < 1e-18);
+        // Signedness: OmegaDot decoded as negative.
+        assert!(eph.omg_dot < 0.0, "omg_dot={}", eph.omg_dot);
     }
 }

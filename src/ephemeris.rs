@@ -60,21 +60,22 @@ impl Ephemeris {
             ..Default::default()
         }
     }
-    /// True once subframes 1-3 have decoded into a physically plausible
-    /// ephemeris. The position solver should only consume valid ones; this
-    /// checks at least one field set by each subframe (so a half-decoded
-    /// ephemeris can't slip through) plus an eccentricity sanity bound to reject
-    /// a corrupt subframe-2. Constellation-agnostic on orbit size/inclination so
-    /// it stays correct if QZSS/GEO ephemerides are added later.
+    /// True once the broadcast ephemeris has decoded into a physically plausible
+    /// orbit+clock the solver can consume. Checks at least one field from each
+    /// message part carrying the orbit/clock — GPS LNAV subframes 1-3, Galileo
+    /// I/NAV word types 1-5 — so a half-decoded ephemeris can't slip through,
+    /// plus an eccentricity sanity bound to reject a corrupt frame. The orbit
+    /// thresholds are constellation-agnostic (GPS a≈26 560 km, Galileo a≈29 600
+    /// km both pass) so this stays correct as more signals are added.
     pub fn is_valid(&self) -> bool {
-        self.ts_sec != 0.0           // first subframe was timestamped
-            && self.week != 0        // subframe 1
-            && self.toc != 0         // subframe 1
-            && self.toe != 0         // subframe 2
-            && self.a >= 20_000_000.0 // subframe 2 (sqrt_a decoded)
-            && self.ecc < 0.5        // subframe 2 sanity (real orbits: ecc << 1)
-            && self.i0 != 0.0        // subframe 3
-            && self.omg_dot != 0.0 // subframe 3
+        self.ts_sec != 0.0           // timestamped on first decode
+            && self.week != 0        // GPS/GST week number
+            && self.toc != 0         // clock reference time
+            && self.toe != 0         // ephemeris reference time
+            && self.a >= 20_000_000.0 // semi-major axis decoded (from sqrt_a)
+            && self.ecc < 0.5        // sanity: real orbits have ecc << 1
+            && self.i0 != 0.0        // inclination at reference time
+            && self.omg_dot != 0.0 // rate of right ascension
     }
 }
 
