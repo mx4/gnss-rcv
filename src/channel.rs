@@ -650,8 +650,8 @@ impl Channel {
     }
 
     fn run_dll(&mut self, c_e: Complex64, c_l: Complex64) {
+        // DLL update cadence in code periods (10 for L1CA's 1 ms, 2 for E1's 4 ms).
         let n = usize::max(1, (T_DLL / self.code_sec) as usize);
-        assert_eq!(n, 10);
         self.trk.sum_corr_e += c_e.norm();
         self.trk.sum_corr_l += c_l.norm();
         if self.num_trk_samples.is_multiple_of(n) {
