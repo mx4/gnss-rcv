@@ -9,7 +9,7 @@ CI (Linux + macOS) gates every push/PR on three checks; keep all green locally
 before pushing. The whole workflow is wrapped in a [`justfile`](justfile) — run
 `just` to list recipes. The full local gate is **`just check`** (fmt-check +
 clippy `-D warnings` + test); add the heavy `#[ignore]`'d end-to-end tests with
-`just test-all`. Other recipes: `just validate` (the GPS-fix + Galileo-decode
+`just test-all`. Other recipes: `just validate` (the GPS-fix + Galileo + SBAS
 checks), `just run <file> "<flags>"`, `just galileo`, `just fetch`, `just bench`.
 
 The raw commands behind `just check` (stop at the first failure, fix, re-run):
@@ -74,7 +74,7 @@ check pseudorange / transmit-time / solver changes:
   drop out.
 
 [`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one command.
-It builds release and runs two `--json`-driven checks, each **skipping cleanly**
+It builds release and runs three `--json`-driven checks, each **skipping cleanly**
 (exit 0) when its recording is absent, failing (non-zero) only if a *present*
 recording's check fails:
 
@@ -88,6 +88,9 @@ recording's check fails:
   complete ≥4 ephemerides (ION LimeSDR, 60 s) it also asserts a real Galileo-only
   position fix (~4 km from the 52.177, 4.488 site truth — within the open per-SV
   ~0.5 ms bias). Short recordings (PocketSDR ~30 s) assert only the decode chain.
+- **SBAS L1 decode** (a capture with an SBAS GEO overhead — CTTC Spain → EGNOS):
+  asserts a floor of CRC-valid SBAS messages from ≥1 GEO. On CTTC, S120 + S126
+  decode ~32 messages (types 0/1/2/3/4/24/25/26/27).
 
 ```sh
 ./scripts/validate_fix.py
@@ -183,8 +186,12 @@ guesses. Tackle roughly top-to-bottom.
   `with_feed` for injected sources); callers build a struct with
   `..Default::default()` instead of a dozen positional args.
 - ~~SBAS PRNs in `get_sat_list`~~: constellation-aware tagging (PRN ≥ 120 → SBAS)
-  + a `--sbas` sweep, replacing the dead `use_sbas` flag. (Detection only — no
-  SBAS *decode* or ranging; not seen above the noise floor in any recording.)
+  + a `--sbas` sweep, replacing the dead `use_sbas` flag.
+- ~~**SBAS L1 message decode**~~: [`sbas_l1.rs`](src/sbas_l1.rs) — 2 ms symbols
+  (2 C/A periods) → continuous K=7 Viterbi → 250-bit messages framed on the
+  0x53/9A/C6 preamble → CRC-24Q. Shares the FEC code + CRC with Galileo via
+  [`fec.rs`](src/fec.rs). On CTTC (Spain) EGNOS S120/S126 decode MT 0/1/2/3/4/24/25/26/27.
+  (Decode only — *applying* the corrections to the fix is still open, see roadmap.)
 - ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
   ([gps_lnav.rs](src/gps_lnav.rs)) feeds real captured LNAV subframes 1-3 through
   the `decode_lnav_subframe{1,2,3}` parsers and range-checks the result (a≈26 560
@@ -424,7 +431,7 @@ and 24–29.
 | **Interactive time-series in UI** | Live scrolling CN0/Doppler/code-phase in the egui window; more useful than `--plots` PNGs. |
 | **NTRIP client** | Fetch DGNSS/RTK corrections from a public caster (IGS, EUREF) for differential positioning. |
 | **SoapySDR abstraction** | Cover USRP, HackRF, LimeSDR, BladeRF live; currently only RTL-SDR. |
-| **SBAS correction decoding** | The `--sbas` flag acquires SBAS SVs but MT1–MT6 messages are not decoded; applying them would bring single-frequency accuracy to ~1 m. |
+| **Apply SBAS corrections** | `--sbas` now *decodes* the L1 messages ([`sbas_l1.rs`](src/sbas_l1.rs)); parsing MT2–5/24/25 (fast + long-term) and MT18/26 (iono grid) and applying them in the solver would bring single-frequency accuracy to ~1 m. The SBAS GEO can also serve as an extra ranging source (MT9 ephemeris). |
 
 ### E. Library & API surface
 

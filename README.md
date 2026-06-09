@@ -261,8 +261,11 @@ Any code contribution is welcome!
 ## TODO
 Short list; the detailed, evidence-ranked backlog + feature roadmap live in
 [AGENTS.md](AGENTS.md).
-- [x] SBAS detection and QZSS L1 C/A (acquires, tracks, decodes and solves
-      through the existing GPS path)
+- [x] QZSS L1 C/A (acquires, tracks, decodes and solves through the GPS path)
+- [x] SBAS L1 — **decodes EGNOS/WAAS messages** (`--sbas`; shared C/A tracking →
+      streaming Viterbi + CRC-24Q in [`sbas_l1.rs`](src/sbas_l1.rs)). On the CTTC
+      Spain capture, EGNOS S120/S126 decode message types 0/1/2/3/4/24/25/26/27.
+      (Applying the corrections to improve the fix is future work.)
 - [x] Saastamoinen troposphere correction in the solver
 - [x] Hermetic synthetic-signal tests ([`src/synth.rs`](src/synth.rs) — multi-SV
       L1CA with Doppler / C/N0 noise, no recording needed)
