@@ -275,6 +275,8 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
       feed gnss-rtk). On the LimeSDR capture all 5 tracked SVs (E01/E04/E09/E11/E19)
       complete an ephemeris and produce a fix **~110 m from the site truth
       (52.177, 4.488, Netherlands)** (after the E1 BOC DLL-lag compensation).
+- [ ] **combined GPS + Galileo fix** — track both signals in one run and solve
+      them together (more SVs, better geometry, a cross-check on each constellation)
 - [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view
