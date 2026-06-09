@@ -5,6 +5,7 @@ pub mod code;
 pub mod constants;
 pub mod device;
 pub mod ephemeris;
+pub mod fec;
 mod galileo_e1_codes;
 pub mod galileo_inav;
 pub mod gps_lnav;

@@ -1,42 +1,21 @@
-//! Galileo E1-B I/NAV forward-error-correction layer.
+//! Galileo E1-B I/NAV decoder.
 //!
 //! Each I/NAV page part is 250 symbols at 250 sym/s: a 10-symbol sync pattern
 //! then 240 data symbols. The 240 symbols are **block-interleaved** (30 columns ×
 //! 8 rows) and **rate-1/2 convolutionally encoded** (K=7, G1=171₈, G2=133₈ with
 //! G2 inverted), carrying 120 bits (114 data + 6 tail). A **CRC-24Q** protects the
-//! assembled page. This module is those primitives -- the de-interleaver, the
-//! Viterbi decoder, and the CRC -- with the page/word assembly and the ephemeris
-//! field extraction layered on top ([`InavDecoder`] / [`decode_ephemeris_word`]).
+//! assembled page. The shared convolutional code and CRC live in [`crate::fec`];
+//! this module adds the Galileo-specific de-interleaver, Viterbi decoder, page
+//! assembly and ephemeris extraction ([`InavDecoder`] / [`decode_ephemeris_word`]).
 
 use crate::constants::{
     P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_43, P2_46, P2_59, SC2RAD,
 };
 use crate::ephemeris::Ephemeris;
+use crate::fec::{G1, G2, crc24q, parity};
 
-/// Galileo I/NAV convolutional code, K=7, rate 1/2.
-const G1: u32 = 0o171; // 1111001
-const G2: u32 = 0o133; // 1011011
-/// Galileo inverts the G2 output symbol.
+/// Galileo inverts the G2 output symbol of the shared K=7 convolutional code.
 const G2_INVERTED: u8 = 1;
-
-fn parity(x: u32) -> u8 {
-    (x.count_ones() & 1) as u8
-}
-
-/// Convolutionally encode `bits` (rate 1/2). The register starts at 0; to
-/// terminate the trellis the caller appends 6 zero tail bits. Output is two
-/// symbols per input bit (G1 then the inverted G2).
-pub fn conv_encode(bits: &[u8]) -> Vec<u8> {
-    let mut state: u32 = 0; // 6 history bits in positions 5..0
-    let mut out = Vec::with_capacity(bits.len() * 2);
-    for &b in bits {
-        let reg = ((b as u32 & 1) << 6) | state; // 7-bit window: current bit + history
-        out.push(parity(reg & G1));
-        out.push(parity(reg & G2) ^ G2_INVERTED);
-        state = reg >> 1;
-    }
-    out
-}
 
 /// Hard-decision Viterbi decode of `syms` (two symbols per bit) back to `n_bits`
 /// bits, for the zero-terminated trellis above (start and end at state 0).
@@ -113,22 +92,6 @@ pub fn deinterleave(input: &[u8]) -> Vec<u8> {
         out[(j % 30) * 8 + j / 30] = v;
     }
     out
-}
-
-/// CRC-24Q (poly 0x1864CFB, init 0), MSB-first over a bit slice -- the check
-/// Galileo I/NAV (and GPS L2C/L5, RTCM) use. CRC of a message with its own CRC
-/// appended is 0.
-pub fn crc24q(bits: &[u8]) -> u32 {
-    const POLY: u32 = 0x0086_4CFB; // 0x1864CFB without the implicit x^24 term
-    let mut crc: u32 = 0;
-    for &b in bits {
-        let feedback = ((crc >> 23) & 1) ^ (b as u32 & 1);
-        crc = (crc << 1) & 0xFF_FFFF;
-        if feedback != 0 {
-            crc ^= POLY;
-        }
-    }
-    crc
 }
 
 /// The 10-symbol I/NAV page-part synchronisation pattern (preamble).
@@ -330,6 +293,7 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fec::conv_encode;
 
     fn sample_bits(n: usize) -> Vec<u8> {
         (0..n).map(|i| ((i * 37 + 11) % 7 < 3) as u8).collect()
@@ -341,7 +305,7 @@ mod tests {
         let data = sample_bits(114);
         let mut padded = data.clone();
         padded.extend([0u8; 6]);
-        let coded = conv_encode(&padded);
+        let coded = conv_encode(&padded, G2_INVERTED);
         assert_eq!(coded.len(), 240);
 
         let mut rx = interleave(&coded);
@@ -360,22 +324,6 @@ mod tests {
         assert_eq!(deinterleave(&interleave(&x)), x);
         // it actually permutes (not identity).
         assert_ne!(interleave(&x), x);
-    }
-
-    #[test]
-    fn crc24q_is_self_consistent() {
-        let data = sample_bits(196);
-        let crc = crc24q(&data);
-        let mut full = data.clone();
-        for k in (0..24).rev() {
-            full.push(((crc >> k) & 1) as u8);
-        }
-        // CRC over (message || CRC) is zero for CRC-24Q.
-        assert_eq!(crc24q(&full), 0);
-        // a single flipped bit changes the CRC.
-        let mut bad = data.clone();
-        bad[0] ^= 1;
-        assert_ne!(crc24q(&bad), crc);
     }
 
     // Build an even+odd page pair carrying a known 128-bit word with a valid CRC,
@@ -411,7 +359,7 @@ mod tests {
             let mut bits = frame.to_vec();
             bits.extend([0u8; 6]); // convolutional tail
             let mut part = PREAMBLE.to_vec();
-            part.extend(interleave(&conv_encode(&bits)));
+            part.extend(interleave(&conv_encode(&bits, G2_INVERTED)));
             part
         };
         let even = make_part(&page[..114]);
