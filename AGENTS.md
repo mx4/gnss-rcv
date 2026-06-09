@@ -6,9 +6,13 @@ device), then does acquisition → tracking → ephemeris decode → position fi
 ## Testing
 
 CI (Linux + macOS) gates every push/PR on three checks; keep all green locally
-before pushing. The full local gate (the three CI checks, plus the heavy
-`#[ignore]`'d end-to-end tests) is, in order — stop at the first failure, fix,
-re-run from the top:
+before pushing. The whole workflow is wrapped in a [`justfile`](justfile) — run
+`just` to list recipes. The full local gate is **`just check`** (fmt-check +
+clippy `-D warnings` + test); add the heavy `#[ignore]`'d end-to-end tests with
+`just test-all`. Other recipes: `just validate` (the GPS-fix + Galileo-decode
+checks), `just run <file> "<flags>"`, `just galileo`, `just fetch`, `just bench`.
+
+The raw commands behind `just check` (stop at the first failure, fix, re-run):
 
 ```sh
 cargo fmt --all -- --check
