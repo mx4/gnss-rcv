@@ -104,6 +104,7 @@ const PAGE_PART_SYMBOLS: usize = 250;
 /// (`page[132..172]`, just after the 16-bit Data j); it carries the
 /// authentication payload (NMA header + DSM/MACK sections) and is all-zero when
 /// the SV transmits no OSNMA. Bit order matches `bits`: MSB first, one bit per byte.
+#[derive(Clone)]
 pub struct InavWord {
     pub word_type: u8,
     pub bits: [u8; 128],

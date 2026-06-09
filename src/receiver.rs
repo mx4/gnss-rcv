@@ -15,10 +15,12 @@ use crate::code::Signal;
 use crate::device::RtlSdrDevice;
 use crate::ephemeris::Ephemeris as RxEphemeris;
 use crate::network::RtlSdrTcp;
+use crate::osnma::OsnmaVerifier;
 use crate::recording::IQFileType;
 use crate::recording::IQRecording;
 use crate::solver::PositionSolver;
 use crate::state::GnssState;
+use std::collections::HashSet;
 
 pub trait IQReader {
     fn get_iq_data(
@@ -74,6 +76,9 @@ pub struct ReceiverConfig {
     pub exit_on_fix: bool,
     /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
     pub json: Option<PathBuf>,
+    /// Verify Galileo OSNMA (anchored on the built-in 2023 public key). Only
+    /// meaningful for an E1B signal from the 2023 epoch (e.g. the FGI dataset).
+    pub osnma: bool,
 }
 
 impl Default for ReceiverConfig {
@@ -93,6 +98,7 @@ impl Default for ReceiverConfig {
             plots: false,
             exit_on_fix: false,
             json: None,
+            osnma: false,
         }
     }
 }
@@ -112,6 +118,11 @@ pub struct Receiver {
     exit_req: Arc<AtomicBool>,
     stats: RunStats,
     json_out: Option<PathBuf>,
+    /// Galileo OSNMA verifier (None unless `--osnma`), fed every channel's
+    /// decoded I/NAV pages after each step; plus the set of PRNs already reported
+    /// authenticated, so each is logged once.
+    osnma: Option<OsnmaVerifier>,
+    osnma_authenticated: HashSet<u8>,
 }
 
 /// Run-level work/perf counters, printed as a summary at end of `run_loop`.
@@ -377,6 +388,8 @@ impl Receiver {
             exit_req,
             stats: RunStats::default(),
             json_out: cfg.json.clone(),
+            osnma: cfg.osnma.then(OsnmaVerifier::galileo_2023),
+            osnma_authenticated: HashSet::new(),
         }
     }
 
@@ -460,8 +473,46 @@ impl Receiver {
             .for_each(|(_id, channel)| channel.process_samples(&iq_vec, ts_sec));
 
         self.compute_fix(ts_sec);
+        self.feed_osnma();
 
         Ok(())
+    }
+
+    /// Feed every channel's freshly decoded I/NAV pages into the OSNMA verifier
+    /// (draining their buffers), then log any satellite that has newly reached an
+    /// authenticated state. When OSNMA is off, the buffers are just drained so
+    /// they don't grow unbounded. Runs after the parallel channel step, in the
+    /// same sequential aggregation phase as the position fix.
+    fn feed_osnma(&mut self) {
+        let Some(verifier) = self.osnma.as_mut() else {
+            for ch in self.channels.values_mut() {
+                ch.nav.osnma_pages.clear();
+            }
+            return;
+        };
+        for ch in self.channels.values_mut() {
+            let prn = ch.sv.prn;
+            let galileo = ch.sv.constellation == Constellation::Galileo;
+            for page in ch.nav.osnma_pages.drain(..) {
+                if galileo {
+                    verifier.feed(prn, page.week, page.tow, &page.word);
+                }
+            }
+        }
+        // Log satellites that have newly become authenticated (once each).
+        let verifier = self.osnma.as_ref().unwrap();
+        let newly: Vec<SV> = self
+            .channels
+            .values()
+            .map(|ch| ch.sv)
+            .filter(|sv| sv.constellation == Constellation::Galileo)
+            .filter(|sv| verifier.is_authenticated(sv.prn))
+            .filter(|sv| !self.osnma_authenticated.contains(&sv.prn))
+            .collect();
+        for sv in newly {
+            self.osnma_authenticated.insert(sv.prn);
+            log::warn!("{}: {}", sv, "OSNMA authenticated".green());
+        }
     }
 
     pub fn run_loop(&mut self, num_msec: usize) {

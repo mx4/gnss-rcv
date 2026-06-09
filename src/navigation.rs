@@ -13,6 +13,7 @@ use crate::channel::Channel;
 use crate::ephemeris::Ephemeris;
 use crate::galileo_inav::{InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
+use crate::osnma::OsnmaPage;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
@@ -25,6 +26,10 @@ pub struct Navigation {
     pub(crate) lnav: LnavState,     // GPS / QZSS L1 C/A
     pub(crate) inav: InavDecoder,   // Galileo E1-B
     pub(crate) sbas: SbasL1Channel, // SBAS L1
+    /// Galileo OSNMA: the GST anchor `(tow, ts_sec)` from the last word-5 page,
+    /// and decoded pages buffered for the receiver-level verifier to drain.
+    pub(crate) osnma_anchor: Option<(u32, f64)>,
+    pub(crate) osnma_pages: Vec<OsnmaPage>,
 }
 
 impl Navigation {
@@ -34,6 +39,8 @@ impl Navigation {
             lnav: LnavState::new(),
             inav: InavDecoder::new(),
             sbas: SbasL1Channel::new(),
+            osnma_anchor: None,
+            osnma_pages: Vec::new(),
         }
     }
 
@@ -42,6 +49,9 @@ impl Navigation {
         self.lnav.reset();
         self.inav = InavDecoder::new();
         self.sbas = SbasL1Channel::new();
+        // The I/NAV symbol stream restarts, so the page-timing anchor is stale.
+        self.osnma_anchor = None;
+        self.osnma_pages.clear();
     }
 }
 
@@ -110,7 +120,32 @@ impl Channel {
                 Epoch::from_time_of_week(w, sow_ns(self.nav.eph.toe), TimeScale::GST);
             self.nav.eph.toc_gpst =
                 Epoch::from_time_of_week(w, sow_ns(self.nav.eph.toc), TimeScale::GST);
+            // Word 5 carries a fresh GST tow; (re)anchor the OSNMA page clock to it.
+            self.nav.osnma_anchor = Some((self.nav.eph.tow, self.ts_sec));
             self.nav_anchor_tx();
+        }
+
+        // Buffer the page for the receiver-level OSNMA verifier, timestamped with
+        // the GST at which it was transmitted: the word-5 anchor plus real elapsed
+        // time. The verifier floors GST to the 30 s subframe, so sub-second
+        // accuracy suffices; pages before the run's first word 5 can't be
+        // timestamped yet (no week/tow), so they are skipped.
+        if let Some((anchor_tow, anchor_ts)) = self.nav.osnma_anchor {
+            let off = (self.ts_sec - anchor_ts).round() as i64;
+            let (mut week, mut tow) = (self.nav.eph.week as i64, anchor_tow as i64 + off);
+            while tow >= 604800 {
+                tow -= 604800;
+                week += 1;
+            }
+            while tow < 0 {
+                tow += 604800;
+                week -= 1;
+            }
+            self.nav.osnma_pages.push(OsnmaPage {
+                week: week as u16,
+                tow: tow as u32,
+                word,
+            });
         }
     }
 
