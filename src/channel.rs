@@ -41,7 +41,8 @@ const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 /// Effective early-late discriminator slope (normalized output per unit code
 /// error) that sets the code-loop group delay [`dll_tau`]. It depends on the
 /// correlation peak vs the correlator spacing (`SP_CORR`), so it's signal-specific
-/// and calibrated to null the per-signal residual Doppler slope:
+/// and calibrated to null the per-signal residual Doppler slope. The diagnosis and
+/// calibration experiments are written up in `doc/dll-group-delay.md`.
 /// - **BPSK** (L1CA / SBAS): ~1-chip-wide triangular peak, well matched by
 ///   `SP_CORR` → a steep discriminator → small group delay (τ ≈ 0.157 s).
 const DLL_DISC_GAIN_BPSK: f64 = 3.18;
