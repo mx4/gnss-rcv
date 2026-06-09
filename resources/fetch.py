@@ -96,6 +96,12 @@ RECORDINGS: List[Rec] = [
         "nov_3_time_18_48_st_ives", 12699331696, "zip",
         "-t 2xf32",
         "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)", ("gps",)),
+    Rec("fgi-osnma",
+        "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
+        "FGI_OSNMA_clean.i8", 0, "manual",
+        "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
+        "FGI OSNMA (Finland 2023), L1/E1 real 8-bit 26 MHz, OSNMA bits; ~35 GB, CC BY 4.0, manual (see doc/datasets.md)",
+        ("gps", "galileo")),
 ]
 # fmt: on
 
@@ -253,6 +259,13 @@ def fetch_one(rec: Rec) -> bool:
     if is_present(rec):
         print("%s %s" % (paint("✓", "green"), paint(rec.name + ": already present, run with:", "bold")))
         print("  " + paint(runcmd(rec), "cyan"))
+        return True
+
+    if rec.archive == "manual":
+        print("%s %s" % (paint("✋", "yellow"), paint(rec.name + ": not scriptable — download by hand", "bold")))
+        print("  from: " + paint(rec.url, "cyan"))
+        print("  save under resources/ (see the dataset README for the exact file names),")
+        print("  then run with: " + paint(runcmd(rec), "cyan"))
         return True
 
     print("%s %s -> resources/%s" % (paint("↓", "yellow"), paint(rec.name + ": downloading", "bold"), rec.dest))
