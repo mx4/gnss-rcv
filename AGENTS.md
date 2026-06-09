@@ -306,8 +306,11 @@ word. On LimeSDR it pulls word types 1–5/0/6/9/10 from E01/E04/E09/E11. The
 **ephemeris extraction** from word types 1–5 is now in too
 (`galileo_inav::decode_ephemeris_word`, Steps 4–5): on LimeSDR **E09 and E11
 complete a physically valid orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km).
-**Remaining for an E1 *fix*:** the GST→GPST time + `gnss-rtk` solver integration
-(Step 6).
+The **time + solver wiring** (Step 6) is in as well — GST week+TOW → absolute
+epochs, constellation-aware µ, and the shared transmit-time anchor — so a complete
+Galileo ephemeris feeds gnss-rtk. **Remaining for an E1 *fix*:** the capture yields
+only **2 Galileo SVs with a complete ephemeris in 61 s** (a fix needs 4); the gap
+is recording SV count / simultaneous GPS+Galileo tracking, not the decode/solve path.
 
 Key differences from GPS L1 C/A that drive every change:
 
@@ -371,13 +374,22 @@ capture (E09/E11 orbits complete, is_valid). The Viterbi decoder (rate-1/2 K=7)
 was the hardest single piece. Reference: Galileo OS SIS ICD (ESA GSC), Tables 4
 and 24–29.
 
-**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD**
-- Add `EARTH_MU_GAL = 3.986004418e14` (Galileo ICD value; GPS is `3.9860058e14` — differs
-  ~0.01 ppm → ~1 mm on SV position; use the right constant based on constellation).
-- `ReceiverSpacebornBias::group_delay`: return `eph.bgd_e5a_e1` for Galileo SVs.
-- GST → GPST: Galileo System Time differs from GPST by a constant offset carried in I/NAV
-  word type 6. For a first implementation, treat GST ≈ GPST (offset is sub-µs historically)
-  and refine once word-type-6 decoding is in place.
+**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD** ✅ DONE (no fix yet)
+- `EARTH_MU_GAL = 3.986004418e14` added; `solver::earth_mu(sv)` picks GTRF vs WGS-84
+  µ in the Kepler solve and the relativistic clock term (~1 mm difference).
+- BGD: `group_delay` already returns `eph.tgd`, which the I/NAV decoder fills with
+  BGD(E1,E5a) — the E1-only group delay — so no Galileo-specific branch is needed.
+- Time: absolute toe/toc/tow epochs are built from the GST week+TOW via
+  `Epoch::from_time_of_week(week, .., TimeScale::GST)` (hifitime carries the GST↔GPST
+  offset, so the solver's absolute-duration math is correct without a manual GGTO).
+  The transmit anchor is shared with GPS (`Channel::nav_anchor_tx`), pinned on a
+  word-type-5 page so the TOW and code-period count are captured together.
+- Carrier::L1 already covers Galileo E1 (1575.42 MHz) in gnss-rtk — no change needed.
+- **Blocked on data, not code:** the 61 s LimeSDR capture completes only 2 Galileo
+  ephemerides (E09/E11); a fix needs ≥4 SVs. Validated indirectly: correct UTC
+  epoch + anchoring on real data, and solver unit tests (`earth_mu_is_constellation_specific`,
+  `galileo_ephemeris_computes_a_meo_position`). A fix needs a denser/longer Galileo
+  recording, or simultaneous GPS+Galileo tracking (see C, multi-signal-per-run).
 
 ### D. Developer experience
 
