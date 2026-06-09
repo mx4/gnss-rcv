@@ -26,6 +26,13 @@ const SDR_MAX_NSYM: usize = 18000;
 
 const THRESHOLD_SYNC: f64 = 0.4; // 0.02
 const THRESHOLD_LOST: f64 = 0.03; // 0.002
+/// Consecutive weak 50 bps bits (|mean prompt-I| < THRESHOLD_LOST) tolerated before
+/// declaring bit sync lost. One weak bit is usually a momentary carrier wobble, not
+/// a real dropout; the per-subframe parity is the real data gate, so we ride through
+/// brief dips (keeping bit sync and the 300-bit alignment) instead of hard-resetting
+/// and forcing a full ~7 s re-sync — which on marginal recordings prevented the 3
+/// consecutive clean subframes an ephemeris needs.
+const WEAK_BIT_LIMIT: usize = 25; // ~0.5 s at 50 bps
 
 /// LNAV 30-bit-word parity masks (IS-GPS-200), shared by the parity check and the
 /// encoder.
@@ -51,6 +58,7 @@ pub(crate) struct LnavState {
     sync_state: SyncState,
     bits: Vec<u8>, // navigation bits
     count_parity_err: usize,
+    weak_bits: usize, // consecutive weak bits since the last strong one (hysteresis)
 }
 
 impl LnavState {
@@ -61,6 +69,7 @@ impl LnavState {
             sync_state: SyncState::Normal,
             bits: vec![0; SDR_MAX_NSYM],
             count_parity_err: 0,
+            weak_bits: 0,
         }
     }
 
@@ -69,6 +78,7 @@ impl LnavState {
         self.nav_sync = 0;
         self.sync_state = SyncState::Normal;
         self.bits.fill(0);
+        self.weak_bits = 0;
     }
 }
 
@@ -91,8 +101,10 @@ impl Channel {
                     self.nav_decode_lnav(sync);
                 }
             } else if self.num_trk_samples > self.nav.lnav.nav_sync + 300 * 20 {
+                // Missed the frame boundary: drop frame sync and re-find the
+                // preamble, but KEEP bit sync — a frame-sync slip shouldn't cost
+                // the full ~7 s bit-resync. (Parity errors likewise keep bit sync.)
                 self.nav.lnav.nav_sync = 0;
-                self.nav.lnav.bit_sync = 0;
                 self.nav.lnav.sync_state = SyncState::Normal;
             }
         } else if self.num_trk_samples >= 20 * 308 + 1000 {
@@ -174,14 +186,24 @@ impl Channel {
         } else if (self.num_trk_samples - self.nav.lnav.bit_sync).is_multiple_of(num) {
             let p = self.nav_mean_ip(num);
             if p.abs() >= THRESHOLD_LOST {
-                let sym: u8 = if p >= 0.0 { 1 } else { 0 };
-                self.nav_add_bit(sym);
-                return true;
+                self.nav.lnav.weak_bits = 0; // strong bit: clear the weak streak
             } else {
-                self.nav.lnav.bit_sync = 0;
-                self.nav.lnav.sync_state = SyncState::Normal;
-                log::info!("{}: SYNC {} p={}", self.sv, "LOST".to_string().red(), p)
+                // Weak bit (the 20 ms coherent sum nearly cancelled). Ride out a
+                // brief run — keep bit sync and still add the bit (its sign),
+                // preserving the 300-bit alignment — but declare loss after a
+                // sustained streak. Parity is the real gate for the noisy bits.
+                self.nav.lnav.weak_bits += 1;
+                if self.nav.lnav.weak_bits >= WEAK_BIT_LIMIT {
+                    self.nav.lnav.bit_sync = 0;
+                    self.nav.lnav.sync_state = SyncState::Normal;
+                    self.nav.lnav.weak_bits = 0;
+                    log::info!("{}: SYNC {} p={}", self.sv, "LOST".to_string().red(), p);
+                    return false;
+                }
             }
+            let sym: u8 = if p >= 0.0 { 1 } else { 0 };
+            self.nav_add_bit(sym);
+            return true;
         }
         false
     }
