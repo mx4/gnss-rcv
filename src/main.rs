@@ -36,9 +36,19 @@ struct Options {
     log_file: PathBuf,
     #[structopt(short = "t", long, help = "type of IQ file", default_value = "2xf32")]
     iq_file_type: IQFileType,
-    #[structopt(long, help = "sampling frequency", default_value = "2046000.0")]
+    #[structopt(
+        long,
+        help = "sampling frequency, e.g. 10M / 2.046M / 2046000",
+        parse(try_from_str = parse_freq),
+        default_value = "2046000"
+    )]
     fs: f64,
-    #[structopt(long, help = "intermediate frequency", default_value = "0.0")]
+    #[structopt(
+        long,
+        help = "intermediate frequency, e.g. 420K / 0",
+        parse(try_from_str = parse_freq),
+        default_value = "0"
+    )]
     fi: f64,
     #[structopt(long, help = "offset in file", default_value = "0")]
     off_msec: usize,
@@ -101,6 +111,22 @@ fn init_ctrl_c(exit_req: Arc<AtomicBool>) {
         exit_req.store(true, Ordering::SeqCst);
     })
     .expect("Error setting Ctrl-C handler");
+}
+
+/// Parse a frequency that may carry a K/M/G suffix (case-insensitive):
+/// "10M" -> 10_000_000, "420K" -> 420_000, "2.046M", or a plain "2046000".
+fn parse_freq(s: &str) -> Result<f64, String> {
+    let s = s.trim();
+    let (num, mult) = match s.chars().last() {
+        Some('k' | 'K') => (&s[..s.len() - 1], 1e3),
+        Some('m' | 'M') => (&s[..s.len() - 1], 1e6),
+        Some('g' | 'G') => (&s[..s.len() - 1], 1e9),
+        _ => (s, 1.0),
+    };
+    num.trim()
+        .parse::<f64>()
+        .map(|v| v * mult)
+        .map_err(|_| format!("invalid frequency '{s}' (use e.g. 10M, 420K, 2046000)"))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -168,4 +194,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     exit_req.store(true, Ordering::SeqCst);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_freq;
+
+    #[test]
+    fn parse_freq_handles_si_suffixes() {
+        assert_eq!(parse_freq("10M").unwrap(), 10_000_000.0);
+        assert_eq!(parse_freq("420K").unwrap(), 420_000.0);
+        assert_eq!(parse_freq("2046000").unwrap(), 2_046_000.0);
+        assert_eq!(parse_freq("1g").unwrap(), 1e9);
+        assert_eq!(parse_freq("0").unwrap(), 0.0);
+        // fractional suffix: f64 rounding, so compare approximately.
+        assert!((parse_freq("2.046M").unwrap() - 2_046_000.0).abs() < 1.0);
+        assert!(parse_freq("10X").is_err());
+        assert!(parse_freq("abc").is_err());
+    }
 }
