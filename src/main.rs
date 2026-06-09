@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 use structopt::StructOpt;
 
 use gnss_rcv::code::Signal;
@@ -179,18 +178,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(Mutex::new(GnssState::new())),
     )?;
 
-    let ts = Instant::now();
-
     receiver.run_loop(opt.num_msec);
 
-    // Keep stdout clean for `--json -` (so the run pipes straight into jq); the
-    // status line goes to stderr in that case.
-    let term = format!("GNSS terminating: {:.2} sec", ts.elapsed().as_secs_f32());
-    if opt.json.as_deref() == Some(std::path::Path::new("-")) {
-        eprintln!("{term}");
-    } else {
-        println!("{term}");
-    }
     exit_req.store(true, Ordering::SeqCst);
 
     Ok(())
