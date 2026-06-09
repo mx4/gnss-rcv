@@ -317,10 +317,22 @@ their carrier had settled into a **Costas-loop false lock at half the symbol
 rate** (±125 Hz = 250 sym/s ÷ 2): a π/symbol rotation that the `atan(Q/I)`
 prompt discriminator and the `atan(cross/dot)` FLL both fold to zero error, so
 tracking is happy while every symbol is multiplied by (−1)ⁿ — deterministic per
-SV, independent of C/N0. The fix resolves the ambiguity at frame sync
-(`InavDecoder::match_preamble` tries the de-alternated stream alongside the
-polarity hypotheses); code/DLL tracking and the code-phase pseudorange are
-unaffected by the carrier error, so the decoder layer is the right place for it.
+SV, independent of C/N0. (GPS L1 C/A is immune: its PLL updates 20× per data bit,
+so its discriminator is not data-ambiguous at the bit rate. The hazard is
+specific to E1-B's one-symbol-per-code-period layout.)
+
+It is fixed at **two layers**: (1) the decoder resolves the ambiguity at frame
+sync (`InavDecoder::match_preamble` tries the de-alternated stream alongside the
+polarity hypotheses), and (2) the **root cause** in tracking —
+`Channel::correct_half_rate_false_lock` (channel.rs) compares the PLL Doppler to
+the *code-implied* Doppler from the transmit-phase slope (`d(t_tx)/d(t_rx) =
+1 + dopp/fc`; the code/DLL loop is immune to the carrier aliasing) and snaps the
+carrier onto the nearest half-rate step, pulling it onto the true lock within
+~5 s. Layer (1) covers the seconds before (2) engages and any transient slip;
+(2) makes the carrier Doppler itself correct (needed for velocity / carrier-phase,
+not just for the pseudorange-only fix). Verified on LimeSDR: E01/E04/E19 each
+correct exactly once (+125 Hz) with no lock loss, and the PLL vs code-implied
+Doppler gap drops from ~−125 Hz to ~0 (`GAL_DOPP_CHECK=1` logs the comparison).
 
 Key differences from GPS L1 C/A that drive every change:
 

@@ -1,4 +1,5 @@
 use colored::Colorize;
+use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex64;
@@ -30,6 +31,7 @@ const T_IDLE_MAX: f64 = 30.0;
 const T_ACQ: f64 = 0.01; // 10msec acquisition time
 const T_FPULLIN: f64 = 1.0;
 const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
+const HALF_RATE_WINDOW: f64 = 3.0; // code-carrier Doppler slope window (s)
 const T_DLL: f64 = 0.01; // non-coherent integration time for DLL
 const T_CN0: f64 = 1.0; // averaging time for C/N0
 const B_FLL_WIDE: f64 = 10.0; // bandwidth of FLL wide Hz
@@ -68,6 +70,8 @@ pub struct Tracking {
     sum_corr_l: f64,
     sum_corr_p: f64,
     sum_corr_n: f64,
+    txp_ts0: f64, // baseline rx time for the code-implied-Doppler slope (0 = unset)
+    txp0: f64,    // baseline transmit phase paired with txp_ts0
 }
 
 // Rolling per-channel diagnostics. These are capped ring buffers: new samples
@@ -407,6 +411,8 @@ impl Channel {
         self.trk.sum_corr_e = 0.0;
         self.trk.sum_corr_l = 0.0;
         self.trk.sum_corr_n = 0.0;
+        self.trk.txp_ts0 = 0.0;
+        self.trk.txp0 = 0.0;
         self.num_trk_samples = 0;
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
@@ -741,6 +747,63 @@ impl Channel {
         }
     }
 
+    /// Detect and correct a Costas half-symbol-rate carrier false lock.
+    ///
+    /// For Galileo E1-B one data symbol spans exactly one code period, so the
+    /// per-symbol carrier discriminators (`atan(Q/I)` PLL, `atan(cross/dot)` FLL)
+    /// are data-ambiguous beyond ±1/(4·code_sec): the loop can settle a multiple
+    /// of 1/(2·code_sec) (±125 Hz) off the true frequency, holding a strong,
+    /// stable lock while every symbol picks up a (−1)ⁿ flip. The code/DLL loop is
+    /// immune (it tracks the true code phase), so the transmit-phase slope gives
+    /// the true Doppler: `d(t_tx)/d(t_rx) = 1 + dopp/fc`. We snap the PLL Doppler
+    /// onto the nearest half-rate step of it, pulling the carrier onto the true
+    /// lock — which also makes the I/NAV symbol stream clean.
+    ///
+    /// GPS L1 C/A is immune (its PLL updates 20× per data bit, so its
+    /// discriminator is not data-ambiguous at the bit rate), so this is gated to
+    /// Galileo. The decoder ([`crate::galileo_inav`]) independently undoes the
+    /// (−1)ⁿ flip, covering the few seconds before this correction engages.
+    fn correct_half_rate_false_lock(&mut self) {
+        if self.sv.constellation != Constellation::Galileo {
+            return;
+        }
+        let txp = self.num_trk_samples as f64 * self.code_sec - self.trk.code_off_sec;
+        // Establish the baseline once past carrier pull-in.
+        if self.trk.txp0 == 0.0 {
+            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN + 1.0 {
+                self.trk.txp_ts0 = self.ts_sec;
+                self.trk.txp0 = txp;
+            }
+            return;
+        }
+        let dt = self.ts_sec - self.trk.txp_ts0;
+        if dt < HALF_RATE_WINDOW {
+            return; // need a few seconds for a precise slope
+        }
+        // Code-implied (true) Doppler vs the PLL's, expressed in half-rate steps.
+        let code_dopp = ((txp - self.trk.txp0) / dt - 1.0) * self.fc;
+        let step = 1.0 / (2.0 * self.code_sec); // 125 Hz for E1-B
+        let k = ((code_dopp - self.trk.doppler_hz) / step).round();
+        if std::env::var("GAL_DOPP_CHECK").is_ok() {
+            log::warn!(
+                "{}: DOPPCHK pll_dopp={:7.1} code_dopp={:7.1} k={:+.0}",
+                self.sv, self.trk.doppler_hz, code_dopp, k,
+            );
+        }
+        if k != 0.0 {
+            self.trk.doppler_hz += k * step;
+            self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the jump
+            self.update_state_doppler_hz();
+            log::warn!(
+                "{}: half-rate false lock corrected {:+.0} Hz -> {:.0} Hz at ts={:.1}",
+                self.sv, k * step, self.trk.doppler_hz, self.ts_sec,
+            );
+        }
+        // Re-baseline so the next window measures the post-correction state.
+        self.trk.txp_ts0 = self.ts_sec;
+        self.trk.txp0 = txp;
+    }
+
     fn tracking_process(&mut self, iq_vec: &[Complex64]) {
         self.get_code_and_carrier_phase();
         let (c_p, c_e, c_l, c_n) = self.tracking_compute_correlation(iq_vec);
@@ -787,6 +850,7 @@ impl Channel {
         self.hist.doppler_hz.push_back(self.trk.doppler_hz);
         self.hist.trim();
         self.update_all_plots(false);
+        self.correct_half_rate_false_lock();
         self.log_periodically();
         self.nav.eph.cn0 = self.trk.cn0;
 
