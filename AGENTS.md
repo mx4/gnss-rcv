@@ -86,7 +86,7 @@ recording's check fails:
 - **Galileo E1-B I/NAV decode + fix** (every present recording): asserts Galileo
   SVs track and decode CRC-valid I/NAV words; on a recording long enough to
   complete ≥4 ephemerides (ION LimeSDR, 60 s) it also asserts a real Galileo-only
-  position fix (~3.4 km from the 52.177, 4.488 site truth). Short recordings
+  position fix (~110 m from the 52.177, 4.488 site truth). Short recordings
   (PocketSDR ~30 s) assert only the decode chain.
 - **SBAS L1 decode** (a capture with an SBAS GEO overhead — CTTC Spain → EGNOS):
   asserts a floor of CRC-valid SBAS messages from ≥1 GEO. On CTTC, S120 + S126
@@ -285,7 +285,7 @@ Without these gnss-rcv cannot integrate with any external tool:
 | Item | Status |
 |---|---|
 | **Troposphere model** (Saastamoinen) | ✅ Done — standard-atmosphere ZHD+ZWD, slant-mapped, applied per SV in `solver.rs`. |
-| **Per-SV pseudorange bias** | ✅ Fixed — it was the **DLL code-loop group delay** (the tracked code phase lags the true one by code-Doppler × τ), so the residual was *linear in Doppler* (−0.03 m/Hz, ~170 m, instantaneous). Compensated by `code_off += doppler/fc·TAU_DLL` in `channel.rs` (gpssim 165 m→4 m; CTTC real GPS ~20 m). Galileo E1 partly (4→3.4 km — its 4 ms period wants a signal-aware τ). |
+| **Per-SV pseudorange bias** | ✅ Fixed — it was the **DLL code-loop group delay** (the tracked code phase lags the true one by code-Doppler × τ), so the residual was *linear in Doppler* (−0.03 m/Hz, ~170 m, instantaneous). Compensated by `code_off += doppler/fc·τ` in `channel.rs`, τ = `0.25/(B_DLL·DLL_DISC_GAIN)` per signal (gpssim 165 m→4 m; CTTC real GPS ~20 m). E1's BOC peak needs a much smaller discriminator gain (τ≈1.95 s) → Galileo 3.4 km→~110 m. |
 | **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers to ~2038; needs a date-anchored resolver (known real-world recordings already show "2032 GPST"). |
 | **Sustained nav bit-sync on marginal recordings** | Open. The bit-sync *logic* is sound — a clean synthetic SV holds sync with zero loss at 40–50 dB-Hz in both the 2.046 MHz and SJTU 25 MHz/fi=fs/4 regimes (`examples/bitsync_bench.rs`). But SJTU/HackRF lose sync after ~1 subframe: degraded real prompt-I (the 20 ms coherent nav integration `nav_mean_ip` collapses below `THRESHOLD_LOST`) **plus** a brittle recovery path — a single failed frame-sync check hard-resets both `bit_sync` and `nav_sync` (`gps_lnav.rs`), forcing a full ~7 s re-sync, so 3 *consecutive* clean subframes rarely line up. Fix: gentler sync recovery (hysteresis / don't hard-reset on one miss) and/or tighter carrier tracking; validate that the recordings that already fix still do. |
 
@@ -314,9 +314,9 @@ assembly → CRC-24Q → 128-bit word. The **ephemeris extraction** from word ty
 wiring** (Step 6 — GST week+TOW → absolute epochs, constellation-aware µ, shared
 transmit-time anchor) are both in. **All 5 SVs now complete a physically valid
 orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km) and feed gnss-rtk to produce a
-**Galileo-only fix ~3.4 km from the 52.177, 4.488 site truth** (the DLL
-group-delay fix helped; the residual is partly E1's 4 ms period under-compensating
-τ, partly other sources).
+**Galileo-only fix ~110 m from the 52.177, 4.488 site truth** (after the signal-
+aware DLL group-delay compensation — E1's BOC peak needs a much larger τ than
+L1CA, see the per-SV-bias backlog entry).
 
 The earlier "only 2 SVs (E09/E11) complete an ephemeris" was **not** a data
 limitation — it was a decode bug. E01/E04/E19 held a strong continuous lock
@@ -418,11 +418,11 @@ and 24–29.
 - **A real Galileo-only fix lands.** Once the half-rate false-lock decode bug was
   fixed (see the progress note above), the 61 s LimeSDR capture completes **all 5
   Galileo ephemerides** (E01/E04/E09/E11/E19) and `validate_fix.py` asserts a fix
-  ~3.4 km from the 52.177, 4.488 site truth. Also covered by solver unit tests
+  **~110 m** from the 52.177, 4.488 site truth. Also covered by solver unit tests
   (`earth_mu_is_constellation_specific`, `galileo_ephemeris_computes_a_meo_position`).
-  The GPS per-SV bias (DLL group delay) is now fixed; the Galileo residual is
-  partly that compensation under-fitting E1's 4 ms period (a signal-aware τ_E1
-  would help), partly other sources.
+  The per-SV DLL-group-delay bias is compensated per signal — E1's BOC correlation
+  peak needs a much smaller discriminator gain (τ≈1.95 s vs L1CA's 0.157 s), which
+  took the Galileo fix 3.4 km → ~110 m (see the per-SV-bias backlog entry).
 
 ### D. Developer experience
 

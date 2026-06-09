@@ -172,7 +172,7 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 | CTTC Spain 2013 | `fetch.py cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
 | ION rooftop RTL-SDR | `fetch.py ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
 | ION LimeSDR (10 MHz, IF 420 kHz) | `fetch.py ion-lime` | `-t 2xi16 --fs 10000000 --fi 420000` | ✅ **52.177, 4.488** — Netherlands (non-zero IF) |
-| ↳ same capture, **Galileo E1-B** | (as above) | `… --sig E1B` | ✅ **52.151, 4.463** — Galileo-only fix, 5 SVs (E01/E04/E09/E11/E19), ~3.4 km from the GPS truth |
+| ↳ same capture, **Galileo E1-B** | (as above) | `… --sig E1B` | ✅ **52.177, 4.490** — Galileo-only fix, 5 SVs (E01/E04/E09/E11/E19), ~110 m from the GPS truth |
 | [TEXBAT](https://rnl-data.ae.utexas.edu/datastore/texbat/) `cleanStatic` | manual (44 GB; ~70 s prefix is enough) | `-t 2xi16 --fs 25000000` | ✅ **30.287, −97.736** — Austin TX |
 | `GPS-L1-2022-03-27.sigmf-data` | `fetch.py zenodo-sigmf` | `-t 2xi16 --fs 4000000` | tracks (G31 ≈ 45 dB-Hz); ~15 s — too short for a fix |
 | ION BladeRF (10 MHz) | `fetch.py ion-bladerf` | `-t 2xi16 --fs 10000000` | tracks 13 SVs (≥40 dB-Hz); ~13 s — too short for a fix |
@@ -273,8 +273,8 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
       solves a Galileo-only fix** (E1-B memory codes + BOC(1,1); `--sig E1B` decodes
       real CRC-valid I/NAV words, reconstructs valid orbits, and the GST time + orbit
       feed gnss-rtk). On the LimeSDR capture all 5 tracked SVs (E01/E04/E09/E11/E19)
-      complete an ephemeris and produce a fix **~3.4 km from the site truth
-      (52.177, 4.488, Netherlands)**.
+      complete an ephemeris and produce a fix **~110 m from the site truth
+      (52.177, 4.488, Netherlands)** (after the E1 BOC DLL-lag compensation).
 - [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view
