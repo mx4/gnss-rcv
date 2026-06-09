@@ -124,7 +124,7 @@ impl Signal {
     }
 
     /// Primary-code period (s): one full spreading-code repetition.
-    pub fn code_period_s(&self) -> f64 {
+    pub fn code_period_sec(&self) -> f64 {
         match self {
             Signal::L1ca => 1e-3,
             Signal::GalileoE1b | Signal::GalileoE1c => 4e-3,
@@ -205,13 +205,13 @@ mod tests {
 
         let l1 = Signal::L1ca;
         assert_eq!(l1.code_len(), L1CA_CODE_LEN);
-        assert_eq!(l1.code_period_s(), 1e-3);
+        assert_eq!(l1.code_period_sec(), 1e-3);
         assert!(!l1.is_boc11());
         assert_eq!(l1.spreading_code(5).unwrap().len(), L1CA_CODE_LEN);
 
         let e1 = Signal::GalileoE1b;
         assert_eq!(e1.code_len(), 2 * E1_CODE_LEN); // BOC sub-chips
-        assert_eq!(e1.code_period_s(), 4e-3);
+        assert_eq!(e1.code_period_sec(), 4e-3);
         assert!(e1.is_boc11());
         assert_eq!(e1.carrier_hz(), l1.carrier_hz()); // shared L1 band
         // E1 spreading code = BOC(1,1)-modulated 4092-chip primary -> 8184 sub-chips.

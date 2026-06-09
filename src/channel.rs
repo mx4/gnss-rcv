@@ -271,7 +271,7 @@ impl Channel {
                 sv.prn
             )
         });
-        let code_sec = sig.code_period_s();
+        let code_sec = sig.code_period_sec();
         let code_len = sig.code_len();
         let code_sp = (fs * code_sec) as usize;
         let mut fft_planner = FftPlanner::new();

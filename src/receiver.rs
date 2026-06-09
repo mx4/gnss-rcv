@@ -101,7 +101,7 @@ pub struct Receiver {
     iq_feed: Box<dyn IQReader>,
     period_sp: usize, // samples per code period (signal-dependent)
     fs: f64,
-    code_period_s: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
+    code_period_sec: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
     off_samples: usize,
     cached_iq_vec: Vec<Complex64>,
     cached_ts_sec_tail: f64,
@@ -352,8 +352,8 @@ impl Receiver {
     ) -> Self {
         // The receiver steps one spreading-code period at a time; that period is
         // the signal's, not a hardcoded 1 ms (E1 is 4 ms).
-        let code_period_s = cfg.sig.code_period_s();
-        let period_sp = (code_period_s * cfg.fs) as usize;
+        let code_period_sec = cfg.sig.code_period_sec();
+        let period_sp = (code_period_sec * cfg.fs) as usize;
         let mut channels = HashMap::<SV, Channel>::new();
         for sv in get_sat_list(&cfg.sats, cfg.sig, cfg.sbas, cfg.qzss) {
             channels.insert(
@@ -366,7 +366,7 @@ impl Receiver {
             iq_feed,
             period_sp,
             fs: cfg.fs,
-            code_period_s,
+            code_period_sec,
             off_samples: cfg.off_msec * period_sp,
             cached_iq_vec: Vec::<Complex64>::new(),
             cached_ts_sec_tail: 0.0,
@@ -406,7 +406,7 @@ impl Receiver {
 
         Ok((
             self.cached_iq_vec[len - 2 * self.period_sp..].to_vec(),
-            self.cached_ts_sec_tail - self.code_period_s,
+            self.cached_ts_sec_tail - self.code_period_sec,
         ))
     }
 
@@ -504,7 +504,7 @@ impl Receiver {
     /// two never drift.
     fn build_summary(&self) -> RunSummary {
         let s = &self.stats;
-        let data_sec = s.msec_processed as f64 * self.code_period_s;
+        let data_sec = s.msec_processed as f64 * self.code_period_sec;
         let wall = s.start.elapsed().as_secs_f64();
         let rtf = if wall > 0.0 { data_sec / wall } else { 0.0 };
 
