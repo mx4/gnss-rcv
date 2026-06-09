@@ -11,6 +11,7 @@ pub mod galileo_inav;
 pub mod gps_lnav;
 pub mod navigation;
 pub mod network;
+pub mod osnma;
 pub mod plots;
 pub mod receiver;
 pub mod recording;
