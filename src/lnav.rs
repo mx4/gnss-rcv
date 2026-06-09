@@ -11,7 +11,7 @@
 
 use crate::util::{getbitu, setbitu, xor_bits};
 
-// Same parity masks as the decoder (navigation.rs::nav_test_lnav_parity).
+// Same parity masks as the decoder (gps_lnav.rs::nav_test_lnav_parity).
 const MASK: [u32; 6] = [
     0x2EC7CD2, 0x1763E69, 0x2BB1F34, 0x15D8F9A, 0x1AEC7CD, 0x22DEA27,
 ];
