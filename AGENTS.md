@@ -279,13 +279,15 @@ Without these gnss-rcv cannot integrate with any external tool:
 
 #### Galileo E1 — implementation plan
 
-**Progress:** the signal abstraction is in — `code::Signal` replaces the old
-`"L1CA"` string and carries the carrier/code params. `Signal::GalileoE1b/E1c`
-define the E1 parameters (4 ms period, 8184 BOC sub-chips, BOC(1,1), shared L1
-carrier); `code::boc11()` is the tested BOC(1,1) subcarrier and `spreading_code()`
-applies it. Remaining: embed the E1 memory codes (the `e1_primary_code` stub),
-wire the BOC replica + acquisition timing into the channel, and add the I/NAV
-decoder.
+**Progress — E1-B acquires end-to-end.** `code::Signal` replaced the `"L1CA"`
+string; the E1-B/E1-C primary memory codes are embedded
+([`galileo_e1_codes.rs`](src/galileo_e1_codes.rs)) and decoded by
+`e1_primary_code`; `Signal::GalileoE1b::spreading_code` returns the BOC(1,1)
+replica (`code::boc11()`); the receiver steps the signal's code period (4 ms,
+signal-aware); and `get_sat_list` tags Galileo PRNs from the signal. Proven on
+the ION LimeSDR capture: `--sig E1B` locks **E01 @ 47.8, E04 @ 44.1, E11 @ 39.8**
+dB-Hz. **Remaining for an E1 *fix*:** E1 tracking-loop tuning (Step 2) and the
+I/NAV decoder (Steps 4–5).
 
 Key differences from GPS L1 C/A that drive every change:
 
@@ -302,30 +304,26 @@ Key differences from GPS L1 C/A that drive every change:
 
 **Implementation order** (each step is independently testable):
 
-**Step 1 — `src/code.rs`: E1-B/E1-C memory codes** (the only blocker for acquisition)
-- Fill the `e1_primary_code(prn, pilot)` stub: the 4092-chip E1-B/E1-C primary
-  codes are *memory* codes (not LFSR-generated) tabulated in the Galileo OS SIS
-  ICD (Annex C, hex); embed them as a static table (~50 PRNs × 4092 chips).
-- `Signal::GalileoE1b/E1c` already provide period (4 ms), `code_len` (8184 BOC
-  sub-chips) and carrier; `spreading_code()` already wraps the primary code in
-  `boc11()`. Once the table is in, E1 channels build.
-- Test: same autocorrelation peak + bounded off-peak cross-correlation properties as GPS Gold codes.
+**Step 1 — `src/code.rs`: E1-B/E1-C memory codes** ✅ DONE
+- The 4092-chip E1-B/E1-C primary memory codes are embedded as hex in
+  [`galileo_e1_codes.rs`](src/galileo_e1_codes.rs) (OS SIS ICD Annex C, 50 PRNs);
+  `e1_primary_code` decodes them to ±1, `spreading_code()` wraps them in `boc11()`.
+- Tested: `e1_primary_codes_are_valid` (bipolar, balanced, strong autocorr peak).
 
-**Step 2 — `src/channel.rs`: BOC(1,1) correlator**
-- `code::boc11()` already produces the `[+code, −code]` per-chip subcarrier
-  replica (BOC(1,1) at 2 sub-chips/chip); it is what `spreading_code()` returns,
-  so `Channel::new`'s existing resampling already consumes the BOC replica. What
-  remains is BOC-aware *tuning*: early/late spacing in sub-chips and the longer
-  acquisition window — increase non-coherent integration `T_ACQ = 0.04` (10 × 4 ms).
+**Step 2 — `src/channel.rs`: BOC(1,1) correlator** (replica DONE; tuning + nav routing left)
+- `code::boc11()` produces the `[+code, −code]` per-chip replica, returned by
+  `spreading_code()`, so `Channel::new`'s resampling already consumes it — E1-B
+  *acquires* as-is. What remains is BOC-aware *tracking tuning*: early/late
+  spacing in sub-chips and the longer non-coherent window (`T_ACQ` for 4 ms code).
 - `nav_decode()` routing: branch on `sv.constellation == Constellation::Galileo` before the
   LNAV path to call `nav_decode_inav()`.
 
-**Step 3 — `src/receiver.rs`: `--galileo` flag + PRN range**
-- Add `galileo: bool` to `Options` / `ReceiverConfig` (same pattern as `--qzss`).
-- In `get_sat_list`: when `galileo`, push `SV::new(Constellation::Galileo, prn)` for PRNs 1–36.
-  (Galileo PRNs 1–36 overlap with GPS 1–32, so they must be created with explicit `--galileo`,
-  never by default.)
-- Stats / cross-correlation rejection already work generically; no changes needed there.
+**Step 3 — receiver wiring** ✅ DONE
+- No separate `--galileo` flag: selecting the signal (`--sig E1B`) drives it.
+  `get_sat_list` tags every selected PRN `Constellation::Galileo` when the signal
+  is Galileo (E1 PRNs 1–36 overlap GPS, so the *signal*, not the number, decides).
+  The receiver steps the signal's 4 ms code period. Stats / xcorr rejection are
+  already generic.
 
 **Step 4 — `src/ephemeris.rs`: Galileo fields**
 - Add `bgd_e5a_e1: f64` and `bgd_e5b_e1: f64` (replaces `tgd` for Galileo; use `bgd_e5a_e1`
