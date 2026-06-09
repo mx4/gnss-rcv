@@ -19,8 +19,15 @@ pub const P2_50: f64 = 8.881_784_197_001_252e-16; /* 2^-50 */
 pub const P2_55: f64 = 2.775_557_561_562_891e-17; /* 2^-55 */
 pub const P2_59: f64 = 1.734_723_475_976_807e-18; /* 2^-59 (Galileo af2) */
 
-#[allow(clippy::approx_constant)]
-pub const SC2RAD: f64 = 3.141_592_653_589_8; /* semi-circle to radian (IS-GPS) */
+/// Semicircles → radians for broadcast orbit/clock parameters. Deliberately the
+/// *truncated* π mandated by IS-GPS-200 (and the Galileo OS SIS ICD) — NOT
+/// `std::f64::consts::PI`. The ground segment fits the ephemeris using exactly
+/// this value, so the receiver must use it too, or it diverges from the broadcast
+/// convention (~7e-15 rad). Shared by GPS and Galileo (= gnss-sdr `GNSS_PI`,
+/// RTKLIB `SC2RAD`). Do not "increase its precision". The true π is still used
+/// for carrier/FFT DSP elsewhere.
+#[allow(clippy::approx_constant)] // intentional ICD value, not an approximation of PI
+pub const SC2RAD: f64 = 3.141_592_653_589_8;
 
 pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;
 pub const EARTH_MU_GPS: f64 = 3.9860058e14; // earth gravitational constant
