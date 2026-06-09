@@ -285,10 +285,12 @@ string; the E1-B/E1-C primary memory codes are embedded
 (`code::boc11()`); the receiver steps the signal's 4 ms code period; and
 `get_sat_list` tags Galileo PRNs from the signal. On the ION LimeSDR capture
 `--sig E1B` locks **E01/E04/E11** and holds a **40 s lock at 43–48 dB-Hz**. The
-I/NAV FEC layer — rate-1/2 Viterbi, 30×8 interleaver, CRC-24Q — is in
-([`galileo_inav.rs`](src/galileo_inav.rs)). **Remaining for an E1 *fix*:** I/NAV
-page-part sync + even/odd assembly, the word-type ephemeris fields (Step 4), and
-routing the per-4 ms-period tracking symbols into the decoder.
+**I/NAV page decoder** ([`galileo_inav.rs`](src/galileo_inav.rs)) is in and
+**decodes real, CRC-valid words**: per-4 ms symbols → preamble sync (with
+polarity) → de-interleave → Viterbi → even/odd page assembly → CRC-24Q → 128-bit
+word. On LimeSDR it pulls word types 1–5/0/6/9/10 from E01/E04/E11. **Remaining
+for an E1 *fix*:** extract the ephemeris from word types 1–5 (Step 4), and the
+GST time + `gnss-rtk` solver integration.
 
 Key differences from GPS L1 C/A that drive every change:
 
