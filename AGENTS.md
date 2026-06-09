@@ -69,16 +69,20 @@ check pseudorange / transmit-time / solver changes:
   (`searched → acquired → tracked → ephemeris → used-in-fix`) shows where SVs
   drop out.
 
-[`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one
-command: it builds release, runs to the first fix with `GNSS_TRUTH_ECEF` on,
-reads the `--json` summary (fix + funnel) from stdout plus the `RESID` stderr
-diagnostic, and prints the residual spread + the fix error vs truth with a
-**PASS/FAIL** verdict (non-zero exit when the fix is missing or worse than the
-~2 km gate). It **skips cleanly** (exit 0) when the fixture is absent. Read the
-result as: `resid` per SV ≈ a
-common constant (the rx clock bias); the **spread** is the geometry error
-(sub-km good, 100s of km means transmit-time/pseudorange is wrong); `fix error
-vs truth` should be well under the test's 0.02° (~2 km) gate.
+[`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one command.
+It builds release and runs two `--json`-driven checks, each **skipping cleanly**
+(exit 0) when its recording is absent, failing (non-zero) only if a *present*
+recording's check fails:
+
+- **GPS fix** (gpssim fixture): runs to the first fix with `GNSS_TRUTH_ECEF` on,
+  and prints the residual spread (from the `RESID` stderr diagnostic) + the fix
+  error vs truth with a **PASS/FAIL** verdict (gate ~2 km). Read it as: `resid`
+  per SV ≈ a common constant (the rx clock bias); the **spread** is the geometry
+  error (sub-km good, 100s of km means transmit-time/pseudorange is wrong).
+- **Galileo E1-B I/NAV decode** (PocketSDR, else ION LimeSDR): asserts Galileo
+  SVs track and decode CRC-valid I/NAV words. (A Galileo *fix* isn't possible yet
+  — ephemeris extraction + the solver are pending — so this guards the decode
+  chain; it graduates to a fix assertion once those land.)
 
 ```sh
 ./scripts/validate_fix.py
