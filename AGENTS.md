@@ -185,9 +185,10 @@ guesses. Tackle roughly top-to-bottom.
   + a `--sbas` sweep, replacing the dead `use_sbas` flag. (Detection only — no
   SBAS *decode* or ranging; not seen above the noise floor in any recording.)
 - ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
-  ([ephemeris.rs](src/ephemeris.rs)) feeds real captured LNAV subframes 1-3
-  through the decoders and range-checks the result (a≈26 560 km, ecc<0.03,
-  i0≈0.96 rad…), locking the bit-field offsets.
+  ([gps_lnav.rs](src/gps_lnav.rs)) feeds real captured LNAV subframes 1-3 through
+  the `decode_lnav_subframe{1,2,3}` parsers and range-checks the result (a≈26 560
+  km, ecc<0.03, i0≈0.96 rad…), locking the bit-field offsets. (`Ephemeris` itself
+  is now a constellation-agnostic data struct; the LNAV parsing lives in gps_lnav.)
 - ~~**`is_ephemeris_complete` → `Ephemeris::is_valid()`**~~
   ([ephemeris.rs](src/ephemeris.rs)): moved + broadened (now also checks `toc`,
   an eccentricity sanity bound, and `omg_dot`); constellation-agnostic on orbit
