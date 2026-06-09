@@ -12,7 +12,7 @@ use crate::constants::{
     P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_43, P2_46, P2_59, SC2RAD,
 };
 use crate::ephemeris::Ephemeris;
-use crate::fec::{G1, G2, crc24q, parity};
+use crate::fec::{G1, G2, conv_encode, crc24q, parity};
 
 /// Galileo inverts the G2 output symbol of the shared K=7 convolutional code.
 const G2_INVERTED: u8 = 1;
@@ -290,10 +290,105 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
     }
 }
 
+// ---- I/NAV encoder (inverse of the decoder; used by the synthetic generator) ----
+
+/// Write `len` bits (MSB first) of `val` at 1-indexed `start` in the 128-bit word.
+/// Signed values are two's-complement (the low `len` bits of `val as u64`).
+fn set_word_bits(bits: &mut [u8; 128], start: usize, len: usize, val: i64) {
+    let u = val as u64;
+    for (i, b) in bits[start - 1..start - 1 + len].iter_mut().enumerate() {
+        *b = ((u >> (len - 1 - i)) & 1) as u8;
+    }
+}
+
+/// Encode `eph` into the 128-bit I/NAV word of the given type — the exact inverse
+/// of [`decode_ephemeris_word`], same ICD offsets and scales.
+pub fn encode_ephemeris_word(eph: &Ephemeris, word_type: u8) -> InavWord {
+    let mut bits = [0u8; 128];
+    let r = |x: f64| x.round() as i64;
+    set_word_bits(&mut bits, 1, 6, word_type as i64);
+    match word_type {
+        1 => {
+            set_word_bits(&mut bits, 7, 10, eph.iode as i64);
+            set_word_bits(&mut bits, 17, 14, (eph.toe / 60) as i64);
+            set_word_bits(&mut bits, 31, 32, r(eph.m0 / (P2_31 * SC2RAD)));
+            set_word_bits(&mut bits, 63, 32, r(eph.ecc / P2_33));
+            set_word_bits(&mut bits, 95, 32, r(eph.a.sqrt() / P2_19));
+        }
+        2 => {
+            set_word_bits(&mut bits, 7, 10, eph.iode as i64);
+            set_word_bits(&mut bits, 17, 32, r(eph.omg0 / (P2_31 * SC2RAD)));
+            set_word_bits(&mut bits, 49, 32, r(eph.i0 / (P2_31 * SC2RAD)));
+            set_word_bits(&mut bits, 81, 32, r(eph.omg / (P2_31 * SC2RAD)));
+            set_word_bits(&mut bits, 113, 14, r(eph.i_dot / (P2_43 * SC2RAD)));
+        }
+        3 => {
+            set_word_bits(&mut bits, 7, 10, eph.iode as i64);
+            set_word_bits(&mut bits, 17, 24, r(eph.omg_dot / (P2_43 * SC2RAD)));
+            set_word_bits(&mut bits, 41, 16, r(eph.deln / (P2_43 * SC2RAD)));
+            set_word_bits(&mut bits, 57, 16, r(eph.cuc / P2_29));
+            set_word_bits(&mut bits, 73, 16, r(eph.cus / P2_29));
+            set_word_bits(&mut bits, 89, 16, r(eph.crc / P2_5));
+            set_word_bits(&mut bits, 105, 16, r(eph.crs / P2_5));
+        }
+        4 => {
+            set_word_bits(&mut bits, 7, 10, eph.iode as i64);
+            set_word_bits(&mut bits, 23, 16, r(eph.cic / P2_29));
+            set_word_bits(&mut bits, 39, 16, r(eph.cis / P2_29));
+            set_word_bits(&mut bits, 55, 14, (eph.toc / 60) as i64);
+            set_word_bits(&mut bits, 69, 31, r(eph.f0 / P2_34));
+            set_word_bits(&mut bits, 100, 21, r(eph.f1 / P2_46));
+            set_word_bits(&mut bits, 121, 6, r(eph.f2 / P2_59));
+        }
+        5 => {
+            set_word_bits(&mut bits, 48, 10, r(eph.tgd / P2_32));
+            set_word_bits(&mut bits, 74, 12, eph.week as i64);
+            set_word_bits(&mut bits, 86, 20, eph.tow as i64);
+        }
+        _ => {}
+    }
+    InavWord { word_type, bits }
+}
+
+/// Render one CRC-valid I/NAV page carrying `word` to its 500-symbol stream (the
+/// even + odd page parts, each `preamble + interleave(conv_encode(frame+tail))`).
+/// Inverse of `InavDecoder::push_symbol` → `assemble`.
+pub fn encode_inav_page(word: &InavWord) -> Vec<u8> {
+    let mut page = [0u8; 228];
+    page[2..114].copy_from_slice(&word.bits[..112]); // Data k → even part
+    page[114] = 1; // odd page-part flag
+    page[116..132].copy_from_slice(&word.bits[112..]); // Data j → odd part
+    let crc = crc24q(&page[..196]);
+    for (i, p) in page[196..220].iter_mut().enumerate() {
+        *p = ((crc >> (23 - i)) & 1) as u8;
+    }
+    let render = |frame: &[u8]| -> Vec<u8> {
+        let mut b = frame.to_vec();
+        b.extend([0u8; 6]); // convolutional tail
+        let mut part = PREAMBLE.to_vec();
+        part.extend(interleave(&conv_encode(&b, G2_INVERTED)));
+        part
+    };
+    let mut syms = render(&page[..114]);
+    syms.extend(render(&page[114..]));
+    syms
+}
+
+/// The I/NAV symbol stream (one symbol per 4 ms code period) broadcasting `eph` as
+/// word types 1-5, repeated `reps` times — for the synthetic E1 generator.
+pub fn encode_inav_stream(eph: &Ephemeris, reps: usize) -> Vec<u8> {
+    let mut syms = Vec::new();
+    for _ in 0..reps {
+        for wt in 1..=5u8 {
+            syms.extend(encode_inav_page(&encode_ephemeris_word(eph, wt)));
+        }
+    }
+    syms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fec::conv_encode;
 
     fn sample_bits(n: usize) -> Vec<u8> {
         (0..n).map(|i| ((i * 37 + 11) % 7 < 3) as u8).collect()
@@ -499,5 +594,68 @@ mod tests {
         assert!((eph.f0 - 1000.0 * P2_34).abs() < 1e-18);
         // Signedness: OmegaDot decoded as negative.
         assert!(eph.omg_dot < 0.0, "omg_dot={}", eph.omg_dot);
+    }
+
+    // A plausible Galileo MEO ephemeris, used by the encoder round-trip.
+    fn sample_eph() -> Ephemeris {
+        use gnss_rs::{constellation::Constellation, sv::SV};
+        let mut e = Ephemeris::new(SV::new(Constellation::Galileo, 1));
+        e.iode = 42;
+        e.toe = 36_000;
+        e.toc = 36_000;
+        e.week = 1234;
+        e.tow = 36_030;
+        e.a = 29_600_000.0;
+        e.ecc = 1.5e-4;
+        e.i0 = 0.96;
+        e.m0 = 0.5;
+        e.omg0 = 0.3;
+        e.omg = -1.0;
+        e.omg_dot = -5.0e-9;
+        e.deln = 2.6e-9;
+        e.cuc = 1.0e-6;
+        e.cus = 2.0e-6;
+        e.crc = 110.0;
+        e.crs = 50.0;
+        e.cic = 1.0e-7;
+        e.cis = -1.0e-7;
+        e.i_dot = 1.0e-10;
+        e.f0 = 1.0e-4;
+        e.f1 = 1.0e-12;
+        e.f2 = 0.0;
+        e.tgd = 5.0e-9;
+        e
+    }
+
+    // Encode an ephemeris to the I/NAV symbol stream, push it through the *real*
+    // streaming decoder, and check the fields come back within their quantization.
+    #[test]
+    fn inav_encode_decode_roundtrips_an_ephemeris() {
+        let eph = sample_eph();
+        let syms = encode_inav_stream(&eph, 2);
+        let mut dec = InavDecoder::new();
+        let mut got = Ephemeris::default();
+        let mut words = 0;
+        for &s in &syms {
+            if let Some(w) = dec.push_symbol(s) {
+                decode_ephemeris_word(&mut got, &w);
+                words += 1;
+            }
+        }
+        assert_eq!(words, 10, "two reps of word types 1-5 must decode");
+        got.ts_sec = 1.0;
+        assert!(got.is_valid(), "round-tripped ephemeris must be valid");
+        assert_eq!(got.week, eph.week);
+        assert_eq!(got.toe, eph.toe);
+        assert_eq!(got.toc, eph.toc);
+        assert_eq!(got.tow, eph.tow);
+        assert!((got.a - eph.a).abs() < 1.0, "a {} vs {}", got.a, eph.a);
+        assert!((got.ecc - eph.ecc).abs() < 1e-9);
+        assert!((got.i0 - eph.i0).abs() < 1e-9);
+        assert!((got.m0 - eph.m0).abs() < 1e-9);
+        assert!((got.omg0 - eph.omg0).abs() < 1e-9);
+        assert!((got.omg_dot - eph.omg_dot).abs() < 5e-13); // > 1 LSB (P2_43·SC2RAD)
+        assert!((got.crc - eph.crc).abs() < 0.1);
+        assert!((got.f0 - eph.f0).abs() < 1e-9);
     }
 }
