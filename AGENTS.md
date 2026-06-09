@@ -49,7 +49,8 @@ The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 > [resources/README.md](resources/README.md)), not downloaded.
 
 **When you change anything in the DSP/receiver path** (`channel.rs`,
-`navigation.rs`, `ephemeris.rs`, `solver.rs`, `receiver.rs`, `recording.rs`),
+`navigation.rs`/`gps_lnav.rs`/`galileo_inav.rs`, `ephemeris.rs`, `solver.rs`,
+`receiver.rs`, `recording.rs`),
 run the gpssim integration tests — they are the regression signal that the end-
 to-end receiver still acquires, tracks, decodes, and solves.
 
@@ -216,8 +217,8 @@ guesses. Tackle roughly top-to-bottom.
   cross-thread. Most locks fire on state *transitions* (not per tick), but
   batching per-channel updates into one per-ms apply would remove the contention
   and the double-lock at the cn0 update.
-- **`nav.bits` uses `rotate_left(1)`** on an 18 KB buffer per nav symbol
-  ([navigation.rs](src/navigation.rs)): same anti-pattern as the old `History`,
+- **`LnavState.bits` uses `rotate_left(1)`** on an 18 KB buffer per nav symbol
+  ([gps_lnav.rs](src/gps_lnav.rs)): same anti-pattern as the old `History`,
   but at ~50 Hz it's negligible. Fix for consistency, not speed.
 
 **Multi-constellation**
@@ -234,8 +235,11 @@ The rest are correct refactors but mostly scaffolding until there's a second
   `code::Signal` (in [code.rs](src/code.rs)) carries the carrier/code params and
   the spreading code, threaded through channel/device/network/receiver/main. It
   is the seam the Galileo E1 work builds on.
-- Extract navigation decoding (~440 lines of `impl Channel` in
-  [navigation.rs](src/navigation.rs)) behind a `NavigationDecoder` trait.
+- ~~Extract navigation decoding behind a generic dispatch~~ — **done**:
+  `nav_decode` ([navigation.rs](src/navigation.rs)) dispatches by constellation;
+  GPS/QZSS LNAV lives in [gps_lnav.rs](src/gps_lnav.rs), Galileo I/NAV in
+  [galileo_inav.rs](src/galileo_inav.rs). (A `NavigationDecoder` trait could
+  formalize it further, but the module split already removes the GPS-centricity.)
 - Galileo E1 needs a BOC(1,1)-aware correlator, embedded 4092-chip memory codes,
   and an I/NAV decoder (FEC + interleaving); GLONASS L1 is FDMA (per-SV carrier),
   which breaks the single-IF assumption end-to-end. Both rank well below QZSS.
@@ -266,7 +270,7 @@ Without these gnss-rcv cannot integrate with any external tool:
 | **Troposphere model** (Saastamoinen) | ✅ Done — standard-atmosphere ZHD+ZWD, slant-mapped, applied per SV in `solver.rs`. |
 | **Per-SV ~0.5 ms bias** | Open; residual visible in `validate_fix.py` spread. |
 | **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers to ~2038; needs a date-anchored resolver (known real-world recordings already show "2032 GPST"). |
-| **Sustained nav bit-sync on marginal recordings** | Open. The bit-sync *logic* is sound — a clean synthetic SV holds sync with zero loss at 40–50 dB-Hz in both the 2.046 MHz and SJTU 25 MHz/fi=fs/4 regimes (`examples/bitsync_bench.rs`). But SJTU/HackRF lose sync after ~1 subframe: degraded real prompt-I (the 20 ms coherent nav integration `nav_mean_ip` collapses below `THRESHOLD_LOST`) **plus** a brittle recovery path — a single failed frame-sync check hard-resets both `bit_sync` and `nav_sync` (navigation.rs ~471), forcing a full ~7 s re-sync, so 3 *consecutive* clean subframes rarely line up. Fix: gentler sync recovery (hysteresis / don't hard-reset on one miss) and/or tighter carrier tracking; validate that the recordings that already fix still do. |
+| **Sustained nav bit-sync on marginal recordings** | Open. The bit-sync *logic* is sound — a clean synthetic SV holds sync with zero loss at 40–50 dB-Hz in both the 2.046 MHz and SJTU 25 MHz/fi=fs/4 regimes (`examples/bitsync_bench.rs`). But SJTU/HackRF lose sync after ~1 subframe: degraded real prompt-I (the 20 ms coherent nav integration `nav_mean_ip` collapses below `THRESHOLD_LOST`) **plus** a brittle recovery path — a single failed frame-sync check hard-resets both `bit_sync` and `nav_sync` (`gps_lnav.rs`), forcing a full ~7 s re-sync, so 3 *consecutive* clean subframes rarely line up. Fix: gentler sync recovery (hysteresis / don't hard-reset on one miss) and/or tighter carrier tracking; validate that the recordings that already fix still do. |
 
 ### C. Constellation & frequency gaps
 
@@ -336,8 +340,10 @@ Key differences from GPS L1 C/A that drive every change:
   weeks; make it constellation-aware.
 - The orbital math (a, e, i0, M0, ω, Ω0, perturbations) is identical to GPS — no new fields.
 
-**Step 5 — `src/navigation.rs`: I/NAV decoder**
-New functions, all independently unit-testable with known I/NAV frames from the ICD:
+**Step 5 — `src/galileo_inav.rs`: I/NAV decoder** (page decode ✅ done; ephemeris fields left)
+The page decoder (sync, FEC, CRC, word assembly) is done and emits CRC-valid
+words; what remains is extracting the ephemeris fields from word types 1-5 —
+independently unit-testable with a known I/NAV word from the ICD:
 ```
 nav_decode_inav()             — top-level: sync → FEC → CRC → word dispatch
 nav_sync_e1b_symbol()         — 1 symbol per 4 ms code period (vs 20 ms/bit for GPS)
