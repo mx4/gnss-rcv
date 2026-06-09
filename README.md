@@ -243,10 +243,10 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
 - [x] Saastamoinen troposphere correction in the solver
 - [x] Hermetic synthetic-signal tests ([`src/synth.rs`](src/synth.rs) — multi-SV
       L1CA with Doppler / C/N0 noise, no recording needed)
-- [~] Galileo E1 — **acquires + tracks + decodes I/NAV pages** (E1-B memory codes
-      + BOC(1,1); `--sig E1B` decodes real CRC-valid I/NAV words from E01/E04/E11
-      on the LimeSDR capture). Next: ephemeris fields from word types 1–5 + GST
-      time/solver integration (for an E1 fix)
+- [~] Galileo E1 — **acquires + tracks + decodes I/NAV + extracts the ephemeris**
+      (E1-B memory codes + BOC(1,1); `--sig E1B` decodes real CRC-valid I/NAV words
+      and reconstructs a valid orbit — E09/E11 complete on the LimeSDR capture).
+      Next: GST→GPST time + solver integration (for an E1 fix)
 - [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view

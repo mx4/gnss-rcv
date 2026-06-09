@@ -84,9 +84,10 @@ recording's check fails:
   per SV ≈ a common constant (the rx clock bias); the **spread** is the geometry
   error (sub-km good, 100s of km means transmit-time/pseudorange is wrong).
 - **Galileo E1-B I/NAV decode** (PocketSDR, else ION LimeSDR): asserts Galileo
-  SVs track and decode CRC-valid I/NAV words. (A Galileo *fix* isn't possible yet
-  — ephemeris extraction + the solver are pending — so this guards the decode
-  chain; it graduates to a fix assertion once those land.)
+  SVs track and decode CRC-valid I/NAV words. (The ephemeris extraction now lands
+  too — E09/E11 complete a valid orbit on LimeSDR — but a Galileo *fix* still
+  needs the GST→GPST time + solver feed, so this guards the decode chain; it
+  graduates to a fix assertion once those land.)
 
 ```sh
 ./scripts/validate_fix.py
@@ -301,9 +302,12 @@ string; the E1-B/E1-C primary memory codes are embedded
 **I/NAV page decoder** ([`galileo_inav.rs`](src/galileo_inav.rs)) is in and
 **decodes real, CRC-valid words**: per-4 ms symbols → preamble sync (with
 polarity) → de-interleave → Viterbi → even/odd page assembly → CRC-24Q → 128-bit
-word. On LimeSDR it pulls word types 1–5/0/6/9/10 from E01/E04/E11. **Remaining
-for an E1 *fix*:** extract the ephemeris from word types 1–5 (Step 4), and the
-GST time + `gnss-rtk` solver integration.
+word. On LimeSDR it pulls word types 1–5/0/6/9/10 from E01/E04/E09/E11. The
+**ephemeris extraction** from word types 1–5 is now in too
+(`galileo_inav::decode_ephemeris_word`, Steps 4–5): on LimeSDR **E09 and E11
+complete a physically valid orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km).
+**Remaining for an E1 *fix*:** the GST→GPST time + `gnss-rtk` solver integration
+(Step 6).
 
 Key differences from GPS L1 C/A that drive every change:
 
@@ -342,33 +346,30 @@ Key differences from GPS L1 C/A that drive every change:
   The receiver steps the signal's 4 ms code period. Stats / xcorr rejection are
   already generic.
 
-**Step 4 — `src/ephemeris.rs`: Galileo fields**
-- Add `bgd_e5a_e1: f64` and `bgd_e5b_e1: f64` (replaces `tgd` for Galileo; use `bgd_e5a_e1`
-  as the L1 group-delay correction for E1-only reception).
-- `is_valid()`: the GPS week range check `(2048..3000).contains(&self.week)` rejects Galileo
-  weeks; make it constellation-aware.
-- The orbital math (a, e, i0, M0, ω, Ω0, perturbations) is identical to GPS — no new fields.
+**Step 4 — `src/ephemeris.rs`: Galileo fields** ✅ DONE
+- `Ephemeris` is constellation-agnostic (the GPS LNAV parsers moved to
+  `gps_lnav.rs`); the Keplerian/clock fields are shared as-is. BGD(E1,E5a) is
+  stored in the existing `tgd` field (the E1 group delay for E1-only reception);
+  separate `bgd_*` fields can come later if E5 is added.
+- `is_valid()` is constellation-agnostic — it gates on `week != 0` (no GPS week
+  range) plus an orbit-size bound that passes both GPS and Galileo MEO.
 
-**Step 5 — `src/galileo_inav.rs`: I/NAV decoder** (page decode ✅ done; ephemeris fields left)
-The page decoder (sync, FEC, CRC, word assembly) is done and emits CRC-valid
-words; what remains is extracting the ephemeris fields from word types 1-5 —
-independently unit-testable with a known I/NAV word from the ICD:
-```
-nav_decode_inav()             — top-level: sync → FEC → CRC → word dispatch
-nav_sync_e1b_symbol()         — 1 symbol per 4 ms code period (vs 20 ms/bit for GPS)
-nav_viterbi_decode(symbols)   — rate-1/2 K=7 Viterbi, 500 channel symbols → 250 bits
-nav_deinterleave_8x30(bits)   — undo the 8×30 block interleaver before Viterbi
-nav_crc24q(data) -> bool      — CRC-24Q verification per page
-nav_decode_inav_word1..4()    — Keplerian elements from ICD Tables 25–29
-```
-Word type content:
-- **Word 1**: IODnav, t_oe, M0, e, √a
-- **Word 2**: IODnav, Ω0, i0, ω, i_dot
-- **Word 3**: IODnav, Ω_dot, Δn, C_uc/C_us/C_rc/C_rs, SISA
-- **Word 4**: IODnav, C_ic/C_is, t_oc, a_f0, a_f1, a_f2, BGD(E1,E5a), BGD(E1,E5b)
+**Step 5 — `src/galileo_inav.rs`: I/NAV ephemeris extraction** ✅ DONE
+The page decoder (sync → FEC → CRC → CRC-valid 128-bit word) and the ephemeris
+extraction are both in. `decode_ephemeris_word(&mut Ephemeris, &InavWord)` fills
+the orbit/clock per word type, `ubits`/`sbits` reading the ICD bit layout
+(offsets + scales cross-checked vs gnss-sdr's `Galileo_INAV.h`):
+- **Word 1**: IODnav, t0e (60 s LSB), M0, e, √a
+- **Word 2**: Ω0, i0, ω, i_dot
+- **Word 3**: Ω_dot, Δn, C_uc/C_us/C_rc/C_rs
+- **Word 4**: C_ic/C_is, t0c (60 s LSB), a_f0/a_f1/a_f2 (2^-34/-46/-59)
+- **Word 5**: BGD(E1,E5a)→`tgd`, **GST week** (the only page carrying it), GST TOW
 
-The Viterbi decoder (~150 lines, rate-1/2 K=7) is the hardest single piece.
-Reference: Galileo OS SIS ICD (freely downloadable from ESA GSC), Tables 4 and 24–29.
+Tested by `decodes_inav_words_into_a_valid_ephemeris` (hermetic — locks every
+offset, scale, the 60 s LSBs, and signedness) and confirmed on the LimeSDR
+capture (E09/E11 orbits complete, is_valid). The Viterbi decoder (rate-1/2 K=7)
+was the hardest single piece. Reference: Galileo OS SIS ICD (ESA GSC), Tables 4
+and 24–29.
 
 **Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD**
 - Add `EARTH_MU_GAL = 3.986004418e14` (Galileo ICD value; GPS is `3.9860058e14` — differs
