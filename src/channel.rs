@@ -38,12 +38,18 @@ const B_FLL_WIDE: f64 = 10.0; // bandwidth of FLL wide Hz
 const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
-/// Effective group delay of the code (DLL) loop. The tracked code phase lags the
-/// true one by the code-Doppler times this delay, so the transmit time carries a
-/// per-SV bias ∝ Doppler; we add it back (see `code_off_sec` capture). It's a loop
-/// property (≈ 1/loop-gain), calibrated to null the gpssim residual slope, hence
-/// recording-independent.
-const TAU_DLL: f64 = 0.157; // s
+/// Effective early-late discriminator slope (normalized output per unit code
+/// error). Depends on the correlation-function shape and correlator spacing
+/// (`SP_CORR`) — so it's signal-specific (BPSK L1CA here; E1's BOC differs) and
+/// also folds in our 1st-order-loop approximation. Calibrated to null the residual
+/// Doppler slope (gpssim). The only empirical factor in `TAU_DLL`.
+const DLL_DISC_GAIN: f64 = 3.18;
+/// Group delay of the code (DLL) loop = 1/(loop velocity gain). `run_dll` corrects
+/// `code_off` at rate `(B_DLL/0.25)·DLL_DISC_GAIN` per unit error, so a code-Doppler
+/// ramp leaves a steady lag of (rate)·τ. The tracked code phase therefore lags the
+/// true one by code-Doppler·τ, a per-SV transmit-time bias ∝ Doppler we add back
+/// (see `code_off_sec` capture). Derived from B_DLL so it tracks any loop retune.
+const TAU_DLL: f64 = 0.25 / (B_DLL * DLL_DISC_GAIN); // ≈ 0.157 s
 
 // Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
 // captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
