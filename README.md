@@ -271,11 +271,7 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
       real CRC-valid I/NAV words, reconstructs valid orbits, and the GST time + orbit
       feed gnss-rtk). On the LimeSDR capture all 5 tracked SVs (E01/E04/E09/E11/E19)
       complete an ephemeris and produce a fix **~4 km from the site truth (52.177,
-      4.488, Netherlands)** — within the open per-SV ~0.5 ms pseudorange bias. A
-      Costas half-symbol-rate (±125 Hz) false lock had silently corrupted the
-      symbol stream of 3 of the 5 SVs; it's now handled both in the decoder and at
-      the root, by a code-carrier Doppler check that snaps the carrier onto the
-      true lock
+      4.488, Netherlands)** — within the open per-SV ~0.5 ms pseudorange bias.
 - [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view
