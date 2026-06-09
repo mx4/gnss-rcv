@@ -90,8 +90,8 @@ $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin -t <format>
 
 ### Sample rate & intermediate frequency
 The PRN code is resampled to the actual rate, so any sampling frequency works.
-Set the rate with `--fs` and the intermediate frequency with `--fi` (both in Hz,
-default 2.046 MHz / 0 Hz):
+Set the rate with `--fs` and the intermediate frequency with `--fi` (in Hz, or
+with a K/M/G suffix — `--fs 10M --fi 420K`; default 2.046 MHz / 0 Hz):
 ```sh
 # 1-bit real recording sampled at 5.456 MHz (IF 4.092 MHz aliases to 1.364 MHz):
 $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
