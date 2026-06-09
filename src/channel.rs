@@ -38,6 +38,12 @@ const B_FLL_WIDE: f64 = 10.0; // bandwidth of FLL wide Hz
 const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
+/// Effective group delay of the code (DLL) loop. The tracked code phase lags the
+/// true one by the code-Doppler times this delay, so the transmit time carries a
+/// per-SV bias ∝ Doppler; we add it back (see `code_off_sec` capture). It's a loop
+/// property (≈ 1/loop-gain), calibrated to null the gpssim residual slope, hence
+/// recording-independent.
+const TAU_DLL: f64 = 0.157; // s
 
 // Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
 // captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
@@ -787,7 +793,10 @@ impl Channel {
         if std::env::var("GAL_DOPP_CHECK").is_ok() {
             log::warn!(
                 "{}: DOPPCHK pll_dopp={:7.1} code_dopp={:7.1} k={:+.0}",
-                self.sv, self.trk.doppler_hz, code_dopp, k,
+                self.sv,
+                self.trk.doppler_hz,
+                code_dopp,
+                k,
             );
         }
         if k != 0.0 {
@@ -796,7 +805,10 @@ impl Channel {
             self.update_state_doppler_hz();
             log::warn!(
                 "{}: half-rate false lock corrected {:+.0} Hz -> {:.0} Hz at ts={:.1}",
-                self.sv, k * step, self.trk.doppler_hz, self.ts_sec,
+                self.sv,
+                k * step,
+                self.trk.doppler_hz,
+                self.ts_sec,
             );
         }
         // Re-baseline so the next window measures the post-correction state.
@@ -832,7 +844,13 @@ impl Channel {
         // period. The solver forms the transmit phase as trk_phase - code_off; the
         // absolute code_off (common cross-SV reference from acquisition) carries the
         // sub-ms range and must NOT be differenced away at the anchor.
-        self.nav.eph.code_off_sec = self.trk.code_off_sec;
+        //
+        // The code (DLL) loop has a finite group delay, so the tracked code phase
+        // lags the true one by the code-Doppler times that delay: (doppler/fc)*TAU_DLL.
+        // Uncompensated this is a per-SV transmit-time bias ∝ Doppler (verified on
+        // gpssim: residual slope ~-0.03 m/Hz, ~170 m spread). Add it back.
+        let dll_lag = self.trk.doppler_hz / self.fc * TAU_DLL;
+        self.nav.eph.code_off_sec = self.trk.code_off_sec + dll_lag;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();
