@@ -40,5 +40,6 @@ pub const P2_59: f64 = p2(59); // Galileo af2
 pub const SC2RAD: f64 = 3.141_592_653_589_8;
 
 pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;
-pub const EARTH_MU_GPS: f64 = 3.9860058e14; // earth gravitational constant
-pub const EARTH_ROTATION_RATE: f64 = 7.2921151467e-5;
+pub const EARTH_MU_GPS: f64 = 3.9860058e14; // WGS-84 µ (IS-GPS-200)
+pub const EARTH_MU_GAL: f64 = 3.986004418e14; // GTRF µ (Galileo OS SIS ICD)
+pub const EARTH_ROTATION_RATE: f64 = 7.2921151467e-5; // shared GPS/Galileo Ωe

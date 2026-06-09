@@ -11,15 +11,26 @@ use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    constants::{EARTH_MU_GPS, EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
+    constants::{EARTH_MU_GAL, EARTH_MU_GPS, EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
     ephemeris::Ephemeris as RxEphemeris,
     state::GnssState,
 };
+use gnss_rs::constellation::Constellation;
 
 const PI: f64 = std::f64::consts::PI;
 
+/// Earth gravitational constant for this SV's constellation. GPS (WGS-84) and
+/// Galileo (GTRF) publish slightly different µ; using the wrong one shifts the
+/// computed SV position by ~1 mm — negligible, but free to get right.
+fn earth_mu(sv: SV) -> f64 {
+    match sv.constellation {
+        Constellation::Galileo => EARTH_MU_GAL,
+        _ => EARTH_MU_GPS,
+    }
+}
+
 fn get_eccentric_anomaly(eph: &RxEphemeris, t_k: f64) -> f64 {
-    let n0 = (EARTH_MU_GPS / eph.a.powi(3)).sqrt();
+    let n0 = (earth_mu(eph.sv) / eph.a.powi(3)).sqrt();
     let n = n0 + eph.deln;
     let mk = eph.m0 + n * t_k;
 
@@ -48,7 +59,7 @@ fn normalize_week_seconds(mut dt: f64) -> f64 {
 }
 
 fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
-    let f_rel = -2.0 * EARTH_MU_GPS.sqrt() / SPEED_OF_LIGHT.powi(2);
+    let f_rel = -2.0 * earth_mu(eph.sv).sqrt() / SPEED_OF_LIGHT.powi(2);
 
     let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
     let ecc_anomaly = get_eccentric_anomaly(eph, dte);
@@ -488,5 +499,53 @@ impl PositionSolver {
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gnss_rtk::prelude::TimeScale;
+
+    // A realistic Galileo MEO ephemeris (near-circular, ~56° inclination).
+    fn galileo_meo_eph() -> RxEphemeris {
+        let mut e = RxEphemeris::new(SV::new(Constellation::Galileo, 9));
+        e.a = 29_600_000.0; // Galileo semi-major axis (vs GPS ~26 560 km)
+        e.ecc = 1.5e-4;
+        e.i0 = 0.96;
+        e.omg0 = 0.3;
+        e.omg = -1.0;
+        e.m0 = 0.5;
+        e.toe = 61_800;
+        e.week = 947;
+        e.toe_gpst = Epoch::from_time_of_week(947, 61_800 * 1_000_000_000, TimeScale::GST);
+        e.toc_gpst = e.toe_gpst;
+        e
+    }
+
+    #[test]
+    fn earth_mu_is_constellation_specific() {
+        assert_eq!(earth_mu(SV::new(Constellation::Galileo, 1)), EARTH_MU_GAL);
+        assert_eq!(earth_mu(SV::new(Constellation::GPS, 1)), EARTH_MU_GPS);
+        assert_eq!(earth_mu(SV::new(Constellation::QZSS, 1)), EARTH_MU_GPS);
+    }
+
+    // The orbit math is shared with the (end-to-end validated) GPS path; this
+    // guards that the Galileo branch — its µ and a GST-referenced toe — yields a
+    // physically sensible MEO position rather than garbage.
+    #[test]
+    fn galileo_ephemeris_computes_a_meo_position() {
+        let e = galileo_meo_eph();
+        let (x, y, z) = compute_sv_position_ecef(&e, e.toe_gpst);
+        let r = (x * x + y * y + z * z).sqrt();
+        // At t = toe the geocentric radius is a(1 - e·cosE0): within a·e of a.
+        assert!((r - e.a).abs() <= e.a * e.ecc + 1.0, "r={r}");
+        // ~23 000 km above the WGS-84 surface — Galileo MEO altitude.
+        let h = r - 6_378_137.0;
+        assert!((20_000_000.0..25_000_000.0).contains(&h), "h={h}");
+        // Clock correction with a zero clock model is just the relativistic term:
+        // bounded (sub-microsecond) and finite.
+        let dt = get_sv_clock_correction(&e, e.toe_gpst);
+        assert!(dt.abs() < 1e-6, "dt={dt}");
     }
 }

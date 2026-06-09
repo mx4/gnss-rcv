@@ -344,58 +344,18 @@ impl Channel {
         );
     }
 
-    fn update_gpst_time(&mut self, tow_gpst: Epoch) {
-        self.pub_state.lock().unwrap().tow_gpst = tow_gpst;
-
-        (self.pub_state.lock().unwrap().update_func.func)();
-    }
-
     fn nav_subframe_post(&mut self) {
-        if self.is_ephemeris_complete() {
-            self.pub_state
-                .lock()
-                .unwrap()
-                .channels
-                .get_mut(&self.sv)
-                .unwrap()
-                .has_eph = true;
-        }
+        // GPS LNAV carries the TOW in every subframe's HOW, so build the GPST
+        // epochs and run the shared transmit-time anchor each subframe (the
+        // anchor itself pins only once — see Channel::nav_anchor_tx).
         if self.nav.eph.week != 0 {
             let week_to_secs = self.nav.eph.week * SECS_PER_WEEK;
-            let tow_secs_gpst = week_to_secs + self.nav.eph.tow;
-            let toe_secs_gpst = week_to_secs + self.nav.eph.toe;
-            let toc_secs_gpst = week_to_secs + self.nav.eph.toc;
-
-            self.nav.eph.tow_gpst = Epoch::from_gpst_seconds(tow_secs_gpst.into());
-            self.nav.eph.toe_gpst = Epoch::from_gpst_seconds(toe_secs_gpst.into());
-            self.nav.eph.toc_gpst = Epoch::from_gpst_seconds(toc_secs_gpst.into());
-
-            self.nav.eph.ts_sec = self.ts_sec;
-
-            // Pin transmit time once when ephemeris is complete. Re-anchoring every
-            // subframe reset c_anchor and made sub-ms inter-SV range track (c-c_anchor)
-            // instead of absolute code phase. After re-acquisition tx_anchored is
-            // cleared in tracking_init until the next nav subframe re-anchors.
-            if self.is_ephemeris_complete() && !self.nav.eph.tx_anchored {
-                // Anchor only the INTEGER period count at the TOW edge (a code
-                // epoch). The sub-ms range must come from the absolute code_off at
-                // the fix (which is on a common cross-SV reference, since all SVs
-                // are acquired against the same IQ buffer). Subtracting code_off
-                // here would cancel the absolute sub-ms range in the solver's
-                // elapsed = phase_now - tow_trk_phase, biasing each SV by its
-                // arbitrary acquisition code phase (~±0.5 ms = ±150 km).
-                self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
-                self.nav.eph.tx_tow_gpst = self.nav.eph.tow_gpst;
-                self.nav.eph.tx_anchor_ts_sec = self.ts_sec;
-                self.nav.eph.tx_anchored = true;
-                log::warn!(
-                    "{}: tx anchored tow={:?} phase={:.6}",
-                    self.sv,
-                    self.nav.eph.tx_tow_gpst,
-                    self.nav.eph.tow_trk_phase,
-                );
-            }
-
+            self.nav.eph.tow_gpst =
+                Epoch::from_gpst_seconds((week_to_secs + self.nav.eph.tow).into());
+            self.nav.eph.toe_gpst =
+                Epoch::from_gpst_seconds((week_to_secs + self.nav.eph.toe).into());
+            self.nav.eph.toc_gpst =
+                Epoch::from_gpst_seconds((week_to_secs + self.nav.eph.toc).into());
             log::warn!(
                 "{}: tow={:?} tgd={:+.3e} toe={:?}",
                 self.sv,
@@ -403,8 +363,7 @@ impl Channel {
                 self.nav.eph.tgd,
                 self.nav.eph.toe_gpst
             );
-
-            self.update_gpst_time(self.nav.eph.tow_gpst);
+            self.nav_anchor_tx();
         }
     }
 
