@@ -4,7 +4,7 @@
 //! constellation to the message decoder for that signal:
 //!   - GPS / QZSS L1 C/A LNAV → [gps_lnav](crate::gps_lnav),
 //!   - Galileo E1-B I/NAV → [galileo_inav](crate::galileo_inav),
-//!   - SBAS → a stub for now.
+//!   - SBAS L1 (EGNOS/WAAS…) → [sbas_l1](crate::sbas_l1).
 //!
 //! The shared, generic output is `Navigation::eph` (the decoded ephemeris the
 //! solver consumes); each signal keeps its own decoder state next to it.
@@ -13,6 +13,7 @@ use crate::channel::Channel;
 use crate::ephemeris::Ephemeris;
 use crate::galileo_inav::{InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
+use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{Epoch, TimeScale};
@@ -21,8 +22,9 @@ use gnss_rtk::prelude::{Epoch, TimeScale};
 /// solver) plus the per-signal decoder state.
 pub struct Navigation {
     pub eph: Ephemeris,
-    pub(crate) lnav: LnavState,   // GPS / QZSS L1 C/A
-    pub(crate) inav: InavDecoder, // Galileo E1-B
+    pub(crate) lnav: LnavState,     // GPS / QZSS L1 C/A
+    pub(crate) inav: InavDecoder,   // Galileo E1-B
+    pub(crate) sbas: SbasL1Channel, // SBAS L1
 }
 
 impl Navigation {
@@ -31,6 +33,7 @@ impl Navigation {
             eph: Ephemeris::new(sv),
             lnav: LnavState::new(),
             inav: InavDecoder::new(),
+            sbas: SbasL1Channel::new(),
         }
     }
 
@@ -38,6 +41,7 @@ impl Navigation {
     pub fn init(&mut self) {
         self.lnav.reset();
         self.inav = InavDecoder::new();
+        self.sbas = SbasL1Channel::new();
     }
 }
 
@@ -52,8 +56,16 @@ impl Channel {
         }
     }
 
+    /// SBAS L1 (EGNOS/WAAS/MSAS…): feed prompt-I per 1 ms code period to the
+    /// streaming decoder; on a CRC-valid 250-bit message, log its type.
     fn nav_decode_sbas(&mut self) {
-        log::warn!("{}: SBAS frame", self.sv);
+        let Some(&c_p) = self.hist.corr_p.back() else {
+            return;
+        };
+        if let Some(msg) = self.nav.sbas.push_period(c_p.re) {
+            self.stats.subframes += 1;
+            log::warn!("{}: SBAS L1 message type {} (CRC ok)", self.sv, msg.mtype);
+        }
     }
 
     /// Galileo E1-B I/NAV: feed one symbol per 4 ms code period (the sign of
