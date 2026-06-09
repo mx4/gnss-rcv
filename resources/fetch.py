@@ -170,7 +170,8 @@ def is_present(rec: Rec) -> bool:
 
 
 def runcmd(rec: Rec) -> str:
-    return "cargo run --release -- -f resources/%s %s" % (rec.dest, rec.flags)
+    # Just the arguments (prefix them with `cargo run --release --`).
+    return "-f resources/%s %s" % (rec.dest, rec.flags)
 
 
 def tag_chips(rec: Rec) -> str:
