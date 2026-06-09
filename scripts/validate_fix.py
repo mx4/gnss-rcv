@@ -180,6 +180,42 @@ def validate_galileo_decode():
     return "PASS" if all(_check_galileo_recording(*c) for c in present) else "FAIL"
 
 
+# --- SBAS L1: acquire -> track -> decode EGNOS/WAAS messages ------------------
+
+# L1 captures from a region with an SBAS GEO overhead. CTTC (Spain) sees EGNOS
+# S120 (Inmarsat-3F2) and S126 (Inmarsat-4F2). (file, fmt_args, num_msec)
+SBAS_CANDIDATES = [
+    ("resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
+     ["-t", "2xi16", "--fs", "4000000"], 40000),  # EGNOS over Spain
+]
+SBAS_MIN_MSGS = 5  # CRC-valid SBAS L1 messages across all GEOs
+
+
+def validate_sbas_decode():
+    """-> 'PASS' / 'FAIL' / 'SKIP'."""
+    print("\n=== SBAS L1 message decode (EGNOS/WAAS) ===")
+    present = next(((f, a, n) for f, a, n in SBAS_CANDIDATES if os.path.isfile(f)), None)
+    if present is None:
+        print("SKIP: no SBAS recording present -- fetch one with ./resources/fetch.py cttc")
+        return "SKIP"
+    path, fmt_args, num_msec = present
+    print(f"using {path} ({num_msec // 1000}s)")
+    # --sats 1 keeps the GPS search minimal; --sbas adds the PRN 120-138 block.
+    summary, _ = run_json(["-f", path, *fmt_args, "--sats", "1", "--sbas",
+                           "--num-msec", str(num_msec)])
+    if summary is None:
+        print("FAIL: could not parse --json output")
+        return "FAIL"
+    # SBAS SVs are S-prefixed; CRC-valid messages are counted in "subframes".
+    sbas = [s for s in summary.get("sats", []) if s.get("sv", "").startswith("S")]
+    msgs = sum(s.get("subframes", 0) for s in sbas)
+    geos = [s["sv"] for s in sbas if s.get("subframes", 0) > 0]
+    print(f"  {msgs} CRC-valid SBAS messages from {', '.join(geos) or 'none'}")
+    ok = msgs >= SBAS_MIN_MSGS and len(geos) >= 1
+    print(f"  RESULT: {'PASS' if ok else 'FAIL'} (need >= {SBAS_MIN_MSGS} messages from >= 1 GEO)")
+    return "PASS" if ok else "FAIL"
+
+
 def main() -> int:
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if root.returncode != 0:
@@ -195,6 +231,7 @@ def main() -> int:
     results = {
         "GPS fix": validate_gps_fix(),
         "Galileo I/NAV": validate_galileo_decode(),
+        "SBAS L1": validate_sbas_decode(),
     }
 
     print("\n=== summary ===")
