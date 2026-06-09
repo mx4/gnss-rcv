@@ -99,10 +99,15 @@ const PREAMBLE: [u8; 10] = [0, 1, 0, 1, 1, 0, 0, 0, 0, 0];
 /// Each page part is 250 symbols: the preamble then 240 FEC symbols.
 const PAGE_PART_SYMBOLS: usize = 250;
 
-/// A decoded, CRC-valid I/NAV word: its 6-bit word type and 128 data bits.
+/// A decoded, CRC-valid I/NAV word: its 6-bit word type, 128 data bits, and the
+/// 40-bit OSNMA field. The OSNMA field is the odd page's "Reserved 1"
+/// (`page[132..172]`, just after the 16-bit Data j); it carries the
+/// authentication payload (NMA header + DSM/MACK sections) and is all-zero when
+/// the SV transmits no OSNMA. Bit order matches `bits`: MSB first, one bit per byte.
 pub struct InavWord {
     pub word_type: u8,
     pub bits: [u8; 128],
+    pub osnma: [u8; 40],
 }
 
 /// Streaming Galileo E1-B I/NAV page decoder. Fed one symbol per 4 ms code
@@ -172,9 +177,12 @@ impl InavDecoder {
         let mut bits = [0u8; 128];
         bits[..112].copy_from_slice(&page[2..114]); // Data k (1/2)
         bits[112..].copy_from_slice(&page[116..132]); // Data j (2/2)
+        let mut osnma = [0u8; 40];
+        osnma.copy_from_slice(&page[132..172]); // Reserved 1 = OSNMA data
         Some(InavWord {
             word_type: bits_to_u32(&bits[..6]) as u8,
             bits,
+            osnma,
         })
     }
 }
@@ -347,7 +355,11 @@ pub fn encode_ephemeris_word(eph: &Ephemeris, word_type: u8) -> InavWord {
         }
         _ => {}
     }
-    InavWord { word_type, bits }
+    InavWord {
+        word_type,
+        bits,
+        osnma: [0u8; 40],
+    }
 }
 
 /// Render one CRC-valid I/NAV page carrying `word` to its 500-symbol stream (the
@@ -358,6 +370,7 @@ pub fn encode_inav_page(word: &InavWord) -> Vec<u8> {
     page[2..114].copy_from_slice(&word.bits[..112]); // Data k → even part
     page[114] = 1; // odd page-part flag
     page[116..132].copy_from_slice(&word.bits[112..]); // Data j → odd part
+    page[132..172].copy_from_slice(&word.osnma); // OSNMA data → odd part Reserved 1
     let crc = crc24q(&page[..196]);
     for (i, p) in page[196..220].iter_mut().enumerate() {
         *p = ((crc >> (23 - i)) & 1) as u8;
@@ -494,7 +507,11 @@ mod tests {
         for &(start, len, val) in fields {
             set_ubits(&mut bits, start - 1, len, val);
         }
-        InavWord { word_type, bits }
+        InavWord {
+            word_type,
+            bits,
+            osnma: [0u8; 40],
+        }
     }
 
     // Feed canned word types 1-5 (raw fields -> realistic Galileo MEO ephemeris)
@@ -657,5 +674,37 @@ mod tests {
         assert!((got.omg_dot - eph.omg_dot).abs() < 5e-13); // > 1 LSB (P2_43·SC2RAD)
         assert!((got.crc - eph.crc).abs() < 0.1);
         assert!((got.f0 - eph.f0).abs() < 1e-9);
+    }
+
+    // The 40-bit OSNMA field (odd page Reserved 1) survives a page encode →
+    // streaming-decode round trip byte-for-byte, alongside the 128 data bits — so
+    // the authentication payload reaches the OSNMA verifier intact.
+    #[test]
+    fn inav_decode_recovers_the_osnma_field() {
+        // An arbitrary, non-trivial 40-bit payload, unpacked MSB-first from the 5
+        // bytes that make up the crate's OsnmaDataMessage (1 HKROOT + 4 MACK).
+        let osnma_bytes = [0x52u8, 0x9A, 0xC6, 0x37, 0xE1];
+        let mut osnma = [0u8; 40];
+        for (i, b) in osnma.iter_mut().enumerate() {
+            *b = (osnma_bytes[i / 8] >> (7 - (i % 8))) & 1;
+        }
+
+        // A real word (type 4, a couple of data fields set) so word_type and the
+        // 128 data bits also have to round-trip, not just the OSNMA field.
+        let mut word = make_word(4, &[(7, 10, 123), (55, 14, 600)]);
+        word.osnma = osnma;
+
+        let syms = encode_inav_page(&word);
+        let mut dec = InavDecoder::new();
+        let mut got = None;
+        for &s in &syms {
+            if let Some(w) = dec.push_symbol(s) {
+                got = Some(w);
+            }
+        }
+        let got = got.expect("a single encoded page must decode");
+        assert_eq!(got.word_type, 4);
+        assert_eq!(got.bits, word.bits, "128 data bits must round-trip");
+        assert_eq!(got.osnma, osnma, "40-bit OSNMA field must round-trip");
     }
 }
