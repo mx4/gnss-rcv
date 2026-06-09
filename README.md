@@ -243,7 +243,10 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
 - [x] Saastamoinen troposphere correction in the solver
 - [x] Hermetic synthetic-signal tests ([`src/synth.rs`](src/synth.rs) — multi-SV
       L1CA with Doppler / C/N0 noise, no recording needed)
-- [ ] Galileo E1 and BeiDou B1
+- [~] Galileo E1 — groundwork in ([`code::Signal`](src/code.rs) abstraction,
+      BOC(1,1) primitive, E1 parameters); next: embed the E1 primary memory codes,
+      the BOC correlator wiring, and the I/NAV decoder
+- [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view
 - [ ] era-aware GPS week-rollover; resolve the per-SV ~0.5 ms pseudorange bias

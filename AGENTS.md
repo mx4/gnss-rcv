@@ -230,8 +230,10 @@ guesses. Tackle roughly top-to-bottom.
 
 The rest are correct refactors but mostly scaffolding until there's a second
 *solving* constellation; adding them earlier is speculative generality:
-- Replace the string signal id (`"L1CA"`, matched in `code.rs`/`channel.rs`) with
-  a `SignalType` enum carrying frequency/code params.
+- ~~Replace the string signal id with a `SignalType` enum~~ — **done**:
+  `code::Signal` (in [code.rs](src/code.rs)) carries the carrier/code params and
+  the spreading code, threaded through channel/device/network/receiver/main. It
+  is the seam the Galileo E1 work builds on.
 - Extract navigation decoding (~440 lines of `impl Channel` in
   [navigation.rs](src/navigation.rs)) behind a `NavigationDecoder` trait.
 - Galileo E1 needs a BOC(1,1)-aware correlator, embedded 4092-chip memory codes,
@@ -277,6 +279,14 @@ Without these gnss-rcv cannot integrate with any external tool:
 
 #### Galileo E1 — implementation plan
 
+**Progress:** the signal abstraction is in — `code::Signal` replaces the old
+`"L1CA"` string and carries the carrier/code params. `Signal::GalileoE1b/E1c`
+define the E1 parameters (4 ms period, 8184 BOC sub-chips, BOC(1,1), shared L1
+carrier); `code::boc11()` is the tested BOC(1,1) subcarrier and `spreading_code()`
+applies it. Remaining: embed the E1 memory codes (the `e1_primary_code` stub),
+wire the BOC replica + acquisition timing into the channel, and add the I/NAV
+decoder.
+
 Key differences from GPS L1 C/A that drive every change:
 
 | Property | GPS L1 C/A | Galileo E1-B |
@@ -292,21 +302,21 @@ Key differences from GPS L1 C/A that drive every change:
 
 **Implementation order** (each step is independently testable):
 
-**Step 1 — `src/code.rs`: E1-B memory code generation**
-- `gen_e1b_code(prn: u8) -> Vec<i8>` — 4092-chip E1-B code per the Galileo OS SIS ICD §3.3.3.1.1.
-  The ICD defines the codes via a specific LFSR construction; pre-computing and storing as a
-  static table (4092 × 36 ints ≈ 150 KB) is the most practical first approach.
-- `gen_e1c_code(prn: u8)` — pilot channel code (optional; needed only for pilot-aided acquisition).
-- New arms in `gen_code` / `get_code_period` / `get_code_len` / `get_code_freq`:
-  `"E1B"` → `4e-3` / `4092` / `1575.42e6`.
+**Step 1 — `src/code.rs`: E1-B/E1-C memory codes** (the only blocker for acquisition)
+- Fill the `e1_primary_code(prn, pilot)` stub: the 4092-chip E1-B/E1-C primary
+  codes are *memory* codes (not LFSR-generated) tabulated in the Galileo OS SIS
+  ICD (Annex C, hex); embed them as a static table (~50 PRNs × 4092 chips).
+- `Signal::GalileoE1b/E1c` already provide period (4 ms), `code_len` (8184 BOC
+  sub-chips) and carrier; `spreading_code()` already wraps the primary code in
+  `boc11()`. Once the table is in, E1 channels build.
 - Test: same autocorrelation peak + bounded off-peak cross-correlation properties as GPS Gold codes.
 
 **Step 2 — `src/channel.rs`: BOC(1,1) correlator**
-- During upsampling in `Channel::new`, multiply each sample by the BOC subcarrier:
-  `ref[i] = code[chip_i] * sign(sin(2π × 1.023e6 × i / fs))`.
-  At 2 samples/chip this reduces to the alternating pattern `[+code, −code]` per chip; the
-  `sin()` formula handles arbitrary sample rates correctly.
-- Increase non-coherent integration time: `T_ACQ = 0.04` (10 × 4 ms) for E1-B.
+- `code::boc11()` already produces the `[+code, −code]` per-chip subcarrier
+  replica (BOC(1,1) at 2 sub-chips/chip); it is what `spreading_code()` returns,
+  so `Channel::new`'s existing resampling already consumes the BOC replica. What
+  remains is BOC-aware *tuning*: early/late spacing in sub-chips and the longer
+  acquisition window — increase non-coherent integration `T_ACQ = 0.04` (10 × 4 ms).
 - `nav_decode()` routing: branch on `sv.constellation == Constellation::Galileo` before the
   LNAV path to call `nav_decode_inav()`.
 
