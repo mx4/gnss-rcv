@@ -100,7 +100,7 @@ RECORDINGS: List[Rec] = [
         "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
         "FGI_OSNMA_clean.i8", 0, "manual",
         "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
-        "FGI OSNMA (Finland 2023), L1/E1 real 8-bit 26 MHz, OSNMA bits; ~35 GB, CC BY 4.0, manual (see doc/datasets.md)",
+        "FGI OSNMA (Finland 2023), L1/E1 real 8-bit 26 MHz, OSNMA bits; ~35 GB, CC BY 4.0, manual (see docs/datasets.md)",
         ("gps", "galileo")),
 ]
 # fmt: on
