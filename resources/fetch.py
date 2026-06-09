@@ -225,6 +225,7 @@ def print_list(recs: List[Rec], tag_filter=None) -> None:
         )
         print(line)
         print("       " + paint("↳ " + r.note, "dim"))
+        print("       " + paint(runcmd(r), "cyan"))
 
     print(hr())
     summary = "%d recordings · %s present (%s on disk) · %d missing" % (
