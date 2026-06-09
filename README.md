@@ -243,10 +243,10 @@ Short list; the detailed, evidence-ranked backlog + feature roadmap live in
 - [x] Saastamoinen troposphere correction in the solver
 - [x] Hermetic synthetic-signal tests ([`src/synth.rs`](src/synth.rs) — multi-SV
       L1CA with Doppler / C/N0 noise, no recording needed)
-- [~] Galileo E1 — **acquires** (E1-B/E1-C memory codes + BOC(1,1) + signal-aware
-      receiver period; `--sig E1B` locks real Galileo SVs, e.g. E01/E04/E11 at
-      40–48 dB-Hz on the LimeSDR capture). Next: E1 tracking tuning + the I/NAV
-      decoder (for an E1 fix)
+- [~] Galileo E1 — **acquires + tracks** (E1-B/E1-C memory codes + BOC(1,1) +
+      signal-aware receiver; `--sig E1B` holds a 40 s lock on E01/E04/E11 at
+      40–48 dB-Hz). I/NAV FEC layer (Viterbi / interleaver / CRC-24Q) in; next:
+      I/NAV page assembly + ephemeris fields (for an E1 fix)
 - [ ] BeiDou B1
 - [ ] test + fix live rtl-sdr device support
 - [ ] use the decoded almanac to predict which satellites are in view

@@ -279,15 +279,16 @@ Without these gnss-rcv cannot integrate with any external tool:
 
 #### Galileo E1 — implementation plan
 
-**Progress — E1-B acquires end-to-end.** `code::Signal` replaced the `"L1CA"`
+**Progress — E1-B acquires *and tracks*.** `code::Signal` replaced the `"L1CA"`
 string; the E1-B/E1-C primary memory codes are embedded
-([`galileo_e1_codes.rs`](src/galileo_e1_codes.rs)) and decoded by
-`e1_primary_code`; `Signal::GalileoE1b::spreading_code` returns the BOC(1,1)
-replica (`code::boc11()`); the receiver steps the signal's code period (4 ms,
-signal-aware); and `get_sat_list` tags Galileo PRNs from the signal. Proven on
-the ION LimeSDR capture: `--sig E1B` locks **E01 @ 47.8, E04 @ 44.1, E11 @ 39.8**
-dB-Hz. **Remaining for an E1 *fix*:** E1 tracking-loop tuning (Step 2) and the
-I/NAV decoder (Steps 4–5).
+([`galileo_e1_codes.rs`](src/galileo_e1_codes.rs)) and BOC(1,1)-modulated
+(`code::boc11()`); the receiver steps the signal's 4 ms code period; and
+`get_sat_list` tags Galileo PRNs from the signal. On the ION LimeSDR capture
+`--sig E1B` locks **E01/E04/E11** and holds a **40 s lock at 43–48 dB-Hz**. The
+I/NAV FEC layer — rate-1/2 Viterbi, 30×8 interleaver, CRC-24Q — is in
+([`galileo_inav.rs`](src/galileo_inav.rs)). **Remaining for an E1 *fix*:** I/NAV
+page-part sync + even/odd assembly, the word-type ephemeris fields (Step 4), and
+routing the per-4 ms-period tracking symbols into the decoder.
 
 Key differences from GPS L1 C/A that drive every change:
 
@@ -310,13 +311,14 @@ Key differences from GPS L1 C/A that drive every change:
   `e1_primary_code` decodes them to ±1, `spreading_code()` wraps them in `boc11()`.
 - Tested: `e1_primary_codes_are_valid` (bipolar, balanced, strong autocorr peak).
 
-**Step 2 — `src/channel.rs`: BOC(1,1) correlator** (replica DONE; tuning + nav routing left)
+**Step 2 — `src/channel.rs`: BOC(1,1) correlator** ✅ acquires + tracks
 - `code::boc11()` produces the `[+code, −code]` per-chip replica, returned by
   `spreading_code()`, so `Channel::new`'s resampling already consumes it — E1-B
-  *acquires* as-is. What remains is BOC-aware *tracking tuning*: early/late
-  spacing in sub-chips and the longer non-coherent window (`T_ACQ` for 4 ms code).
-- `nav_decode()` routing: branch on `sv.constellation == Constellation::Galileo` before the
-  LNAV path to call `nav_decode_inav()`.
+  acquires *and* tracks as-is (the GPS-only DLL assertion `n == 10` was removed;
+  the loops are otherwise period-generic — E01/E04/E11 hold a 40 s lock).
+- Left: `nav_decode()` routing — branch on `Constellation::Galileo` before the
+  LNAV path, feeding the I/NAV symbol (sign of prompt-I, one per 4 ms code
+  period) to a `nav_decode_inav()` built on [`galileo_inav.rs`](src/galileo_inav.rs).
 
 **Step 3 — receiver wiring** ✅ DONE
 - No separate `--galileo` flag: selecting the signal (`--sig E1B`) drives it.
