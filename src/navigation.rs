@@ -2,9 +2,11 @@ use crate::{
     channel::Channel,
     constants::{P2_24, P2_27, P2_30},
     ephemeris::Ephemeris,
+    galileo_inav::InavDecoder,
     util::{bits_equal, bits_opposed, getbits, getbits2, getbitu, hex_str, setbitu, xor_bits},
 };
 use colored::Colorize;
+use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 
@@ -29,6 +31,7 @@ pub struct Navigation {
     sync_state: SyncState,
     bits: Vec<u8>, // navigation bits
     count_parity_err: usize,
+    inav: InavDecoder, // Galileo E1-B I/NAV page decoder
     pub eph: Ephemeris,
 }
 
@@ -41,6 +44,7 @@ impl Navigation {
             sync_state: SyncState::Normal,
             bits: vec![0; SDR_MAX_NSYM],
             count_parity_err: 0,
+            inav: InavDecoder::new(),
             eph: Ephemeris::new(sv),
         }
     }
@@ -448,7 +452,26 @@ impl Channel {
         log::warn!("{}: SBAS frame", self.sv);
     }
 
+    /// Galileo E1-B I/NAV: feed one symbol per 4 ms code period (the sign of
+    /// prompt-I) to the page decoder; on a CRC-valid word, log its type. (The
+    /// ephemeris field extraction from word types 1-5 is the next step.)
+    fn nav_decode_inav(&mut self) {
+        let Some(&c_p) = self.hist.corr_p.back() else {
+            return;
+        };
+        let sym = (c_p.re >= 0.0) as u8;
+        if let Some(word) = self.nav.inav.push_symbol(sym) {
+            self.stats.subframes += 1;
+            log::warn!("{}: I/NAV word type {} (CRC ok)", self.sv, word.word_type);
+        }
+    }
+
     pub fn nav_decode(&mut self) {
+        if self.sv.constellation == Constellation::Galileo {
+            self.nav_decode_inav();
+            return;
+        }
+
         const PREAMBULE: [u8; 8] = [1, 0, 0, 0, 1, 0, 1, 1];
         let preambule = &PREAMBULE[0..];
 
