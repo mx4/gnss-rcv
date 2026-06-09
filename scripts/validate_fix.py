@@ -107,16 +107,16 @@ def validate_gps_fix():
 # fix_expectation = dict(lat, lon, gate_km, alt_band_m, min_eph), checked against
 # the JSON `fix` object when the recording is long enough to complete >=min_eph
 # ephemerides. The LimeSDR truth (52.177, 4.488, Netherlands) is the same antenna
-# site as that capture's GPS/RTL-SDR fixes; the Galileo-only fix lands ~4 km off,
-# within the open per-SV ~0.5 ms pseudorange bias, so the gate is looser than the
-# GPS 2 km. Recordings too short to complete an ephemeris (PocketSDR ~30 s) pass
-# on the decode chain alone.
+# site as that capture's GPS/RTL-SDR fixes; with the E1 BOC DLL-lag compensation
+# the Galileo-only fix lands ~110 m off (gate 1 km — looser than GPS 2 km only for
+# the truth-coord precision). Recordings too short to complete an ephemeris
+# (PocketSDR ~30 s) pass on the decode chain alone.
 GAL_CANDIDATES = [
     ("resources/L1_20211226_082212_12MHz_I.bin",
      ["-t", "i8", "--fs", "12M", "--fi", "3M"], 20000, None),  # PocketSDR (~30 s: decode only)
     ("resources/ION_LimeSDR_Bands-L1.2xi16",
      ["-t", "2xi16", "--fs", "10M", "--fi", "420K"], 60000,
-     {"lat": 52.177, "lon": 4.488, "gate_km": 6.0, "alt_band_m": (-500.0, 2000.0), "min_eph": 4}),  # ION LimeSDR
+     {"lat": 52.177, "lon": 4.488, "gate_km": 1.0, "alt_band_m": (-500.0, 2000.0), "min_eph": 4}),  # ION LimeSDR
 ]
 GAL_MIN_TRACKED = 2
 GAL_MIN_WORDS = 3  # CRC-valid I/NAV words across all SVs

@@ -39,17 +39,25 @@ const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 /// Effective early-late discriminator slope (normalized output per unit code
-/// error). Depends on the correlation-function shape and correlator spacing
-/// (`SP_CORR`) — so it's signal-specific (BPSK L1CA here; E1's BOC differs) and
-/// also folds in our 1st-order-loop approximation. Calibrated to null the residual
-/// Doppler slope (gpssim). The only empirical factor in `TAU_DLL`.
-const DLL_DISC_GAIN: f64 = 3.18;
-/// Group delay of the code (DLL) loop = 1/(loop velocity gain). `run_dll` corrects
-/// `code_off` at rate `(B_DLL/0.25)·DLL_DISC_GAIN` per unit error, so a code-Doppler
-/// ramp leaves a steady lag of (rate)·τ. The tracked code phase therefore lags the
-/// true one by code-Doppler·τ, a per-SV transmit-time bias ∝ Doppler we add back
-/// (see `code_off_sec` capture). Derived from B_DLL so it tracks any loop retune.
-const TAU_DLL: f64 = 0.25 / (B_DLL * DLL_DISC_GAIN); // ≈ 0.157 s
+/// error) that sets the code-loop group delay [`dll_tau`]. It depends on the
+/// correlation peak vs the correlator spacing (`SP_CORR`), so it's signal-specific
+/// and calibrated to null the per-signal residual Doppler slope:
+/// - **BPSK** (L1CA / SBAS): ~1-chip-wide triangular peak, well matched by
+///   `SP_CORR` → a steep discriminator → small group delay (τ ≈ 0.157 s).
+const DLL_DISC_GAIN_BPSK: f64 = 3.18;
+/// - **BOC(1,1)** (Galileo E1): the ~½-chip-wide main peak is mismatched by the
+///   BPSK-tuned `SP_CORR`, giving a ~12× shallower discriminator → a much larger
+///   group delay (τ ≈ 1.95 s). Tightens the LimeSDR Galileo fix 3.4 km → ~110 m.
+const DLL_DISC_GAIN_BOC: f64 = 0.256;
+
+/// Code-loop group delay = 1/(loop velocity gain). `run_dll` corrects `code_off`
+/// at rate `(B_DLL/0.25)·disc_gain` per unit error, so a code-Doppler ramp leaves a
+/// steady lag of (rate)·τ; the tracked code phase therefore lags the true one by
+/// code-Doppler·τ, a per-SV transmit-time bias ∝ Doppler we add back (see
+/// `code_off_sec` capture). Derived from B_DLL so it tracks any loop retune.
+fn dll_tau(disc_gain: f64) -> f64 {
+    0.25 / (B_DLL * disc_gain)
+}
 
 // Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
 // captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
@@ -158,6 +166,7 @@ pub struct Channel {
     code_sec: f64,   // code duration in sec
     code_len: usize, // prn code len: e.g. 1023
     code_sp: usize,  // samples per upsampled code: e.g. 2046 for L1CA
+    tau_dll: f64,    // code-loop group delay for this signal (transmit-time lag comp)
 
     fft_planner: FftPlanner<f64>,
     state: State,
@@ -290,6 +299,13 @@ impl Channel {
         let code_sec = sig.code_period_sec();
         let code_len = sig.code_len();
         let code_sp = (fs * code_sec) as usize;
+        // Per-signal transmit-time lag compensation: the code (DLL) loop's group
+        // delay depends on the correlation peak shape (BOC vs BPSK), see dll_tau.
+        let tau_dll = dll_tau(if sig.is_boc11() {
+            DLL_DISC_GAIN_BOC
+        } else {
+            DLL_DISC_GAIN_BPSK
+        });
         let mut fft_planner = FftPlanner::new();
 
         // Resample the PRN code to the actual samples-per-code-period (code_sp =
@@ -335,6 +351,7 @@ impl Channel {
             code_sec,
             code_len,
             code_sp,
+            tau_dll,
 
             num_acq_samples: 0,
             num_idl_samples: 0,
@@ -851,11 +868,11 @@ impl Channel {
         // absolute code_off (common cross-SV reference from acquisition) carries the
         // sub-ms range and must NOT be differenced away at the anchor.
         //
-        // The code (DLL) loop has a finite group delay, so the tracked code phase
-        // lags the true one by the code-Doppler times that delay: (doppler/fc)*TAU_DLL.
-        // Uncompensated this is a per-SV transmit-time bias ∝ Doppler (verified on
-        // gpssim: residual slope ~-0.03 m/Hz, ~170 m spread). Add it back.
-        let dll_lag = self.trk.doppler_hz / self.fc * TAU_DLL;
+        // The code (DLL) loop has a finite group delay (self.tau_dll), so the
+        // tracked code phase lags the true one by code-Doppler · τ. Uncompensated
+        // this is a per-SV transmit-time bias ∝ Doppler (gpssim residual slope
+        // ~-0.03 m/Hz, ~170 m; far larger for E1's BOC). Add it back.
+        let dll_lag = self.trk.doppler_hz / self.fc * self.tau_dll;
         self.nav.eph.code_off_sec = self.trk.code_off_sec + dll_lag;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
