@@ -8,7 +8,6 @@ pub mod ephemeris;
 mod galileo_e1_codes;
 pub mod galileo_inav;
 pub mod gps_lnav;
-pub mod lnav;
 pub mod navigation;
 pub mod network;
 pub mod plots;
