@@ -267,15 +267,15 @@ impl GnssRcvApp {
             .show(ui, |ui| {
                 ui.label("iq-format");
                 self.update_iq_type(ui);
-                ui.label("signal");
-                self.update_sig_type(ui);
-                ui.end_row();
-
                 ui.label("fs");
                 ui.add_sized(
                     [FIELD_W, h],
                     egui::DragValue::new(&mut self.fs).speed(1000.0).suffix(" Hz"),
                 );
+                ui.end_row();
+
+                ui.label("signal");
+                self.update_sig_type(ui);
                 ui.label("fi");
                 ui.add_sized(
                     [FIELD_W, h],
