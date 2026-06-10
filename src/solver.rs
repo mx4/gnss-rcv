@@ -381,6 +381,16 @@ impl PositionSolver {
             })
             .collect();
 
+        // Reception epoch. The receiver has no absolute clock, so we reconstruct
+        // "now" from the transmit times: the latest (highest-elevation, closest)
+        // SV plus the nominal one-way signal travel time. This 70 ms is
+        // load-bearing, not a free offset the receiver-clock bias absorbs — it
+        // pins each pseudorange (now_gpst - t_tx) to the physical ~20 000 km
+        // range, and gnss-rtk uses that magnitude as the travel time for the
+        // Earth-rotation (Sagnac) correction. Zeroing it under-rotates the ECEF
+        // frame and biases the fix ~22 m in longitude. The true travel time is
+        // ~67-86 ms (varies with elevation); the few-ms error from a single
+        // nominal is ~1 m, negligible against the receiver's accuracy.
         const NOMINAL_TRAVEL_SEC: f64 = 0.070;
         let latest_tx = *tx_gpst.iter().max().unwrap();
         let now_gpst = latest_tx + Duration::from_seconds(NOMINAL_TRAVEL_SEC);
