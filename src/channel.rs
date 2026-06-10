@@ -19,6 +19,10 @@ use crate::util::doppler_shift;
 use crate::util::doppler_shifted_carrier;
 use crate::util::get_max_with_idx;
 
+/// Early/late correlator spacing, in chips (prompt ± half a chip). The
+/// early-late discriminator's slope — and through it the DLL group delay —
+/// depends on the correlation-peak shape *relative to this spacing*; that
+/// interaction is what the per-signal `DLL_DISC_GAIN_*` constants calibrate.
 const SP_CORR: f64 = 0.5;
 const T_IDLE: f64 = 3.0;
 // A satellite in view acquires within a handful of attempts; the 10 ms
@@ -450,7 +454,6 @@ impl Channel {
         self.num_trk_samples = 0;
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
-        self.num_trk_samples = 0;
         self.num_tx_codes = 0.0;
         self.nav.eph.tx_anchored = false;
         self.nav.eph.tow_trk_phase = 0.0;
@@ -527,7 +530,7 @@ impl Channel {
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex64]) {
-        // only take the last minute worth of data
+        // The feed hands us two code periods; correlate over the most recent one.
         let iq_vec_slice = &iq_vec[self.code_sp..];
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
 
@@ -670,12 +673,13 @@ impl Channel {
         }
 
         let b = if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN / 2.0 {
-            B_FLL_WIDE // 10.0
+            B_FLL_WIDE
         } else {
-            B_FLL_NARROW // 2.-
+            B_FLL_NARROW
         };
         let err_freq = (cross / dot).atan() / 2.0 / PI;
 
+        // First-order loop: noise bandwidth Bn = G/4, so the gain is 4·Bn.
         self.trk.doppler_hz -= b / 0.25 * err_freq;
         self.update_state_doppler_hz();
     }
@@ -685,7 +689,10 @@ impl Channel {
             return;
         }
         let err_phase = (c_p.im / c_p.re).atan() / 2.0 / PI;
-        let w = B_PLL / 0.53; // ~18.9
+        // Standard 2nd-order loop, damping ζ = 1/√2: Bn = ωn·(ζ + 1/(4ζ))/2 ≈
+        // 0.53·ωn, hence ωn = B_PLL/0.53 (~18.9 rad/s) and 1.4 ≈ 2ζ. PI form:
+        // 2ζωn on the error delta, ωn² integrating the error over one period.
+        let w = B_PLL / 0.53;
         self.trk.doppler_hz +=
             1.4 * w * (err_phase - self.trk.err_phase) + w * w * err_phase * self.code_sec;
         self.update_state_doppler_hz();
@@ -702,6 +709,8 @@ impl Channel {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
             let err_code = (e - l) / (e + l) / 2.0 * self.code_sec / self.code_len as f64;
+            // First-order loop, gain 4·Bn — this rate is the loop velocity gain
+            // whose inverse sets the DLL group delay (see dll_tau).
             self.trk.code_off_sec -= B_DLL / 0.25 * err_code * self.code_sec * n as f64;
             self.trk.sum_corr_e = 0.0;
             self.trk.sum_corr_l = 0.0;
