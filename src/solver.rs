@@ -38,12 +38,20 @@ fn get_eccentric_anomaly(eph: &RxEphemeris, t_k: f64) -> f64 {
     let mut e_k = 0.0;
     let mut n_iter = 0;
 
+    // Newton's method on Kepler's equation; GNSS orbits are near-circular
+    // (ecc < 0.03), so this converges in a handful of iterations. Hitting the
+    // cap means it did NOT converge (corrupt ephemeris) — fail loudly below
+    // rather than letting garbage flow into the SV position.
     while (e - e_k).abs() > 1e-14 && n_iter < 30 {
         e_k = e;
         e = e + (mk - e + eph.ecc * e.sin()) / (1.0 - eph.ecc * e.cos());
         n_iter += 1;
     }
-    assert!(n_iter < 20);
+    assert!(
+        n_iter < 30,
+        "Kepler solve did not converge: ecc={}",
+        eph.ecc
+    );
 
     e
 }
@@ -73,8 +81,8 @@ fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
 fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
     let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
 
-    log::warn!("{}: ---- now={t:?}", eph.sv);
-    log::warn!("{}: ---- toe={:?} delta-t={dte} ", eph.sv, eph.toe_gpst);
+    log::debug!("{}: ---- now={t:?}", eph.sv);
+    log::debug!("{}: ---- toe={:?} delta-t={dte} ", eph.sv, eph.toe_gpst);
 
     let ecc_anomaly = get_eccentric_anomaly(eph, dte);
     let v_k =
@@ -99,7 +107,7 @@ fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
     let ecef_y = orb_plane_x * omega.sin() + orb_plane_y * ik.cos() * omega.cos();
     let ecef_z = orb_plane_y * ik.sin();
 
-    log::warn!(
+    log::debug!(
         "{}: position: x={:8.1} y={:8.1} z={:8.1} h={:.1}",
         eph.sv,
         ecef_x / 1000.0,
@@ -108,7 +116,7 @@ fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
         (ecef_x.powi(2) + ecef_y.powi(2) + ecef_z.powi(2)).sqrt() / 1000.0
     );
     let (lat_rad, lon_rad, h) = ecef2geodetic(ecef_x, ecef_y, ecef_z, Ellipsoid::WGS84);
-    log::warn!(
+    log::debug!(
         "{}: position: lat/lon: {:.6},{:.6} h={:.1}",
         eph.sv,
         lat_rad * 180.0 / PI,
