@@ -694,7 +694,7 @@ fn print_summary(sum: &RunSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::synth::{SynthE1Sv, SynthSv, synth_e1, synth_l1ca};
+    use crate::synth::{GeoFeed, SynthE1Sv, SynthSv, pick_geo_constellation, synth_e1, synth_l1ca};
 
     #[test]
     fn mock_reader_serves_slices_and_eof() {
@@ -861,6 +861,65 @@ mod tests {
 
         let sv = SV::new(Constellation::GPS, prn);
         assert!(rx.channels[&sv].is_state_tracking());
+    }
+
+    // The hermetic end-to-end positioning regression: a geometry-consistent
+    // synthetic scene (per-SV code phase, Doppler and LNAV timing all derived
+    // from true ranges — see synth::GeoFeed) must drive the full real pipeline
+    // (acquisition → tracking → bit/frame sync → ephemeris decode → tx anchor
+    // → gnss-rtk solve) to a position fix within metres of the known truth.
+    // No recording, no gps-sdr-sim, no network — the recording-based fix
+    // tests' hermetic twin, runnable anywhere including CI.
+    #[test]
+    #[ignore] // ~5 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn synthetic_geometry_solves_to_truth() {
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0]; // the gpssim Geneva site
+        let (week, toe) = (2348u32, 36_000u32);
+
+        let ephs = pick_geo_constellation(truth, week, toe, 6);
+        assert!(ephs.len() >= 5, "picked only {} SVs", ephs.len());
+        let sats = ephs
+            .iter()
+            .map(|e| e.sv.prn.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let feed = GeoFeed::new(&ephs, truth, fs, fi, 30_000, 45.0, None);
+        let state = Arc::new(Mutex::new(GnssState::new()));
+        let cfg = ReceiverConfig {
+            sats,
+            fs,
+            fi,
+            exit_on_fix: true,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(feed),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            state.clone(),
+        );
+        rx.run_loop(0);
+
+        let st = state.lock().unwrap();
+        assert!(st.longitude != 0.0, "no fix from the synthetic scene");
+        let (x, y, z) = map_3d::geodetic2ecef(
+            st.latitude.to_radians(),
+            st.longitude.to_radians(),
+            st.height,
+            map_3d::Ellipsoid::WGS84,
+        );
+        let (tlat, tlon, talt) =
+            map_3d::ecef2geodetic(truth[0], truth[1], truth[2], map_3d::Ellipsoid::WGS84);
+        let horiz = ((st.latitude.to_radians() - tlat) * 6.378e6)
+            .hypot((st.longitude.to_radians() - tlon) * 6.378e6 * tlat.cos());
+        let err = ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt();
+        eprintln!(
+            "synthetic fix error vs truth: {err:.2} m (horiz {horiz:.2} m, vert {:+.2} m)",
+            st.height - talt
+        );
+        assert!(err < 15.0, "fix error {err:.1} m vs truth");
     }
 
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {

@@ -571,7 +571,7 @@ pub(crate) fn test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
 // same struct from its own word layout.
 
 /// Subframe 1: GPS week + clock (af0/af1/af2, tgd, toc).
-fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+pub(crate) fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
     eph.tow = getbitu(buf, 30, 17) * 6;
     // The broadcast week is mod-1024 (10 bits, IS-GPS-200 20.3.3.3.1.1); +2048
     // pins it to the third GPS-week epoch, i.e. weeks 2048..3071 = 2019-04-07
@@ -607,7 +607,7 @@ fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
 }
 
 /// Subframe 2: orbit size/shape (M0, e, √A, Crs, Cuc, Cus, Δn, toe).
-fn decode_lnav_subframe2(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+pub(crate) fn decode_lnav_subframe2(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
     eph.tow = getbitu(buf, 30, 17) * 6;
     eph.iode = getbitu(buf, 60, 8);
     eph.crs = getbits(buf, 68, 16) as f64 * P2_5;
@@ -637,7 +637,7 @@ fn decode_lnav_subframe2(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
 }
 
 /// Subframe 3: orientation (Ω0, i0, ω, ΩDOT, IDOT, Cic, Cis, Crc).
-fn decode_lnav_subframe3(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+pub(crate) fn decode_lnav_subframe3(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
     eph.tow = getbitu(buf, 30, 17) * 6;
     eph.cic = getbits(buf, 60, 16) as f64 * P2_29;
     eph.cis = getbits(buf, 120, 16) as f64 * P2_29;
@@ -714,6 +714,88 @@ pub fn encode_subframe(source: &[u8]) -> [u8; 300] {
 fn set_split(s: &mut [u8; 300], p_hi: usize, l_lo: usize, p_lo: usize, v: u32) {
     setbitu(s, p_hi, 8, v >> l_lo);
     setbitu(s, p_lo, l_lo, v & ((1 << l_lo) - 1));
+}
+
+/// Write the low `len` two's-complement bits of `val` at `pos` (the layout
+/// `getbits` sign-extends back). Works for unsigned values too.
+fn set_i(s: &mut [u8; 300], pos: usize, len: usize, val: i64) {
+    setbitu(s, pos, len, (val as u64 & ((1u64 << len) - 1)) as u32);
+}
+
+/// Like [`set_i`] but split across the (8-bit hi, `l_lo`-bit lo) ranges that
+/// `getbits2`/`getbitu2` read.
+fn set_i_split(s: &mut [u8; 300], p_hi: usize, p_lo: usize, l_lo: usize, val: i64) {
+    let bits = (val as u64 & ((1u64 << (8 + l_lo)) - 1)) as u32;
+    set_split(s, p_hi, l_lo, p_lo, bits);
+}
+
+/// Encode `eph` into one LNAV subframe *source* layout (24 data bits per word
+/// at the documented offsets, parity bits zeroed — run [`encode_subframe`] on
+/// the result for the transmitted bits). `how_field` is the 17-bit HOW TOW
+/// count: the TOW of the *next* subframe's start divided by 6 (IS-GPS-200
+/// 20.3.3.2 — the convention gps-sdr-sim transmits and the receiver decodes).
+/// Field offsets and scales are the exact inverse of
+/// `decode_lnav_subframe{1,2,3}`.
+pub fn encode_lnav_subframe_source(eph: &Ephemeris, subframe_id: u8, how_field: u32) -> [u8; 300] {
+    let r = |x: f64| x.round() as i64;
+    let mut s = [0u8; 300];
+    setbitu(&mut s, 0, 8, PREAMBLE);
+    setbitu(&mut s, 30, 17, how_field);
+    setbitu(&mut s, 49, 3, subframe_id as u32);
+    match subframe_id {
+        1 => {
+            setbitu(&mut s, 60, 10, eph.week - 2048);
+            setbitu(&mut s, 70, 2, eph.code);
+            setbitu(&mut s, 72, 4, eph.sva);
+            setbitu(&mut s, 76, 6, eph.svh);
+            setbitu(&mut s, 82, 2, eph.iodc >> 8);
+            setbitu(&mut s, 210, 8, eph.iodc & 0xFF);
+            setbitu(&mut s, 90, 1, eph.flag);
+            set_i(&mut s, 196, 8, r(eph.tgd / P2_31));
+            setbitu(&mut s, 218, 16, eph.toc / 16);
+            set_i(&mut s, 240, 8, r(eph.f2 / P2_55));
+            set_i(&mut s, 248, 16, r(eph.f1 / P2_43));
+            set_i(&mut s, 270, 22, r(eph.f0 / P2_31));
+        }
+        2 => {
+            setbitu(&mut s, 60, 8, eph.iode);
+            set_i(&mut s, 68, 16, r(eph.crs / P2_5));
+            set_i(&mut s, 90, 16, r(eph.deln / (P2_43 * SC2RAD)));
+            set_i_split(&mut s, 106, 120, 24, r(eph.m0 / (P2_31 * SC2RAD)));
+            set_i(&mut s, 150, 16, r(eph.cuc / P2_29));
+            set_i_split(&mut s, 166, 180, 24, r(eph.ecc / P2_33));
+            set_i(&mut s, 210, 16, r(eph.cus / P2_29));
+            set_i_split(&mut s, 226, 240, 24, r(eph.a.sqrt() / P2_19));
+            setbitu(&mut s, 270, 16, eph.toe / 16);
+            setbitu(&mut s, 286, 1, eph.fit);
+        }
+        3 => {
+            set_i(&mut s, 60, 16, r(eph.cic / P2_29));
+            set_i_split(&mut s, 76, 90, 24, r(eph.omg0 / (P2_31 * SC2RAD)));
+            set_i(&mut s, 120, 16, r(eph.cis / P2_29));
+            set_i_split(&mut s, 136, 150, 24, r(eph.i0 / (P2_31 * SC2RAD)));
+            set_i(&mut s, 180, 16, r(eph.crc / P2_5));
+            set_i_split(&mut s, 196, 210, 24, r(eph.omg / (P2_31 * SC2RAD)));
+            set_i(&mut s, 240, 24, r(eph.omg_dot / (P2_43 * SC2RAD)));
+            setbitu(&mut s, 270, 8, eph.iode);
+            set_i(&mut s, 278, 14, r(eph.i_dot / (P2_43 * SC2RAD)));
+        }
+        _ => unreachable!("only subframes 1-3 carry the ephemeris"),
+    }
+    s
+}
+
+/// Round-trip `eph` through the LNAV encode → field-parse path: the result is
+/// the ephemeris exactly as a receiver will decode it, every field quantized
+/// to its broadcast LSB. The geometric signal generator flies *this* orbit, so
+/// generator and solver use bit-identical ephemerides.
+pub fn quantize_via_lnav(eph: &Ephemeris) -> Ephemeris {
+    let mut q = Ephemeris::new(eph.sv);
+    decode_lnav_subframe1(&mut q, &encode_lnav_subframe_source(eph, 1, 1), eph.sv);
+    decode_lnav_subframe2(&mut q, &encode_lnav_subframe_source(eph, 2, 1), eph.sv);
+    decode_lnav_subframe3(&mut q, &encode_lnav_subframe_source(eph, 3, 1), eph.sv);
+    q.ts_sec = 1.0;
+    q
 }
 
 /// The three source subframes (1, 2, 3) of a canned, valid GPS ephemeris. Field
@@ -856,6 +938,104 @@ mod tests {
         // consume roughly the first one, the rest must decode cleanly.
         assert!(subframes >= 5, "decoded only {subframes} subframes");
         assert_eq!(parity_errors, 0, "clean stream must not parity-fail");
+    }
+
+    // Every ephemeris field must survive encode → parity-encode → parity-decode
+    // → field-parse within its broadcast LSB. This locks the encoder to the
+    // decoders bit-for-bit — the property the geometric synth (GeoFeed) relies
+    // on when it flies the quantized ephemeris the receiver will decode.
+    #[test]
+    fn encode_lnav_subframes_roundtrip_all_fields() {
+        let sv = SV::new(Constellation::GPS, 9);
+        let mut e = Ephemeris::new(sv);
+        e.week = 2348;
+        e.code = 1;
+        e.sva = 2;
+        e.svh = 0;
+        e.iodc = 0x2A5;
+        e.flag = 1;
+        e.tgd = -4.6e-9;
+        e.toc = 36_000;
+        e.f2 = 2.0e-16;
+        e.f1 = -3.2e-12;
+        e.f0 = 4.2e-4;
+        e.iode = 0x55;
+        e.crs = -23.4;
+        e.deln = 4.5e-9;
+        e.m0 = -1.234;
+        e.cuc = 1.2e-6;
+        e.ecc = 0.0123;
+        e.cus = -7.8e-6;
+        e.a = 26_559_800.0;
+        e.toe = 36_000;
+        e.cic = 9.3e-8;
+        e.omg0 = 2.345;
+        e.cis = -1.1e-7;
+        e.i0 = 0.958;
+        e.crc = 200.5;
+        e.omg = -2.9;
+        e.omg_dot = -8.1e-9;
+        e.i_dot = 3.0e-10;
+
+        // Through the full transmitted path: source -> parity encode -> parity
+        // decode -> field parse.
+        let mut q = Ephemeris::new(sv);
+        for id in 1..=3u8 {
+            let src = encode_lnav_subframe_source(&e, id, 6001);
+            let tx = encode_subframe(&src);
+            let mut nav = vec![0u8; 300];
+            assert!(test_lnav_parity(&tx, &mut nav), "subframe {id} parity");
+            assert_eq!(&nav[..], &src[..], "subframe {id} source bits round-trip");
+            match id {
+                1 => decode_lnav_subframe1(&mut q, &nav, sv),
+                2 => decode_lnav_subframe2(&mut q, &nav, sv),
+                _ => decode_lnav_subframe3(&mut q, &nav, sv),
+            }
+        }
+        q.ts_sec = 1.0;
+        assert!(q.is_valid());
+
+        // Integer fields are exact.
+        assert_eq!(q.tow, 6001 * 6);
+        assert_eq!(q.week, e.week);
+        assert_eq!(q.toc, e.toc);
+        assert_eq!(q.toe, e.toe);
+        assert_eq!(q.iodc, e.iodc);
+        assert_eq!(q.iode, e.iode);
+        assert_eq!((q.code, q.sva, q.svh, q.flag), (1, 2, 0, 1));
+
+        // Scaled fields within half their LSB.
+        let near = |got: f64, want: f64, lsb: f64, name: &str| {
+            assert!(
+                (got - want).abs() <= lsb,
+                "{name}: {got:e} vs {want:e} (lsb {lsb:e})"
+            );
+        };
+        near(q.tgd, e.tgd, P2_31, "tgd");
+        near(q.f2, e.f2, P2_55, "f2");
+        near(q.f1, e.f1, P2_43, "f1");
+        near(q.f0, e.f0, P2_31, "f0");
+        near(q.crs, e.crs, P2_5, "crs");
+        near(q.crc, e.crc, P2_5, "crc");
+        near(q.deln, e.deln, P2_43 * SC2RAD, "deln");
+        near(q.omg_dot, e.omg_dot, P2_43 * SC2RAD, "omg_dot");
+        near(q.i_dot, e.i_dot, P2_43 * SC2RAD, "i_dot");
+        near(q.m0, e.m0, P2_31 * SC2RAD, "m0");
+        near(q.omg0, e.omg0, P2_31 * SC2RAD, "omg0");
+        near(q.omg, e.omg, P2_31 * SC2RAD, "omg");
+        near(q.i0, e.i0, P2_31 * SC2RAD, "i0");
+        near(q.ecc, e.ecc, P2_33, "ecc");
+        near(q.cuc, e.cuc, P2_29, "cuc");
+        near(q.cus, e.cus, P2_29, "cus");
+        near(q.cic, e.cic, P2_29, "cic");
+        near(q.cis, e.cis, P2_29, "cis");
+        near(q.a, e.a, 0.1, "a"); // sqrt_a LSB P2_19 -> ~2 cm in a
+
+        // quantize_via_lnav is the same path.
+        let qq = quantize_via_lnav(&e);
+        assert_eq!(qq.m0, q.m0);
+        assert_eq!(qq.a, q.a);
+        assert_eq!(qq.week, q.week);
     }
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {

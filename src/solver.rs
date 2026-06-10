@@ -77,7 +77,7 @@ fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
     eph.f0 + eph.f1 * dtc + eph.f2 * dtc.powi(2) + dtr
 }
 
-fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
+pub(crate) fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
     let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
 
     log::debug!("{}: ---- now={t:?}", eph.sv);
@@ -125,7 +125,7 @@ fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64, f64) {
     (ecef_x, ecef_y, ecef_z)
 }
 
-fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, f64) {
+pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, f64) {
     let (lat, lon, _) = ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
     let (dx, dy, dz) = (
         sat_ecef.0 - rx_ecef[0],

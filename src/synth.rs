@@ -14,9 +14,17 @@
 //! bare code.
 
 use rustfft::num_complex::Complex64;
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
+use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
+use crate::ephemeris::Ephemeris;
+use crate::gps_lnav::{encode_lnav_subframe_source, encode_subframe, quantize_via_lnav};
+use crate::receiver::IQReader;
+use crate::solver::{compute_sv_position_ecef, elevation_azimuth};
+use gnss_rs::constellation::Constellation;
+use gnss_rs::sv::SV;
+use gnss_rtk::prelude::{Epoch, Vector3};
 
 /// L1 C/A chip rate (1023 chips / 1 ms).
 const CODE_RATE_HZ: f64 = 1_023_000.0;
@@ -243,6 +251,278 @@ pub fn synth_e1(
     out
 }
 
+// ---- Geometry-consistent L1 C/A scene ---------------------------------------
+
+const SECS_PER_WEEK: f64 = 604_800.0;
+
+/// One satellite of a [`GeoFeed`] scene.
+struct GeoSv {
+    eph: Ephemeris, // the LSB-quantized ephemeris it both broadcasts and flies
+    code: Vec<i8>,
+    bits: Vec<i8>, // transmitted ±1 LNAV bits; bit k spans t_tx = tow0 + [k, k+1)·20 ms
+    amp: f64,
+}
+
+/// Geometry-consistent GPS L1 C/A IQ source (a streaming [`IQReader`]).
+///
+/// Each satellite's code phase, code rate, carrier Doppler and LNAV bit timing
+/// all derive from the true range between `rx_ecef` and the orbit propagated
+/// from its ephemeris — light-time iteration with the Earth-rotation (Sagnac)
+/// convention the solver uses — so the receiver's decoded pseudoranges solve
+/// back to `rx_ecef`. The generator flies the *quantized* ephemeris
+/// ([`quantize_via_lnav`]): generator and solver use bit-identical orbits, so
+/// broadcast-LSB rounding cancels instead of aliasing into the fix.
+///
+/// The receiver clock is GPST exactly: sample `n` is received at
+/// `t0_sow + n/fs`, where `t0_sow` is the first ephemeris' toe (so orbit
+/// extrapolation stays near its reference). The LNAV streams start at the
+/// last subframe boundary (6 s grid) before the first transmit time, with the
+/// HOW TOW counting true GPST — the framing gps-sdr-sim produces.
+///
+/// Transmit time is evaluated exactly on the 1 ms block grid and interpolated
+/// linearly in between (range acceleration over 1 ms is sub-µm). Every sample
+/// is a pure function of its absolute index, so the feed is stateless and
+/// random-access; with `seed`, AWGN is generated per-block from the seed and
+/// block index, keeping that property.
+pub struct GeoFeed {
+    svs: Vec<GeoSv>,
+    rx: [f64; 3],
+    fs: f64,
+    fi: f64,
+    week: u32,
+    t0_sow: f64,
+    tow0: f64,
+    block_sp: usize,
+    total_samples: usize,
+    seed: Option<u64>,
+}
+
+impl GeoFeed {
+    /// Build a scene of `num_msec` over the satellites in `ephs` (all sharing
+    /// one GPS week), received at `rx_ecef`. `seed = None` renders each SV
+    /// clean at unit amplitude (`cn0_dbhz` ignored); `Some(s)` adds AWGN with
+    /// each SV scaled to `cn0_dbhz`, as in [`synth_l1ca`].
+    pub fn new(
+        ephs: &[Ephemeris],
+        rx_ecef: [f64; 3],
+        fs: f64,
+        fi: f64,
+        num_msec: usize,
+        cn0_dbhz: f64,
+        seed: Option<u64>,
+    ) -> Self {
+        assert!(!ephs.is_empty());
+        let week = ephs[0].week;
+        assert!(
+            ephs.iter().all(|e| e.week == week),
+            "one GPS week per scene"
+        );
+        let t0_sow = ephs[0].toe as f64;
+        // LNAV stream origin: the subframe boundary (6 s grid) one subframe
+        // before t0, so every transmit time in the run maps to a bit index ≥ 0.
+        let tow0 = (t0_sow / 6.0).floor() * 6.0 - 6.0;
+        let n_subframes = num_msec / 6000 + 3;
+
+        let amp = match seed {
+            None => 1.0,
+            Some(_) => (10f64.powf(cn0_dbhz / 10.0) / fs).sqrt(),
+        };
+        let svs = ephs
+            .iter()
+            .map(|e| {
+                let mut q = quantize_via_lnav(e);
+                let wsec = q.week as f64 * SECS_PER_WEEK;
+                q.toe_gpst = Epoch::from_gpst_seconds(wsec + q.toe as f64);
+                q.toc_gpst = q.toe_gpst;
+                // The bit stream: subframes 1,2,3 cycling, subframe j spanning
+                // GPST [tow0 + 6j, tow0 + 6j + 6), HOW = next subframe start / 6.
+                let mut bits = Vec::with_capacity(n_subframes * 300);
+                for j in 0..n_subframes {
+                    let id = (j % 3) as u8 + 1;
+                    let how = (tow0 as u32) / 6 + j as u32 + 1;
+                    let src = encode_lnav_subframe_source(&q, id, how);
+                    bits.extend(
+                        encode_subframe(&src)
+                            .iter()
+                            .map(|&b| if b == 1 { 1i8 } else { -1 }),
+                    );
+                }
+                GeoSv {
+                    eph: q,
+                    code: Code::gen_code("L1CA", e.sv.prn).expect("L1CA code"),
+                    bits,
+                    amp,
+                }
+            })
+            .collect();
+
+        let block_sp = (fs * 1e-3) as usize;
+        Self {
+            svs,
+            rx: rx_ecef,
+            fs,
+            fi,
+            week,
+            t0_sow,
+            tow0,
+            block_sp,
+            total_samples: num_msec * block_sp,
+            seed,
+        }
+    }
+
+    fn epoch_at(&self, sow: f64) -> Epoch {
+        Epoch::from_gpst_seconds(self.week as f64 * SECS_PER_WEEK + sow)
+    }
+
+    /// Signal travel time from `eph`'s satellite to the receiver for a signal
+    /// *received* at GPST `t_rx_sow`: fixed-point light-time iteration, with
+    /// the SV rotated into the reception-instant ECEF frame (Earth turns by
+    /// ωe·τ while the signal travels — the solver's Sagnac convention).
+    fn travel_time_sec(&self, eph: &Ephemeris, t_rx_sow: f64) -> f64 {
+        let mut tau = 0.07;
+        for _ in 0..3 {
+            let (x, y, z) = compute_sv_position_ecef(eph, self.epoch_at(t_rx_sow - tau));
+            let w = EARTH_ROTATION_RATE * tau;
+            let (cw, sw) = (w.cos(), w.sin());
+            let (sx, sy) = (cw * x + sw * y, -sw * x + cw * y);
+            let (dx, dy, dz) = (sx - self.rx[0], sy - self.rx[1], z - self.rx[2]);
+            tau = (dx * dx + dy * dy + dz * dz).sqrt() / SPEED_OF_LIGHT;
+        }
+        tau
+    }
+}
+
+impl IQReader for GeoFeed {
+    fn get_iq_data(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+        if off_samples + num_samples > self.total_samples {
+            return Err("end of file".into());
+        }
+        let mut out = vec![Complex64::default(); num_samples];
+        let b = self.block_sp;
+        let inv_fs = 1.0 / self.fs;
+        let end = off_samples + num_samples;
+
+        for m in off_samples / b..=(end - 1) / b {
+            let (blk_s, blk_e) = (m * b, (m + 1) * b);
+            let (s0, s1) = (blk_s.max(off_samples), blk_e.min(end));
+            let ts0 = blk_s as f64 * inv_fs;
+            let ts1 = blk_e as f64 * inv_fs;
+
+            for sv in &self.svs {
+                // Exact transmit times at the block edges; linear in between.
+                let tau0 = self.travel_time_sec(&sv.eph, self.t0_sow + ts0);
+                let tau1 = self.travel_time_sec(&sv.eph, self.t0_sow + ts1);
+                let dtau = (tau1 - tau0) / b as f64; // per sample
+                let dtx = inv_fs - dtau;
+
+                // State at the first generated sample of this block.
+                let f0 = (s0 - blk_s) as f64;
+                let ts = ts0 + f0 * inv_fs;
+                let tau = tau0 + f0 * dtau;
+                let t_tx = self.t0_sow + ts - tau - self.tow0; // since stream origin
+                let mut chip = t_tx * CODE_RATE_HZ;
+                let chip_step = dtx * CODE_RATE_HZ;
+                let mut bit_pos = t_tx / NAV_BIT_SEC;
+                let bit_step = dtx / NAV_BIT_SEC;
+                // Received carrier: θ = 2π(fi·ts − fc·τ); per-sample rotation.
+                let mut car = Complex64::from_polar(sv.amp, TAU * (self.fi * ts - L1_HZ * tau));
+                let rot = Complex64::from_polar(1.0, TAU * (self.fi * inv_fs - L1_HZ * dtau));
+
+                for i in s0..s1 {
+                    let c = sv.code[chip.rem_euclid(L1CA_CODE_LEN as f64) as usize] as f64;
+                    let d = sv.bits[bit_pos as usize] as f64;
+                    out[i - off_samples] += car * (c * d);
+                    car *= rot;
+                    chip += chip_step;
+                    bit_pos += bit_step;
+                }
+            }
+
+            if let Some(seed) = self.seed {
+                // Per-block reseed keeps samples a pure function of their index.
+                let mut rng = Rng(seed ^ (m as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+                let nstd = 0.5f64.sqrt();
+                for v in out[s0 - off_samples..s1 - off_samples].iter_mut() {
+                    *v += Complex64::new(rng.gauss() * nstd, rng.gauss() * nstd);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Pick `n` GPS-like orbits visible from `rx_ecef` at the ephemeris epoch:
+/// circular (ecc = 0) zero-clock MEO shells scanned over an (Ω0, M0) grid,
+/// keeping the best candidate per azimuth sector for spread-out geometry.
+/// Circular zero-clock orbits make every SV clock term (relativistic, f0/f1/f2,
+/// TGD) exactly zero, so the scene needs no clock model on either side.
+pub fn pick_geo_constellation(rx_ecef: [f64; 3], week: u32, toe: u32, n: usize) -> Vec<Ephemeris> {
+    let toe_gpst = Epoch::from_gpst_seconds(week as f64 * SECS_PER_WEEK + toe as f64);
+    let rx = Vector3::new(rx_ecef[0], rx_ecef[1], rx_ecef[2]);
+
+    let mut cands: Vec<(f64, f64, Ephemeris)> = Vec::new();
+    for i_omg0 in 0..12 {
+        for i_m0 in 0..18 {
+            let mut e = Ephemeris::new(SV::new(Constellation::GPS, 1));
+            e.week = week;
+            e.toe = toe;
+            e.toc = toe;
+            e.toe_gpst = toe_gpst;
+            e.toc_gpst = toe_gpst;
+            e.a = 26_560_000.0;
+            e.ecc = 0.0;
+            e.i0 = 0.96; // ~55°, the GPS inclination
+            e.omg0 = i_omg0 as f64 * (TAU / 12.0) - PI;
+            e.m0 = i_m0 as f64 * (TAU / 18.0) - PI;
+            e.omg_dot = -8.0e-9; // typical nodal regression; also gates is_valid
+            e.ts_sec = 1.0;
+            let pos = compute_sv_position_ecef(&e, toe_gpst);
+            let (el, az) = elevation_azimuth(rx, pos);
+            if el > 20f64.to_radians() {
+                cands.push((el, az, e));
+            }
+        }
+    }
+
+    // Geometry: one near-zenith SV plus a low ring spread in azimuth. The
+    // zenith SV pins the vertical — an all-ring (or all-high) pick has poor
+    // VDOP: measured 28 m fix error, of which 27.9 m was vertical, vs ~4 m
+    // with this mix.
+    let mut picked: Vec<(f64, f64, Ephemeris)> = Vec::new();
+    if let Some(z) = cands.iter().max_by(|a, b| a.0.total_cmp(&b.0)) {
+        picked.push(*z);
+    }
+    let ring_target = 30f64.to_radians();
+    let sectors = n - 1;
+    for k in 0..sectors {
+        let lo = -PI + k as f64 * TAU / sectors as f64;
+        let hi = lo + TAU / sectors as f64;
+        if let Some(best) = cands
+            .iter()
+            .filter(|(_, az, _)| (lo..hi).contains(az))
+            .filter(|(el, az, _)| !picked.iter().any(|(pe, pa, _)| pe == el && pa == az))
+            .min_by(|a, b| {
+                (a.0 - ring_target)
+                    .abs()
+                    .total_cmp(&(b.0 - ring_target).abs())
+            })
+        {
+            picked.push(*best);
+        }
+    }
+
+    let mut ephs: Vec<Ephemeris> = picked.into_iter().map(|(_, _, e)| e).collect();
+    for (k, e) in ephs.iter_mut().enumerate() {
+        e.sv = SV::new(Constellation::GPS, (k + 1) as u8);
+    }
+    ephs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +534,40 @@ mod tests {
         assert_eq!(sig.len(), (fs * 1e-3) as usize * 3);
         // noiseless single SV: |code · carrier| == 1 everywhere.
         assert!(sig.iter().all(|c| (c.norm() - 1.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn geo_constellation_is_visible_and_distinct() {
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0]; // Geneva
+        let ephs = pick_geo_constellation(truth, 2348, 36_000, 6);
+        assert!(ephs.len() >= 5, "found {} SVs above the site", ephs.len());
+        let rx = Vector3::new(truth[0], truth[1], truth[2]);
+        for e in &ephs {
+            assert!(e.is_valid(), "{} ephemeris invalid", e.sv);
+            let pos = compute_sv_position_ecef(e, e.toe_gpst);
+            let (el, _) = elevation_azimuth(rx, pos);
+            assert!(el > 20f64.to_radians(), "{} below mask", e.sv);
+        }
+        // Distinct PRNs and orbits (the xcorr rejector compares m0/omg0/f0).
+        for i in 0..ephs.len() {
+            for j in i + 1..ephs.len() {
+                assert_ne!(ephs[i].sv.prn, ephs[j].sv.prn);
+                assert!(ephs[i].m0 != ephs[j].m0 || ephs[i].omg0 != ephs[j].omg0);
+            }
+        }
+    }
+
+    #[test]
+    fn geo_feed_is_deterministic_and_bounded() {
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
+        let ephs = pick_geo_constellation(truth, 2348, 36_000, 4);
+        let mut a = GeoFeed::new(&ephs, truth, 2_046_000.0, 0.0, 20, 45.0, Some(3));
+        let mut b = GeoFeed::new(&ephs, truth, 2_046_000.0, 0.0, 20, 45.0, Some(3));
+        let xa = a.get_iq_data(1000, 4092).unwrap();
+        let xb = b.get_iq_data(1000, 4092).unwrap();
+        assert_eq!(xa, xb, "same scene + seed must reproduce the same samples");
+        assert_eq!(xa.len(), 4092);
+        assert!(a.get_iq_data(0, 21 * 2046).is_err(), "EOF past the end");
     }
 
     #[test]
