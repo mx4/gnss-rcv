@@ -450,7 +450,7 @@ The egui app ([`app.rs`](src/app.rs)) is now **metadata-driven off the recording
 we track in [`fetch.py`](resources/fetch.py)**: `fetch.py` emits
 [`resources/manifest.json`](resources/manifest.json) on every run (name/dest/flags),
 and [`recordings.rs`](src/recordings.rs) reads it — one source of truth, no
-duplicated list. Items 1–6 below are done; the OSNMA-verified badge remains.
+duplicated list. All items below are done.
 
 | Item | Status |
 |---|---|
@@ -460,4 +460,4 @@ duplicated list. Items 1–6 below are done; the OSNMA-verified badge remains.
 | **Auto-select `--fi` / `--fs` on pick** | ✅ Filled from the parsed `flags` (editable `DragValue`s). |
 | **Signal dropdown: `L1CA` / `E1B` / `E1C`** | ✅ Drives `config.sig` (was mis-wired, L1CA-only). The SV table also follows the signal's constellation, so E1B runs populate it. |
 | **OSNMA on by default** | ✅ Checkbox, default on; wired into `ReceiverConfig.osnma`. |
-| **Per-SV OSNMA-verified badge** | Open. Show a ✓/lock next to authenticated SVs in the channel table, fed by `OsnmaVerifier::is_authenticated`. Needs the verified-SV set surfaced from the receiver into the shared UI state ([`state.rs`](src/state.rs)) — the receiver currently keeps it in `Receiver.osnma_authenticated`. |
+| **Per-SV OSNMA-verified badge** | ✅ The SV table's "osnma" column shows a green ✓ once a satellite authenticates, from `ChannelState.osnma_verified` (set by the receiver's `feed_osnma` via its `pub_state` handle). Lights up on a KROOT-bearing stream. |
