@@ -27,10 +27,10 @@ cargo test --release -- --ignored
   via [`synth.rs`](src/synth.rs) and need no recording) + the fast integration
   test `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
 - **`cargo test --release -- --ignored`** — also runs the heavy tests:
-  `synthetic_geometry_solves_to_truth` (~6 s, **hermetic** — see below),
-  `computes_position_fix_gpssim` (~3 s; pipeline until the first fix, via
-  `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below). CI runs
-  this tier too: the recording-based tests skip there, the hermetic one runs.
+  `synthetic_geometry_solves_to_truth` + `…_in_noise` (~7 s, **hermetic** — see
+  below), `computes_position_fix_gpssim` (~3 s; pipeline until the first fix,
+  via `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below). CI
+  runs this tier too: the recording-based tests skip there, the hermetic ones run.
 - Unit-testing the receiver without a recording: `MockIQReader`
   ([receiver.rs](src/receiver.rs)) feeds a `Vec<Complex64>`; build a `Receiver`
   with `Receiver::with_feed(...)`.
@@ -47,7 +47,11 @@ anchor → gnss-rtk solve — must produce a fix within 15 m of the truth
 (measured ~2.5 m). Needs no recording, no gps-sdr-sim, no network; **this is
 the positioning regression CI runs on every push**. Constellation geometry
 comes from `synth::pick_geo_constellation` (one near-zenith SV + a ~30° ring;
-all-ring geometry was measured at 28 m error, 27.9 m of it vertical).
+all-ring geometry was measured at 28 m error, 27.9 m of it vertical). Its
+noisy twin `synthetic_geometry_solves_to_truth_in_noise` runs the same scene
+in seeded AWGN at a realistic 44 dB-Hz (gate 30 m, measured ~10 m): the clean
+test pins the systematic error, the noisy one locks noise robustness — a
+tracking-loop regression that only hurts in noise shows up there.
 
 The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 **full pipeline** against a gps-sdr-sim recording at a known location:

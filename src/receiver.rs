@@ -863,16 +863,11 @@ mod tests {
         assert!(rx.channels[&sv].is_state_tracking());
     }
 
-    // The hermetic end-to-end positioning regression: a geometry-consistent
-    // synthetic scene (per-SV code phase, Doppler and LNAV timing all derived
-    // from true ranges — see synth::GeoFeed) must drive the full real pipeline
-    // (acquisition → tracking → bit/frame sync → ephemeris decode → tx anchor
-    // → gnss-rtk solve) to a position fix within metres of the known truth.
-    // No recording, no gps-sdr-sim, no network — the recording-based fix
-    // tests' hermetic twin, runnable anywhere including CI.
-    #[test]
-    #[ignore] // ~5 s — runs via `just test-all` / `cargo test -- --ignored`
-    fn synthetic_geometry_solves_to_truth() {
+    /// Build the standard 6-SV Geneva scene (synth::GeoFeed +
+    /// pick_geo_constellation), run the full real pipeline on it until the
+    /// first fix, and return the 3D fix error vs truth in metres. Shared by
+    /// the clean and noisy hermetic positioning regressions below.
+    fn run_geo_scene_fix_error_m(label: &str, cn0_dbhz: f64, seed: Option<u64>) -> f64 {
         let (fs, fi) = (2_046_000.0, 0.0);
         let truth = [4_396_463.3, 474_169.7, 4_581_510.0]; // the gpssim Geneva site
         let (week, toe) = (2348u32, 36_000u32);
@@ -885,7 +880,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
 
-        let feed = GeoFeed::new(&ephs, truth, fs, fi, 30_000, 45.0, None);
+        let feed = GeoFeed::new(&ephs, truth, fs, fi, 30_000, cn0_dbhz, seed);
         let state = Arc::new(Mutex::new(GnssState::new()));
         let cfg = ReceiverConfig {
             sats,
@@ -903,7 +898,10 @@ mod tests {
         rx.run_loop(0);
 
         let st = state.lock().unwrap();
-        assert!(st.longitude != 0.0, "no fix from the synthetic scene");
+        assert!(
+            st.longitude != 0.0,
+            "no fix from the {label} synthetic scene"
+        );
         let (x, y, z) = map_3d::geodetic2ecef(
             st.latitude.to_radians(),
             st.longitude.to_radians(),
@@ -916,10 +914,37 @@ mod tests {
             .hypot((st.longitude.to_radians() - tlon) * 6.378e6 * tlat.cos());
         let err = ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt();
         eprintln!(
-            "synthetic fix error vs truth: {err:.2} m (horiz {horiz:.2} m, vert {:+.2} m)",
+            "{label} synthetic fix error vs truth: {err:.2} m (horiz {horiz:.2} m, vert {:+.2} m)",
             st.height - talt
         );
+        err
+    }
+
+    // The hermetic end-to-end positioning regression: a geometry-consistent
+    // synthetic scene (per-SV code phase, Doppler and LNAV timing all derived
+    // from true ranges — see synth::GeoFeed) must drive the full real pipeline
+    // (acquisition → tracking → bit/frame sync → ephemeris decode → tx anchor
+    // → gnss-rtk solve) to a position fix within metres of the known truth.
+    // No recording, no gps-sdr-sim, no network — the recording-based fix
+    // tests' hermetic twin, runnable anywhere including CI. Clean scene:
+    // measures the pipeline's systematic error alone (~2.5 m).
+    #[test]
+    #[ignore] // ~5 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn synthetic_geometry_solves_to_truth() {
+        let err = run_geo_scene_fix_error_m("clean", 45.0, None);
         assert!(err < 15.0, "fix error {err:.1} m vs truth");
+    }
+
+    // The same scene in AWGN at a realistic open-sky 44 dB-Hz (deterministic
+    // seed): adds acquisition/tracking/DLL noise on top of the systematic
+    // error, so the gate is looser. Locks the pipeline's noise robustness —
+    // a tracking-loop regression that only hurts in noise shows up here, not
+    // in the clean twin.
+    #[test]
+    #[ignore] // ~8 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn synthetic_geometry_solves_to_truth_in_noise() {
+        let err = run_geo_scene_fix_error_m("noisy", 44.0, Some(0x6E55));
+        assert!(err < 30.0, "noisy fix error {err:.1} m vs truth");
     }
 
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
