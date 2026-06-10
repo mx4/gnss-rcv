@@ -232,54 +232,61 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// legacy SBAS L1 block (PRN 120-138) and `qzss` the QZSS block (PRN 193-202) on
 /// top of whatever was selected. (SBAS never completes a GPS ephemeris so the
 /// solver ignores it; QZSS does and `gnss-rtk` solves it.)
+/// Parse a comma-separated satellite list into `Vec<SV>`.
+///
+/// Each token is either:
+///   - A prefixed SV identifier (`G3`, `E11`, `J193`, `S120`) — constellation
+///     explicit, works regardless of `--sig`.  Case-insensitive.
+///   - A bare PRN number (`3`, `11`) — constellation inferred from `sig` for
+///     backward compatibility (GPS numbers 1-32, QZSS 193-202, SBAS ≥120).
+///
+/// An empty string produces the default block for `sig`, extended by `--sbas`
+/// and `--qzss` flags (only meaningful in the empty / default case).
 fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
-    // Galileo signals (E1B/E1C): the constellation follows the *signal*, not the
-    // PRN number (E1 PRNs 1..=36 overlap GPS), so tag every selected PRN Galileo.
-    if matches!(sig, Signal::GalileoE1b | Signal::GalileoE1c) {
-        let prns: Vec<u8> = if sats.is_empty() {
-            (1..=36).collect()
-        } else {
-            sats.split(',').map(|s| s.parse().unwrap()).collect()
-        };
-        return prns
-            .into_iter()
-            .map(|prn| SV::new(Constellation::Galileo, prn))
-            .collect();
+    if sats.is_empty() {
+        let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) =
+            match sig {
+                Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
+                _ => (Constellation::GPS, 1..=32),
+            };
+        let mut svs: Vec<SV> = range.map(|prn| SV::new(base_cons, prn)).collect();
+        if sbas {
+            svs.extend((120..=138_u8).map(|prn| SV::new(Constellation::SBAS, prn)));
+        }
+        if qzss {
+            svs.extend((193..=202_u8).map(|prn| SV::new(Constellation::QZSS, prn)));
+        }
+        return svs;
     }
 
-    let sv_for_prn = |prn: u8| {
-        let cons = if (193..=202).contains(&prn) {
-            Constellation::QZSS
-        } else if prn >= 120 {
-            Constellation::SBAS
-        } else {
-            Constellation::GPS
-        };
-        SV::new(cons, prn)
+    // Constellation to fall back to when a bare PRN is given.
+    let fallback_cons = |prn: u8| match sig {
+        Signal::GalileoE1b | Signal::GalileoE1c => Constellation::Galileo,
+        _ => {
+            if (193..=202).contains(&prn) {
+                Constellation::QZSS
+            } else if prn >= 120 {
+                Constellation::SBAS
+            } else {
+                Constellation::GPS
+            }
+        }
     };
 
-    let mut sat_vec = vec![];
-    if !sats.is_empty() {
-        for s in sats.split(',') {
-            let prn = s.parse::<u8>().unwrap();
-            sat_vec.push(sv_for_prn(prn));
-        }
-    } else {
-        for prn in 1..=32_u8 {
-            sat_vec.push(SV::new(Constellation::GPS, prn));
-        }
-    }
-    if sbas {
-        for prn in 120..=138_u8 {
-            sat_vec.push(SV::new(Constellation::SBAS, prn));
-        }
-    }
-    if qzss {
-        for prn in 193..=202_u8 {
-            sat_vec.push(SV::new(Constellation::QZSS, prn));
-        }
-    }
-    sat_vec
+    sats.split(',')
+        .map(|token| {
+            let token = token.trim();
+            if token.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+                // Prefixed: delegate to the gnss_rs parser ("G3", "E11", …).
+                token.parse::<SV>().unwrap_or_else(|_| panic!("invalid SV: {token}"))
+            } else {
+                let prn = token
+                    .parse::<u8>()
+                    .unwrap_or_else(|_| panic!("invalid PRN: {token}"));
+                SV::new(fallback_cons(prn), prn)
+            }
+        })
+        .collect()
 }
 
 /// Reject cross-correlation false locks.
@@ -1012,11 +1019,10 @@ mod tests {
 
     #[test]
     fn sat_list_tags_constellations_and_appends_blocks() {
-        // Explicit list: PRN by number -> GPS / SBAS / QZSS.
+        // Bare PRN list: constellation inferred from signal type.
         let l = get_sat_list("1,32,120,138,193,202", Signal::L1ca, false, false);
-        let cons: Vec<_> = l.iter().map(|s| s.constellation).collect();
         assert_eq!(
-            cons,
+            l.iter().map(|s| s.constellation).collect::<Vec<_>>(),
             vec![
                 Constellation::GPS,
                 Constellation::GPS,
@@ -1027,33 +1033,37 @@ mod tests {
             ]
         );
 
+        // Prefixed format: constellation explicit, independent of --sig.
+        let l = get_sat_list("G3,E11,G7", Signal::L1ca, false, false);
+        assert_eq!(l[0], SV::new(Constellation::GPS, 3));
+        assert_eq!(l[1], SV::new(Constellation::Galileo, 11));
+        assert_eq!(l[2], SV::new(Constellation::GPS, 7));
+
+        // Prefixed Galileo PRNs even when --sig is L1CA.
+        let l = get_sat_list("E4,E9,E21", Signal::L1ca, false, false);
+        assert!(l.iter().all(|s| s.constellation == Constellation::Galileo));
+        assert_eq!(l.iter().map(|s| s.prn).collect::<Vec<_>>(), vec![4, 9, 21]);
+
         // --sbas appends the 120-138 block (19 PRNs) on the GPS default.
         let l = get_sat_list("", Signal::L1ca, true, false);
         assert_eq!(l.len(), 32 + 19);
-        assert_eq!(
-            l.iter()
-                .filter(|s| s.constellation == Constellation::SBAS)
-                .count(),
-            19
-        );
+        assert_eq!(l.iter().filter(|s| s.constellation == Constellation::SBAS).count(), 19);
 
         // --qzss appends the 193-202 block (10 PRNs).
         let l = get_sat_list("", Signal::L1ca, false, true);
         assert_eq!(l.len(), 32 + 10);
-        assert_eq!(
-            l.iter()
-                .filter(|s| s.constellation == Constellation::QZSS)
-                .count(),
-            10
-        );
+        assert_eq!(l.iter().filter(|s| s.constellation == Constellation::QZSS).count(), 10);
 
-        // A Galileo signal tags every PRN Galileo (default block 1..=36).
+        // Default Galileo block: 1..=36, all tagged Galileo.
         let l = get_sat_list("", Signal::GalileoE1b, false, false);
         assert_eq!(l.len(), 36);
         assert!(l.iter().all(|s| s.constellation == Constellation::Galileo));
+
+        // Bare PRN with Galileo signal → Galileo constellation (backward compat).
         let l = get_sat_list("4,11", Signal::GalileoE1c, false, false);
         assert_eq!(l.len(), 2);
         assert_eq!(l[0], SV::new(Constellation::Galileo, 4));
+        assert_eq!(l[1], SV::new(Constellation::Galileo, 11));
     }
 
     #[test]

@@ -53,7 +53,11 @@ struct Options {
     off_msec: usize,
     #[structopt(long, help = "duration of sample", default_value = "0")]
     num_msec: usize,
-    #[structopt(long, help = "satellites to use", default_value = "")]
+    #[structopt(
+        long,
+        help = "satellites to search: prefixed (G3,E11,J193) or bare PRN (3,11; constellation inferred from --sig)",
+        default_value = ""
+    )]
     sats: String,
     #[structopt(long, help = "also search the SBAS L1 block (PRN 120-138)")]
     sbas: bool,
