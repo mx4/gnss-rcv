@@ -443,3 +443,23 @@ and 24–29.
 - Clean `pub` API with docstrings on `Channel`, `Receiver`, `Ephemeris`.
 - A `Measurement` type exposing `(sv, t_tx, pseudorange, carrier_phase, cn0, doppler)` per epoch — the atom every GNSS algorithm consumes.
 - `#[no_std]` compatibility for embedded targets (long-term).
+
+### F. Desktop UI (egui) — IQ-file picker & OSNMA
+
+The egui app ([`app.rs`](src/app.rs)) hardcodes its dropdowns. These make the IQ
+picker **metadata-driven off the recordings we already track in
+[`fetch.py`](resources/fetch.py)** — whose `Rec.flags` already encodes the exact
+`-t`/`--fs`/`--fi`/`--sig` per file, so it's the natural source of truth. The one
+design decision is how the Rust UI reads the Python list without duplicating it:
+have `fetch.py` emit a `resources/manifest.json` that both sides consume (or a
+shared TOML). Items 1–4 then fall out of that manifest.
+
+| Item | Notes |
+|---|---|
+| **File list synced with `fetch.py`** | The picker is a hardcoded `vec_str` (`app.rs:207`); drive it from the `fetch.py` `Rec` set (via the shared manifest) so adding a recording in one place updates both. |
+| **Only show provisioned files** | Filter the list to recordings whose `dest` actually exists under `resources/` — don't offer files the user hasn't fetched. |
+| **Auto-select `-t` format on pick** | Set the IQ format from the recording's `flags` (`-t …`) instead of the manual `iq-format` combo. |
+| **Auto-select `--fi` / `--fs` on pick** | Likewise fill IF + sample rate from the recording's `flags`. (Same goal as the "SigMF `.meta` auto-config" item in D, different source.) |
+| **Signal dropdown: add `E1B`** | The `signal` combo lists only `["L1CA"]` and is mis-wired — it writes `iq_type_choice`, and `sig` is hardcoded `Signal::L1ca` (`app.rs:101,171–178`). Add `E1B`/`E1C` and actually drive `config.sig`. |
+| **OSNMA on by default** | The UI builds `ReceiverConfig { …, ..Default::default() }` (osnma = false). Default `--osnma` on (it's ~5% overhead; only acts on E1B runs). |
+| **Per-SV OSNMA-verified badge** | When OSNMA is on, show a per-SV authentication indicator (a ✓/lock next to verified SVs) in the channel display, fed by `OsnmaVerifier::is_authenticated`. Needs the verified-SV set surfaced into the shared UI state ([`state.rs`](src/state.rs)). |
