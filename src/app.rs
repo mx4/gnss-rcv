@@ -22,6 +22,11 @@ const PI: f64 = std::f64::consts::PI;
 const WIDTH: usize = 900;
 const HEIGHT: usize = 700;
 
+/// Width of the left control/status column in the top panel (the sky plot fills
+/// whatever is to its right). Wide enough for the status line, snug enough that
+/// the boxes don't sprawl across the window.
+const LEFT_PANEL_W: f32 = 460.0;
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Dashboard,
@@ -193,7 +198,7 @@ impl GnssRcvApp {
             .to_owned();
         let mut clicked = None;
         egui::ComboBox::from_id_salt("file_picker")
-            .width(230.0)
+            .width(140.0)
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
                 for (i, r) in self.recordings.iter().enumerate() {
@@ -315,21 +320,27 @@ impl GnssRcvApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    // Left column: all controls + status box.
+                    // Left column: controls box, status box, start/stop — all the
+                    // same width so they read as one stacked panel.
                     ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            self.update_file_picker(ui);
-                            let h = ui.spacing().interact_size.y;
-                            ui.add_sized(
-                                [ui.available_width(), h],
-                                egui::TextEdit::singleline(&mut self.iq_file),
-                            );
+                        ui.set_max_width(LEFT_PANEL_W);
+                        // Controls box.
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                self.update_file_picker(ui);
+                                let h = ui.spacing().interact_size.y;
+                                ui.add_sized(
+                                    [ui.available_width(), h],
+                                    egui::TextEdit::singleline(&mut self.iq_file),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                self.update_iq_type(ui);
+                                self.update_sig_type(ui);
+                            });
+                            self.update_freqs(ui);
                         });
-                        ui.horizontal(|ui| {
-                            self.update_iq_type(ui);
-                            self.update_sig_type(ui);
-                        });
-                        self.update_freqs(ui);
+                        // Status box.
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.monospace(&tow_text);
@@ -350,6 +361,8 @@ impl GnssRcvApp {
                                 ui.monospace(&pos_text);
                             }
                         });
+                        // Start/stop, sitting to the left of the sky plot.
+                        self.update_start_stop(ui, ctx);
                     });
                     // Right column: sky plot, pinned to the right edge.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
@@ -361,7 +374,6 @@ impl GnssRcvApp {
 
     fn update_central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.update_start_stop(ui, ctx);
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Dashboard, "Dashboard");
                 ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
