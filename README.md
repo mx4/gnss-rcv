@@ -76,15 +76,15 @@ With no `-f`, it runs against the default development recording (2xf32,
 
 ## Screenshots
 
-As it processes the IQ data, the receiver periodically writes a diagnostic web
-page (`plots/index.html` + images, enabled with `-p`) showing the decoder's
-internal state:
-
-![diagnostic output](./assets/iq-output.png)
-
-There is also a live UI (`-u`):
+The live UI (`-u`) shows real-time tracking status, a sky plot, and per-SV
+diagnostics:
 
 ![gnss-rcv UI](./assets/gnss-rcv-ui.png)
+
+The receiver also writes a diagnostic web page (`plots/index.html` + images,
+enabled with `-p`) showing the decoder's internal state per satellite:
+
+![diagnostic output](./assets/iq-output.png)
 
 ## Usage
 
