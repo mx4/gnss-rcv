@@ -128,14 +128,15 @@ impl Channel {
         }
     }
 
+    /// Mean of the last `n` prompt correlations, each projected onto the unit
+    /// circle (re/|c| = cos of the carrier phase error) so the result is
+    /// amplitude-invariant — see the normalization note in `nav_sync_symbol`.
     fn nav_mean_ip(&self, n: usize) -> f64 {
         let mut p = 0.0;
         let len = self.hist.corr_p.len();
 
         for i in 0..n {
-            // weird math
             let c = self.hist.corr_p[len - n + i];
-            //p += (c.re / c.norm() - p) / (1 + i) as f64;
             p += c.re / c.norm();
         }
         p / n as f64
@@ -178,7 +179,13 @@ impl Channel {
             for i in 0..2 * n {
                 let code = if i < n { -1.0 } else { 1.0 };
                 let corr = self.hist.corr_p[len - 2 * n + i];
-                let corr_re = corr.re / corr.norm(); // XXX: shouldn't be required
+                // Project onto the unit circle (cos of the phase error). corr_p's
+                // absolute scale varies with IQ format and recording level (the
+                // f32 reader passes raw amplitudes through; int formats only
+                // bound them to ~[-1, 1]), while THRESHOLD_SYNC/THRESHOLD_LOST
+                // are fixed constants in normalized units — so this
+                // normalization is required, not cosmetic.
+                let corr_re = corr.re / corr.norm();
 
                 p += corr_re * code;
                 r += corr_re.abs();
