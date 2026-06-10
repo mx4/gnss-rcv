@@ -174,7 +174,16 @@ fn plot_time_graph(
 }
 
 fn plot_time_graph_with_sz(opts: PlotOpts<'_>) {
-    let PlotOpts { sv, name, series, y_delta, color, x_step, size_x, size_y } = opts;
+    let PlotOpts {
+        sv,
+        name,
+        series,
+        y_delta,
+        color,
+        x_step,
+        size_x,
+        size_y,
+    } = opts;
     if series.len() < 10 {
         return;
     }
@@ -224,7 +233,14 @@ pub fn plot_channel(sv: SV, hist: &History, code_sec: f64) {
     plot_time_graph(sv, "phase-angle", &phase, 1.0, &COL_PHASE, code_sec);
 
     let code_phase: Vec<f64> = hist.code_phase_offset.iter().copied().collect();
-    plot_time_graph(sv, "code-phase-offset", &code_phase, 50.0, &COL_CODE, code_sec);
+    plot_time_graph(
+        sv,
+        "code-phase-offset",
+        &code_phase,
+        50.0,
+        &COL_CODE,
+        code_sec,
+    );
 
     let phi_err: Vec<f64> = hist.phi_error.iter().copied().collect();
     plot_time_graph(sv, "phi-error", &phi_err, 0.5, &COL_PHI, code_sec);
@@ -255,8 +271,7 @@ pub fn plot_iq_scatter(sv: SV, series: &[Complex64]) {
     }
 
     let file_name = format!("{}/{}-iq-scatter.png", PLOT_FOLDER, sv_slug(sv));
-    let root =
-        BitMapBackend::new(&file_name, (PLOT_W_SCATTER, PLOT_H)).into_drawing_area();
+    let root = BitMapBackend::new(&file_name, (PLOT_W_SCATTER, PLOT_H)).into_drawing_area();
     root.fill(&BG).unwrap();
 
     let factor = 1000.0;
@@ -268,7 +283,10 @@ pub fn plot_iq_scatter(sv: SV, series: &[Complex64]) {
         .set_label_area_size(LabelAreaPosition::Left, 44)
         .set_label_area_size(LabelAreaPosition::Bottom, 22)
         .margin(6)
-        .caption(format!("{sv}: iq-scatter"), ("sans-serif", FONT, &CAPTION_COL))
+        .caption(
+            format!("{sv}: iq-scatter"),
+            ("sans-serif", FONT, &CAPTION_COL),
+        )
         .build_cartesian_2d(-lim..lim, -lim..lim)
         .unwrap();
 
