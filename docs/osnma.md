@@ -88,10 +88,27 @@ verifier stays at `no valid TESLA key for the chain in force`. This is a propert
 of the captured window — a cold receiver here genuinely can't reach full auth,
 whereas a warm receiver would already hold the KROOT from before the capture.
 
-To demonstrate full TESLA/MAC authentication end-to-end, feed a stream that *does*
-contain a complete DSM-KROOT — e.g. the GSC EUSPA OSNMA test vectors (a hex
-I/NAV+OSNMA stream, fed straight into `OsnmaVerifier`, no acquire/track), or a
-recording from a normal KROOT-broadcasting window.
+### The jammertest recording (Scenario 2) — one block short
+
+The FGI dataset's other capture is from Jammertest 2023 (Andøya, Norway, 740 s).
+Here the OSNMA broadcast *does* send DSM-KROOT (ids 4 then 5), and the fix is the
+authentic Andøya location (`69.275, 15.970`) — this window is not position-spoofed.
+The DSM-KROOT id 5 is **NB = 8 blocks**, and over the run the verifier received
+blocks **0, 1, 2, 3, 5, 6, 7 — every block except block 4** (`missing 1 blocks`),
+so the KROOT never completes and again no nav-data authentication. No
+contents-differ errors (nothing forged), so all six visible SVs simply *miss the
+same block*: a common-mode loss, consistent with interference in this jammertest
+capture corrupting that one block's subframe (tracking holds, but a brief burst
+fails the data CRC for those pages). It is not a pipeline bug — the clean
+recording completed a 13-block DSM-PKR — and only those six Galileo SVs are
+visible at Andøya, so there's no extra redundancy to recover block 4 from.
+
+So both FGI captures fall one step short of full nav-data auth, for different
+reasons: clean = no KROOT broadcast (PKR-dominated), jammertest = KROOT broadcast
+but one block denied. To demonstrate the full TESLA/MAC step end-to-end, feed a
+stream that contains a *complete* DSM-KROOT — e.g. the GSC EUSPA OSNMA test
+vectors (a hex I/NAV+OSNMA stream, fed straight into `OsnmaVerifier`, no
+acquire/track), or a recording from a clean KROOT-broadcasting window.
 
 ## Running it
 
