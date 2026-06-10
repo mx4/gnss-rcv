@@ -101,9 +101,15 @@ pub fn getbitu(buf: &[u8], pos: usize, len: usize) -> u32 {
     bits
 }
 
+/// Read `len` bits at `pos` as a two's-complement signed value.
 pub fn getbits(buf: &[u8], pos: usize, len: usize) -> i32 {
     let bits = getbitu(buf, pos, len);
 
+    // Sign-extend the len-bit field: `mask` covers bit (len-1) — the field's
+    // sign bit — and every bit above it. Negative values get all of them set
+    // (the two's-complement extension); positive values get them cleared (a
+    // no-op, since getbitu zero-fills above the field). The shift pair builds
+    // the mask without overflowing at len == 32 (where `1 << len` would).
     let sign = (1 << (len - 1)) & bits;
     let mask = (0xffffffff >> (len - 1)) << (len - 1);
     let res = if sign != 0 { bits | mask } else { bits & !mask };
@@ -117,6 +123,9 @@ pub fn getbitu2(buf: &[u8], p1: usize, l1: usize, p2: usize, l2: usize) -> u32 {
     (hi << l2) + lo
 }
 
+/// Read a signed value split across two bit ranges (nav messages split several
+/// fields across word boundaries): the high part carries the sign — extend it,
+/// shift it up, and append the unsigned low part.
 pub fn getbits2(buf: &[u8], p1: usize, l1: usize, p2: usize, l2: usize) -> i32 {
     assert!(l1 + l2 <= 32);
     if getbitu(buf, p1, 1) != 0 {

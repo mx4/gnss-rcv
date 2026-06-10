@@ -78,6 +78,11 @@ fn dll_tau(disc_gain: f64) -> f64 {
 const DOPPLER_SPREAD_HZ: f64 = 12000.0;
 const DOPPLER_SPREAD_BINS: usize = 75;
 const HISTORY_NUM: usize = 20000;
+/// Acquisition accept / tracking drop C/N0 gates (dB-Hz). The 6 dB gap is
+/// hysteresis: the 10 ms acquisition estimate is noisy, so the accept gate
+/// sits well above the floor where the loops still work — a marginal SV that
+/// just locked isn't immediately re-dropped, and a PRN near the floor doesn't
+/// churn through lock/loss cycles.
 const CN0_THRESHOLD_LOCKED: f64 = 35.0;
 const CN0_THRESHOLD_LOST: f64 = 29.0;
 
@@ -582,6 +587,11 @@ impl Channel {
             // actually produced the peak, hurting carrier pull-in / bit sync.
             let doppler_hz = -DOPPLER_SPREAD_HZ + idx as f64 * step_hz;
             let code_off_sec = code_offset_idx as f64 / self.code_sp as f64 * self.code_sec;
+            // C/N0 estimate from the search surface: the signal occupies ~one
+            // (Doppler, code-phase) cell, so the surface mean is the noise
+            // power per cell; (peak − mean)/mean is the SNR in the coherent
+            // bandwidth 1/T, and dividing by T = code_sec converts to the
+            // 1 Hz reference: C/N0 = 10·log10(SNR / T) dB-Hz.
             let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / DOPPLER_SPREAD_BINS as f64;
             let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();
             self.acq_cn0 = cn0;
@@ -726,6 +736,15 @@ impl Channel {
         }
     }
 
+    /// Tracking C/N0: prompt power over the noise-reference ("neutral")
+    /// correlator power, both averaged over T_CN0, in the coherent bandwidth
+    /// 1/T — so 10·log10(P_p/P_n / T) is dB-Hz. The neutral tap sits
+    /// NEUTRAL_CORR chips off the peak (signal-free), making P_n the noise
+    /// floor at the same integration length. The prompt's own noise is *not*
+    /// subtracted (the ratio is (S+N)/N): a fraction-of-a-dB optimistic at
+    /// strong signals, ~+3 dB near the lock floor — consistent, and the
+    /// 35/29 dB-Hz gates are tuned with that bias in. The 0.5 update is a
+    /// one-pole smoother per T_CN0 (1 s), settling in ~2-3 s.
     fn update_cn0(&mut self, c_p: Complex64, c_n: Complex64) {
         self.trk.sum_corr_p += c_p.norm_sqr();
         self.trk.sum_corr_n += c_n.norm_sqr();
@@ -756,18 +775,27 @@ impl Channel {
         // On the very first tracking step corr_p is still empty (the push happens
         // later in tracking_process), so leave the buffer/num_trk_samples alone.
         if self.trk.code_off_sec >= self.code_sec {
+            // Positive wrap (receding SV: the received code slipped a whole
+            // period later). The transmit phase num_trk_samples·τ − code_off
+            // must stay continuous across the −τ jump in code_off, so
+            // num_trk_samples steps back — and because it also indexes the
+            // prompt history, the just-stored prompt is popped: the next
+            // correlation re-correlates that same transmitted code period and
+            // replaces it. (The LNAV decoder mirrors the same bookkeeping on
+            // its own window; no-op for non-GPS/QZSS signals.)
             self.trk.code_off_sec -= self.code_sec;
             self.num_tx_codes += 1.0;
             if self.hist.corr_p.pop_back().is_some() {
                 self.num_trk_samples -= 1;
             }
-            // The LNAV decoder keeps its own prompt window/period counter;
-            // mirror the wrap there (no-op for non-GPS/QZSS signals).
             self.nav.lnav.wrap_drop();
-            // 0-1-2-3-4
-            // 0-0-1-2-3
-            // 0-1-2-3-5
         } else if self.trk.code_off_sec < 0.0 {
+            // Negative wrap (approaching SV: the received code slipped a whole
+            // period earlier) — the dual case: one transmitted period falls
+            // between successive correlation windows and is never correlated,
+            // so the last prompt is duplicated into its slot. This keeps the
+            // prompt stream aligned to *transmitted* periods, the grid the
+            // 20-period nav bits divide.
             self.trk.code_off_sec += self.code_sec;
             self.num_tx_codes -= 1.0;
             if let Some(&v) = self.hist.corr_p.back() {
@@ -775,12 +803,19 @@ impl Channel {
                 self.num_trk_samples += 1;
             }
             self.nav.lnav.wrap_repeat();
-            // 0-1-2-3-4
-            // 1-2-3-4-4
-            // 2-3-4-4-5
         }
 
-        // code offset in samples
+        // Local-carrier phase (cycles) at the first sample of this period's
+        // correlation window; tracking_compute_correlation hands it to
+        // doppler_shift so the replica carrier is phase-continuous from period
+        // to period — without that, the PLL's atan(Q/I) and the FLL's
+        // cross/dot comparisons across periods would be meaningless. Phase is
+        // used modulo one cycle, and the IF advance over whole periods is an
+        // integer cycle count (every supported IF is a multiple of 1 kHz, so
+        // fi·τ ∈ ℤ — the fi·τ term documents it and drops out mod 1). What
+        // remains is the Doppler-accumulated phase (adr = Σ fd·τ) plus the
+        // carrier phase across the window's fractional offset, code_off, at
+        // the current carrier fc = fi + fd.
         let code_off = self.trk.code_off_sec * self.fs;
         self.trk.phi = self.fi * tau + self.trk.adr + fc * code_off / self.fs;
         self.update_state_phi();
