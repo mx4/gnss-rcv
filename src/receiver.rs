@@ -276,7 +276,7 @@ fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     sats.split(',')
         .map(|token| {
             let token = token.trim();
-            if token.chars().next().map_or(false, |c| c.is_ascii_alphabetic()) {
+            if token.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
                 // Prefixed: delegate to the gnss_rs parser ("G3", "E11", …).
                 token.parse::<SV>().unwrap_or_else(|_| panic!("invalid SV: {token}"))
             } else {
