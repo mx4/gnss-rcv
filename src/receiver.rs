@@ -115,6 +115,9 @@ pub struct Receiver {
     last_fix_sec: f64,
     exit_on_fix: bool,
     exit_req: Arc<AtomicBool>,
+    /// Pause flag, shared with the UI (default: a never-paused flag, so the CLI
+    /// and tests are unaffected). See [`Receiver::set_pause_flag`].
+    paused: Arc<AtomicBool>,
     stats: RunStats,
     json_out: Option<PathBuf>,
     /// Galileo OSNMA: on automatically for an E1B signal (it's where the OSNMA
@@ -396,6 +399,7 @@ impl Receiver {
             last_fix_sec: 0.0,
             exit_on_fix: cfg.exit_on_fix,
             exit_req,
+            paused: Arc::new(AtomicBool::new(false)),
             stats: RunStats::default(),
             json_out: cfg.json.clone(),
             osnma_enabled: matches!(cfg.sig, Signal::GalileoE1b),
@@ -560,9 +564,23 @@ impl Receiver {
         }
     }
 
+    /// Share the pause flag (set by the UI before `run_loop`). While it is `true`,
+    /// `run_loop` suspends; the default flag is never set, so headless runs (CLI,
+    /// tests) ignore pausing entirely.
+    pub fn set_pause_flag(&mut self, paused: Arc<AtomicBool>) {
+        self.paused = paused;
+    }
+
     pub fn run_loop(&mut self, num_msec: usize) {
         let mut n = 0;
         loop {
+            // Pause (set by the UI): suspend processing without consuming samples
+            // or tearing down state. The receiver clock is sample-count-based, so
+            // freezing the feed freezes time — acquisition, tracking, OSNMA and the
+            // current fix all resume exactly where they were.
+            while self.paused.load(Ordering::SeqCst) && !self.exit_req.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
             if self.process_step().is_err() {
                 break;
             }

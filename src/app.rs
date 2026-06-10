@@ -44,6 +44,7 @@ pub struct GnssRcvApp {
     plots: bool,
     needs_stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     pub_state: Arc<Mutex<GnssState>>,
     tab: Tab,
     diag_sv: Option<SV>,
@@ -62,6 +63,7 @@ impl Default for GnssRcvApp {
             plots: false,
             active: Arc::new(AtomicBool::new(false)),
             needs_stop: Arc::new(AtomicBool::new(false)),
+            paused: Arc::new(AtomicBool::new(false)),
             pub_state: Arc::new(Mutex::new(GnssState::new())),
             tab: Tab::Dashboard,
             diag_sv: None,
@@ -81,6 +83,7 @@ impl Default for GnssRcvApp {
 fn async_receive(
     active: Arc<AtomicBool>,
     needs_stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
     config: ReceiverConfig,
     pub_state: Arc<Mutex<GnssState>>,
 ) {
@@ -90,6 +93,7 @@ fn async_receive(
 
     match Receiver::new(&config, needs_stop.clone(), pub_state) {
         Ok(mut receiver) => {
+            receiver.set_pause_flag(paused);
             log::info!("run_loop");
             receiver.run_loop(0);
         }
@@ -133,9 +137,11 @@ impl GnssRcvApp {
     fn start_async(&mut self, ctx: &egui::Context) {
         log::info!("start_async");
         self.needs_stop.store(false, Ordering::SeqCst);
+        self.paused.store(false, Ordering::SeqCst);
 
         let active = self.active.clone();
         let needs_stop = self.needs_stop.clone();
+        let paused = self.paused.clone();
 
         self.pub_state = Arc::new(Mutex::new(GnssState::new()));
         let pub_state = self.pub_state.clone();
@@ -161,7 +167,7 @@ impl GnssRcvApp {
 
         thread::spawn(move || {
             log::info!("thread_start");
-            async_receive(active, needs_stop, config, pub_state);
+            async_receive(active, needs_stop, paused, config, pub_state);
             log::info!("thread_stop");
         });
     }
@@ -263,26 +269,34 @@ impl GnssRcvApp {
     }
 
     fn update_start_stop(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let button_text = if self.active.load(Ordering::SeqCst) {
-            "stop"
-        } else {
-            "start"
-        };
+        let active = self.active.load(Ordering::SeqCst);
         let btn_color = ui.visuals().selection.bg_fill;
         let h = ui.spacing().interact_size.y;
-        if ui
-            .add_sized(
-                [ui.available_width(), h],
-                egui::Button::new(button_text).fill(btn_color),
-            )
-            .clicked()
-        {
-            if self.active.load(Ordering::SeqCst) {
-                self.stop_async();
-            } else {
-                self.start_async(ctx);
+        ui.horizontal(|ui| {
+            // start/stop takes the full row when idle; while running it shares the
+            // row with a pause/resume button.
+            let pause_w = if active { 100.0 } else { 0.0 };
+            let gap = if active { ui.spacing().item_spacing.x } else { 0.0 };
+            let main_w = (ui.available_width() - pause_w - gap).max(60.0);
+            let label = if active { "stop" } else { "start" };
+            if ui
+                .add_sized([main_w, h], egui::Button::new(label).fill(btn_color))
+                .clicked()
+            {
+                if active {
+                    self.stop_async();
+                } else {
+                    self.start_async(ctx);
+                }
             }
-        }
+            if active {
+                let paused = self.paused.load(Ordering::SeqCst);
+                let label = if paused { "resume" } else { "pause" };
+                if ui.add_sized([pause_w, h], egui::Button::new(label)).clicked() {
+                    self.paused.store(!paused, Ordering::SeqCst);
+                }
+            }
+        });
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
