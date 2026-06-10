@@ -612,8 +612,8 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
     let c = rect.center();
     let r = size * 0.42;
 
-    // Background
-    painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(15, 15, 30));
+    // No background fill: let the panel show through so the plot blends into the
+    // UI rather than sitting in its own dark box.
 
     // Concentric elevation rings (horizon, 30°, 60°)
     for (elev, stroke_w) in [(0.0_f64, 1.5_f32), (30.0, 0.6), (60.0, 0.6)] {
