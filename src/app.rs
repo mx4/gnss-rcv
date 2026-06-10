@@ -393,7 +393,7 @@ impl GnssRcvApp {
                     ui.strong("ephemeris");
                 });
                 header.col(|ui| {
-                    ui.strong("other");
+                    ui.strong("osnma");
                 });
             })
             .body(|mut body| {
@@ -415,6 +415,7 @@ impl GnssRcvApp {
                     let doppler_hz = channel.unwrap().doppler_hz;
                     let code_idx = channel.unwrap().code_idx;
                     let has_eph = channel.unwrap().has_eph;
+                    let osnma_verified = channel.unwrap().osnma_verified;
 
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
@@ -437,7 +438,10 @@ impl GnssRcvApp {
                             ui.label(s.to_string());
                         });
                         row.col(|ui| {
-                            ui.label("".to_string());
+                            // OSNMA: green ✓ once this SV's nav data is authenticated.
+                            if osnma_verified {
+                                ui.colored_label(egui::Color32::GREEN, "✓ verified");
+                            }
                         });
                     });
                 }

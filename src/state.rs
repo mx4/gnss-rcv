@@ -14,6 +14,9 @@ pub struct ChannelState {
     pub code_idx: f64,
     pub phi: f64,
     pub has_eph: bool,
+    /// Galileo OSNMA: this SV's navigation data has been cryptographically
+    /// authenticated (set by the receiver-level verifier; always false off OSNMA).
+    pub osnma_verified: bool,
 }
 impl Default for ChannelState {
     fn default() -> Self {
@@ -24,6 +27,7 @@ impl Default for ChannelState {
             code_idx: 0.0,
             phi: 0.0,
             has_eph: false,
+            osnma_verified: false,
         }
     }
 }

@@ -112,6 +112,9 @@ pub struct Receiver {
     cached_iq_vec: Vec<Complex64>,
     cached_ts_sec_tail: f64,
     channels: HashMap<SV, Channel>,
+    /// Shared UI/state handle, so the receiver can publish OSNMA verification
+    /// status (the per-channel verifier status the SV table renders).
+    pub_state: Arc<Mutex<GnssState>>,
     solver: PositionSolver,
     last_fix_sec: f64,
     exit_on_fix: bool,
@@ -382,6 +385,7 @@ impl Receiver {
             cached_iq_vec: Vec::<Complex64>::new(),
             cached_ts_sec_tail: 0.0,
             channels,
+            pub_state: state.clone(),
             solver: PositionSolver::new(state),
             last_fix_sec: 0.0,
             exit_on_fix: cfg.exit_on_fix,
@@ -511,6 +515,9 @@ impl Receiver {
             .collect();
         for sv in newly {
             self.osnma_authenticated.insert(sv.prn);
+            if let Some(cs) = self.pub_state.lock().unwrap().channels.get_mut(&sv) {
+                cs.osnma_verified = true;
+            }
             log::warn!("{}: {}", sv, "OSNMA authenticated".green());
         }
     }
