@@ -72,7 +72,9 @@ pub(crate) enum SyncState {
 pub(crate) enum LnavOut {
     None,
     /// A parity-valid subframe: 300 parity-stripped bits, one per byte.
-    Subframe([u8; 300]),
+    /// Boxed so the common `None` arm isn't 300 bytes wide (it is returned
+    /// every code period; a subframe only every 6 s).
+    Subframe(Box<[u8; 300]>),
     /// A frame-synced subframe failed the word parity check.
     ParityError,
 }
@@ -284,7 +286,7 @@ impl LnavState {
         if test_lnav_parity(&bits, &mut nav_data) {
             self.nav_sync = self.count;
             self.sync_state = sync;
-            LnavOut::Subframe(nav_data)
+            LnavOut::Subframe(Box::new(nav_data))
         } else {
             self.nav_sync = 0;
             self.sync_state = SyncState::Normal;
@@ -313,8 +315,8 @@ impl Channel {
             }
             LnavOut::Subframe(nav_data) => {
                 self.stats.subframes += 1;
-                let id = self.nav_decode_lnav_subframe(&nav_data);
-                log::info!("{}: LNAV: id={id} -- {}", self.sv, hex_str(&nav_data));
+                let id = self.nav_decode_lnav_subframe(&nav_data[..]);
+                log::info!("{}: LNAV: id={id} -- {}", self.sv, hex_str(&nav_data[..]));
             }
         }
     }
@@ -842,7 +844,7 @@ mod tests {
                     LnavOut::Subframe(data) => {
                         subframes += 1;
                         // every emitted subframe carries the TLM preamble
-                        assert_eq!(getbitu(&data, 0, 8), PREAMBLE);
+                        assert_eq!(getbitu(&data[..], 0, 8), PREAMBLE);
                     }
                     LnavOut::ParityError => parity_errors += 1,
                     LnavOut::None => {}
