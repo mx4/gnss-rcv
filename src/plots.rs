@@ -205,9 +205,9 @@ fn plot_time_graph_with_sz(opts: PlotOpts<'_>) {
         .unwrap();
 
     ctx.configure_mesh()
-        .bold_line_style(&GRID_BOLD)
-        .light_line_style(&GRID_LIGHT)
-        .axis_style(&AXIS_COL)
+        .bold_line_style(GRID_BOLD)
+        .light_line_style(GRID_LIGHT)
+        .axis_style(AXIS_COL)
         .draw()
         .unwrap();
 
@@ -291,9 +291,9 @@ pub fn plot_iq_scatter(sv: SV, series: &[Complex64]) {
         .unwrap();
 
     ctx.configure_mesh()
-        .bold_line_style(&GRID_BOLD)
-        .light_line_style(&GRID_LIGHT)
-        .axis_style(&AXIS_COL)
+        .bold_line_style(GRID_BOLD)
+        .light_line_style(GRID_LIGHT)
+        .axis_style(AXIS_COL)
         .draw()
         .unwrap();
 
