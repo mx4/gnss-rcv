@@ -26,12 +26,28 @@ cargo test --release -- --ignored
   `synthetic_noisy_multi_sv_acquires_and_tracks`, which synthesize their own IQ
   via [`synth.rs`](src/synth.rs) and need no recording) + the fast integration
   test `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
-- **`cargo test --release -- --ignored`** — also runs the heavy
+- **`cargo test --release -- --ignored`** — also runs the heavy tests:
+  `synthetic_geometry_solves_to_truth` (~6 s, **hermetic** — see below),
   `computes_position_fix_gpssim` (~3 s; pipeline until the first fix, via
-  `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below).
+  `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below). CI runs
+  this tier too: the recording-based tests skip there, the hermetic one runs.
 - Unit-testing the receiver without a recording: `MockIQReader`
   ([receiver.rs](src/receiver.rs)) feeds a `Vec<Complex64>`; build a `Receiver`
   with `Receiver::with_feed(...)`.
+
+**The hermetic end-to-end positioning regression** is
+`synthetic_geometry_solves_to_truth` ([receiver.rs](src/receiver.rs)):
+`synth::GeoFeed` renders a multi-SV L1CA scene whose per-SV code phase, code
+rate, Doppler and LNAV bit timing all derive from the true ranges between a
+truth position and orbits the scene also *broadcasts* (full LNAV streams via
+`gps_lnav::encode_lnav_subframe_source`; the generator flies the LSB-quantized
+ephemeris the receiver will decode, see `quantize_via_lnav`). The full real
+pipeline — acquisition → tracking → bit/frame sync → ephemeris decode → tx
+anchor → gnss-rtk solve — must produce a fix within 15 m of the truth
+(measured ~2.5 m). Needs no recording, no gps-sdr-sim, no network; **this is
+the positioning regression CI runs on every push**. Constellation geometry
+comes from `synth::pick_geo_constellation` (one near-zenith SV + a ~30° ring;
+all-ring geometry was measured at 28 m error, 27.9 m of it vertical).
 
 The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 **full pipeline** against a gps-sdr-sim recording at a known location:
@@ -215,6 +231,12 @@ guesses. Tackle roughly top-to-bottom.
   `NAV_BIT_WINDOW` (308 bits — one subframe + the next preamble, all the decoder
   ever reads), so the per-bit rotate moves 308 bytes at 50 Hz — noise. The old
   18000-entry sizing was inherited, 58× larger than ever read.
+- ~~**Geometry-consistent synth→fix test**~~: `synth::GeoFeed` +
+  `gps_lnav::encode_lnav_subframe_source`/`quantize_via_lnav` +
+  `synth::pick_geo_constellation` give a hermetic IQ→position regression
+  (`synthetic_geometry_solves_to_truth`, ~6 s, fix ~2.5 m from truth) that CI
+  runs on every push — the first end-to-end positioning check that needs no
+  recording. Also the seed of a pure-Rust gps-sdr-sim replacement.
 
 **Architecture**
 - **Full `channel.rs` acquisition/tracking split — deferred on purpose.** The

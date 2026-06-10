@@ -35,3 +35,8 @@ jobs:
     - name: test
       run: cargo test --release --verbose
 
+    - name: test (hermetic end-to-end positioning)
+      # The #[ignore]d tier: recording-based tests skip cleanly when their
+      # inputs are absent (always, in CI), so this effectively runs the
+      # hermetic synthetic-geometry IQ->fix regression.
+      run: cargo test --release -- --ignored
