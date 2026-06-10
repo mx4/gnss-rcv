@@ -1,4 +1,7 @@
-use crate::{almanac::Almanac, channel::{History, State}};
+use crate::{
+    almanac::Almanac,
+    channel::{History, State},
+};
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 use std::collections::HashMap;

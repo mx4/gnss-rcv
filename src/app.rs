@@ -63,7 +63,11 @@ impl Default for GnssRcvApp {
             tab: Tab::Dashboard,
             diag_sv: None,
         };
-        let default_idx = app.recordings.iter().position(|r| r.name == "nov3").unwrap_or(0);
+        let default_idx = app
+            .recordings
+            .iter()
+            .position(|r| r.name == "nov3")
+            .unwrap_or(0);
         if !app.recordings.is_empty() {
             app.apply_recording(default_idx);
         }
@@ -103,7 +107,10 @@ fn sig_label(sig: Signal) -> &'static str {
 
 impl GnssRcvApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool) -> Self {
-        Self { plots, ..Default::default() }
+        Self {
+            plots,
+            ..Default::default()
+        }
     }
 
     fn apply_recording(&mut self, i: usize) {
@@ -188,7 +195,7 @@ impl GnssRcvApp {
             .unwrap_or("(no provisioned recordings)")
             .to_owned();
         let mut clicked = None;
-        egui::ComboBox::from_id_source("file_picker")
+        egui::ComboBox::from_id_salt("file_picker")
             .width(230.0)
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
@@ -239,9 +246,17 @@ impl GnssRcvApp {
     fn update_freqs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("fs");
-            ui.add(egui::DragValue::new(&mut self.fs).speed(1000.0).suffix(" Hz"));
+            ui.add(
+                egui::DragValue::new(&mut self.fs)
+                    .speed(1000.0)
+                    .suffix(" Hz"),
+            );
             ui.label("fi");
-            ui.add(egui::DragValue::new(&mut self.fi).speed(1000.0).suffix(" Hz"));
+            ui.add(
+                egui::DragValue::new(&mut self.fi)
+                    .speed(1000.0)
+                    .suffix(" Hz"),
+            );
         });
     }
 
@@ -254,7 +269,10 @@ impl GnssRcvApp {
         let btn_color = ui.visuals().selection.bg_fill;
         let h = ui.spacing().interact_size.y;
         if ui
-            .add_sized([ui.available_width(), h], egui::Button::new(button_text).fill(btn_color))
+            .add_sized(
+                [ui.available_width(), h],
+                egui::Button::new(button_text).fill(btn_color),
+            )
             .clicked()
         {
             if self.active.load(Ordering::SeqCst) {
@@ -279,13 +297,21 @@ impl GnssRcvApp {
             let almanac_n = st.almanac.iter().filter(|a| a.sat != 0).count();
             let (pos_text, pos_url) = if st.longitude != 0.0 {
                 (
-                    format!("lat={:.4}  lon={:.4}  alt={:.1} m", st.latitude, st.longitude, st.height),
-                    Some(format!("https://maps.google.com/?ll={},{}", st.latitude, st.longitude)),
+                    format!(
+                        "lat={:.4}  lon={:.4}  alt={:.1} m",
+                        st.latitude, st.longitude, st.height
+                    ),
+                    Some(format!(
+                        "https://maps.google.com/?ll={},{}",
+                        st.latitude, st.longitude
+                    )),
                 )
             } else {
                 ("no position fix".to_string(), None)
             };
-            (sv_elaz, tow_text, almanac_n, st.ion_adj, st.utc_adj, pos_text, pos_url)
+            (
+                sv_elaz, tow_text, almanac_n, st.ion_adj, st.utc_adj, pos_text, pos_url,
+            )
         };
 
         egui::TopBottomPanel::top("top_panel")
@@ -315,8 +341,14 @@ impl GnssRcvApp {
                                 ui.monospace(&tow_text);
                                 ui.separator();
                                 ui.monospace(format!("almanac: {almanac_n}"));
-                                if has_ion { ui.separator(); ui.monospace("ion: 1"); }
-                                if has_utc { ui.separator(); ui.monospace("utc: 1"); }
+                                if has_ion {
+                                    ui.separator();
+                                    ui.monospace("ion: 1");
+                                }
+                                if has_utc {
+                                    ui.separator();
+                                    ui.monospace("utc: 1");
+                                }
                             });
                             if let Some(url) = &pos_url {
                                 ui.hyperlink_to(&pos_text, url);
@@ -387,7 +419,10 @@ impl GnssRcvApp {
                             egui::Color32::from_rgb(220, 80, 60)
                         };
                         let label = egui::RichText::new(format!("{sv}")).color(color);
-                        if ui.selectable_label(self.diag_sv == Some(*sv), label).clicked() {
+                        if ui
+                            .selectable_label(self.diag_sv == Some(*sv), label)
+                            .clicked()
+                        {
                             self.diag_sv = Some(*sv);
                         }
                     }
@@ -425,10 +460,14 @@ impl GnssRcvApp {
             .column(Column::auto())
             .column(Column::auto())
             .column(Column::auto())
-            .column(Column::auto())  // ephemeris
+            .column(Column::auto()) // ephemeris
             .min_scrolled_height(0.0)
             .max_scroll_height(available_height);
-        let tb = if is_galileo { tb.column(Column::remainder()) } else { tb };
+        let tb = if is_galileo {
+            tb.column(Column::remainder())
+        } else {
+            tb
+        };
 
         let (constellation, max_prn) = if is_galileo {
             (Constellation::Galileo, 36)
@@ -436,63 +475,88 @@ impl GnssRcvApp {
             (Constellation::GPS, 32)
         };
 
-        tb
-            .header(20.0, |mut header| {
-                header.col(|ui| { ui.strong("SV"); });
-                header.col(|ui| { ui.strong("dB-Hz"); });
-                header.col(|ui| { ui.strong("doppler"); });
-                header.col(|ui| { ui.strong("code_idx"); });
-                header.col(|ui| { ui.strong("phi"); });
-                header.col(|ui| { ui.strong("ephemeris"); });
-                if is_galileo { header.col(|ui| { ui.strong("osnma"); }); }
-            })
-            .body(|mut body| {
-                for row_index in 1..=max_prn {
-                    let row_height = 20.0;
-                    let sv = SV::new(constellation, row_index);
-                    let pub_state = self.pub_state.lock().unwrap();
-                    let channel = pub_state.channels.get(&sv);
-
-                    if channel.is_none() {
-                        continue;
-                    }
-                    let state = channel.unwrap().state.clone();
-                    if state != State::Tracking {
-                        continue;
-                    }
-                    let cn0 = channel.unwrap().cn0;
-                    let phi = (channel.unwrap().phi % 1.0) * 2.0 * PI;
-                    let doppler_hz = channel.unwrap().doppler_hz;
-                    let code_idx = channel.unwrap().code_idx;
-                    let has_eph = channel.unwrap().has_eph;
-                    let osnma_verified = channel.unwrap().osnma_verified;
-
-                    body.row(row_height, |mut row| {
-                        row.col(|ui| { ui.label(format!("{}", sv)); });
-                        row.col(|ui| {
-                            let color = if cn0 >= 40.0 {
-                                egui::Color32::from_rgb(80, 200, 100)
-                            } else if cn0 >= 35.0 {
-                                egui::Color32::from_rgb(220, 190, 50)
-                            } else {
-                                egui::Color32::from_rgb(220, 80, 60)
-                            };
-                            ui.colored_label(color, format!("{:.1}", cn0));
-                        });
-                        row.col(|ui| { ui.label(format!("{:.0}", doppler_hz)); });
-                        row.col(|ui| { ui.label(format!("{:4.0}", code_idx)); });
-                        row.col(|ui| { ui.label(format!("{:.2}", phi)); });
-                        row.col(|ui| { ui.label(if has_eph { "1" } else { "-" }); });
-                        if is_galileo {
-                            row.col(|ui| {
-                                if osnma_verified {
-                                    ui.colored_label(egui::Color32::GREEN, "✓ verified");
-                                }
-                            });
-                        }
-                    });
-                }
+        tb.header(20.0, |mut header| {
+            header.col(|ui| {
+                ui.strong("SV");
             });
+            header.col(|ui| {
+                ui.strong("dB-Hz");
+            });
+            header.col(|ui| {
+                ui.strong("doppler");
+            });
+            header.col(|ui| {
+                ui.strong("code_idx");
+            });
+            header.col(|ui| {
+                ui.strong("phi");
+            });
+            header.col(|ui| {
+                ui.strong("ephemeris");
+            });
+            if is_galileo {
+                header.col(|ui| {
+                    ui.strong("osnma");
+                });
+            }
+        })
+        .body(|mut body| {
+            for row_index in 1..=max_prn {
+                let row_height = 20.0;
+                let sv = SV::new(constellation, row_index);
+                let pub_state = self.pub_state.lock().unwrap();
+                let channel = pub_state.channels.get(&sv);
+
+                if channel.is_none() {
+                    continue;
+                }
+                let state = channel.unwrap().state.clone();
+                if state != State::Tracking {
+                    continue;
+                }
+                let cn0 = channel.unwrap().cn0;
+                let phi = (channel.unwrap().phi % 1.0) * 2.0 * PI;
+                let doppler_hz = channel.unwrap().doppler_hz;
+                let code_idx = channel.unwrap().code_idx;
+                let has_eph = channel.unwrap().has_eph;
+                let osnma_verified = channel.unwrap().osnma_verified;
+
+                body.row(row_height, |mut row| {
+                    row.col(|ui| {
+                        ui.label(format!("{}", sv));
+                    });
+                    row.col(|ui| {
+                        let color = if cn0 >= 40.0 {
+                            egui::Color32::from_rgb(80, 200, 100)
+                        } else if cn0 >= 35.0 {
+                            egui::Color32::from_rgb(220, 190, 50)
+                        } else {
+                            egui::Color32::from_rgb(220, 80, 60)
+                        };
+                        ui.colored_label(color, format!("{:.1}", cn0));
+                    });
+                    row.col(|ui| {
+                        ui.label(format!("{:.0}", doppler_hz));
+                    });
+                    row.col(|ui| {
+                        ui.label(format!("{:4.0}", code_idx));
+                    });
+                    row.col(|ui| {
+                        ui.label(format!("{:.2}", phi));
+                    });
+                    row.col(|ui| {
+                        ui.label(if has_eph { "1" } else { "-" });
+                    });
+                    if is_galileo {
+                        row.col(|ui| {
+                            if osnma_verified {
+                                ui.colored_label(egui::Color32::GREEN, "✓ verified");
+                            }
+                        });
+                    }
+                });
+            }
+        });
     }
 }
 
@@ -500,8 +564,7 @@ impl GnssRcvApp {
 /// centre (90° elev = centre, 0° = horizon ring).
 fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
     let size = 200.0_f32;
-    let (response, painter) =
-        ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
+    let (response, painter) = ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
     let rect = response.rect;
     let c = rect.center();
     let r = size * 0.42;
@@ -523,10 +586,34 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
     let lo = r + 9.0;
     let font = egui::FontId::proportional(10.0);
     let grey = egui::Color32::from_rgb(130, 140, 160);
-    painter.text(egui::pos2(c.x, c.y - lo), egui::Align2::CENTER_CENTER, "N", font.clone(), grey);
-    painter.text(egui::pos2(c.x, c.y + lo), egui::Align2::CENTER_CENTER, "S", font.clone(), grey);
-    painter.text(egui::pos2(c.x + lo, c.y), egui::Align2::CENTER_CENTER, "E", font.clone(), grey);
-    painter.text(egui::pos2(c.x - lo, c.y), egui::Align2::CENTER_CENTER, "W", font.clone(), grey);
+    painter.text(
+        egui::pos2(c.x, c.y - lo),
+        egui::Align2::CENTER_CENTER,
+        "N",
+        font.clone(),
+        grey,
+    );
+    painter.text(
+        egui::pos2(c.x, c.y + lo),
+        egui::Align2::CENTER_CENTER,
+        "S",
+        font.clone(),
+        grey,
+    );
+    painter.text(
+        egui::pos2(c.x + lo, c.y),
+        egui::Align2::CENTER_CENTER,
+        "E",
+        font.clone(),
+        grey,
+    );
+    painter.text(
+        egui::pos2(c.x - lo, c.y),
+        egui::Align2::CENTER_CENTER,
+        "W",
+        font.clone(),
+        grey,
+    );
 
     // SV dots
     for (sv, elev_deg, azim_deg) in sv_elaz {
@@ -554,26 +641,65 @@ fn draw_diagnostics_charts(ui: &mut egui::Ui, sv: SV, hist: &History) {
         let phi: Vec<f64> = hist.phi_error.iter().copied().collect();
         let cpo: Vec<f64> = hist.code_phase_offset.iter().copied().collect();
         let n_iq = usize::min(hist.corr_p.len(), 2000);
-        let iq: Vec<(f64, f64)> =
-            hist.corr_p.iter().rev().take(n_iq).map(|c| (c.re, c.im)).collect();
+        let iq: Vec<(f64, f64)> = hist
+            .corr_p
+            .iter()
+            .rev()
+            .take(n_iq)
+            .map(|c| (c.re, c.im))
+            .collect();
 
-        mini_line_chart(ui, &format!("{sv} C/N0 dB-Hz"),        &cn0,    egui::Color32::from_rgb(80, 200, 100),  10.0);
-        mini_line_chart(ui, &format!("{sv} Doppler Hz"),         &doppler, egui::Color32::from_rgb(80, 140, 255), 4000.0);
-        mini_line_chart(ui, &format!("{sv} Phase error rad"),    &phi,    egui::Color32::YELLOW,                  0.5);
-        mini_line_chart(ui, &format!("{sv} Code phase offset"),  &cpo,    egui::Color32::from_rgb(200, 120, 50),  200.0);
+        mini_line_chart(
+            ui,
+            &format!("{sv} C/N0 dB-Hz"),
+            &cn0,
+            egui::Color32::from_rgb(80, 200, 100),
+            10.0,
+        );
+        mini_line_chart(
+            ui,
+            &format!("{sv} Doppler Hz"),
+            &doppler,
+            egui::Color32::from_rgb(80, 140, 255),
+            4000.0,
+        );
+        mini_line_chart(
+            ui,
+            &format!("{sv} Phase error rad"),
+            &phi,
+            egui::Color32::YELLOW,
+            0.5,
+        );
+        mini_line_chart(
+            ui,
+            &format!("{sv} Code phase offset"),
+            &cpo,
+            egui::Color32::from_rgb(200, 120, 50),
+            200.0,
+        );
         iq_scatter_chart(ui, &format!("{sv} IQ scatter"), &iq);
     });
 }
 
 /// Line chart with min/max envelope rendering for dense data, label above, grid lines.
 /// `min_range` prevents the y-axis from zooming into noise on stable signals.
-fn mini_line_chart(ui: &mut egui::Ui, label: &str, data: &[f64], color: egui::Color32, min_range: f64) {
+fn mini_line_chart(
+    ui: &mut egui::Ui,
+    label: &str,
+    data: &[f64],
+    color: egui::Color32,
+    min_range: f64,
+) {
     if data.len() < 2 {
         return;
     }
 
     ui.add_space(3.0);
-    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(150, 165, 185)));
+    ui.label(
+        egui::RichText::new(label)
+            .size(10.0)
+            .color(egui::Color32::from_rgb(150, 165, 185)),
+    );
 
     let desired = egui::vec2(ui.available_width(), 90.0);
     let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
@@ -633,8 +759,20 @@ fn mini_line_chart(ui: &mut egui::Ui, label: &str, data: &[f64], color: egui::Co
     // Y-axis min / max in the corners.
     let dim = egui::Color32::from_rgb(85, 95, 115);
     let fnt = egui::FontId::proportional(8.0);
-    painter.text(egui::pos2(rect.max.x - 2.0, rect.min.y + 2.0), egui::Align2::RIGHT_TOP,    format!("{y_hi:.1}"), fnt.clone(), dim);
-    painter.text(egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0), egui::Align2::RIGHT_BOTTOM, format!("{y_lo:.1}"), fnt.clone(), dim);
+    painter.text(
+        egui::pos2(rect.max.x - 2.0, rect.min.y + 2.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{y_hi:.1}"),
+        fnt.clone(),
+        dim,
+    );
+    painter.text(
+        egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        format!("{y_lo:.1}"),
+        fnt.clone(),
+        dim,
+    );
 }
 
 /// IQ scatter chart drawn with Painter, fixed 180×180, label above.
@@ -644,7 +782,11 @@ fn iq_scatter_chart(ui: &mut egui::Ui, label: &str, data: &[(f64, f64)]) {
     }
 
     ui.add_space(3.0);
-    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(150, 165, 185)));
+    ui.label(
+        egui::RichText::new(label)
+            .size(10.0)
+            .color(egui::Color32::from_rgb(150, 165, 185)),
+    );
 
     let sz = 180.0_f32;
     let (response, painter) = ui.allocate_painter(egui::vec2(sz, sz), egui::Sense::hover());

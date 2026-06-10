@@ -88,7 +88,11 @@ impl OsnmaVerifier {
     /// public key. The root lets DSM-PKR messages be authenticated; the public
     /// key lets the DSM-KROOT (and hence the TESLA chain) be verified straight
     /// away, without waiting for a DSM-PKR. Returns `None` if `sec1` is invalid.
-    pub fn from_merkle_and_p256(merkle_root: MerkleTreeNode, sec1: &[u8], pkid: u8) -> Option<Self> {
+    pub fn from_merkle_and_p256(
+        merkle_root: MerkleTreeNode,
+        sec1: &[u8],
+        pkid: u8,
+    ) -> Option<Self> {
         let vk = VerifyingKey::from_sec1_bytes(sec1).ok()?;
         let pubkey = PublicKey::from_p256(vk, pkid).force_valid();
         Some(OsnmaVerifier {

@@ -42,8 +42,8 @@ pub fn plot_remove(sv: SV) {
 /// that the static file works for GPS, Galileo and SBAS runs without manual
 /// editing.  Missing PNGs are silently removed by the `onerror` handler.
 pub fn plot_generate_html() {
-    let abs = std::fs::canonicalize(std::env::current_dir().unwrap_or_default())
-        .unwrap_or_default();
+    let abs =
+        std::fs::canonicalize(std::env::current_dir().unwrap_or_default()).unwrap_or_default();
     log::warn!("plots: writing to {}/{}", abs.display(), PLOT_FOLDER);
     let plots = [
         "cn0",
@@ -131,7 +131,16 @@ struct PlotOpts<'a> {
 }
 
 fn plot_time_graph_with_sz(opts: PlotOpts<'_>) {
-    let PlotOpts { sv, name, series, y_delta, color, x_step, size_x, size_y } = opts;
+    let PlotOpts {
+        sv,
+        name,
+        series,
+        y_delta,
+        color,
+        x_step,
+        size_x,
+        size_y,
+    } = opts;
     if series.len() < 10 {
         return;
     }

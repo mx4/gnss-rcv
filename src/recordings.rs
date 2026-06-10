@@ -107,8 +107,7 @@ mod tests {
 
     #[test]
     fn parses_a_full_flag_string() {
-        let (t, fs, fi, sig) =
-            parse_flags("-t i8 --fs 26000000 --fi 6390000 --sig E1B").unwrap();
+        let (t, fs, fi, sig) = parse_flags("-t i8 --fs 26000000 --fi 6390000 --sig E1B").unwrap();
         assert_eq!(t, IQFileType::TypeOneInt8);
         assert_eq!(fs, 26_000_000.0);
         assert_eq!(fi, 6_390_000.0);
