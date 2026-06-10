@@ -211,6 +211,10 @@ guesses. Tackle roughly top-to-bottom.
   `plots::plot_channel(sv, &History)`. `channel.rs` 835 → 743 lines, no longer
   depends on `plotters`. (The deeper acquisition/tracking split is deferred — see
   Architecture.)
+- ~~`LnavState.bits` 18 KB `rotate_left(1)` per nav bit~~: the buffer is now
+  `NAV_BIT_WINDOW` (308 bits — one subframe + the next preamble, all the decoder
+  ever reads), so the per-bit rotate moves 308 bytes at 50 Hz — noise. The old
+  18000-entry sizing was inherited, 58× larger than ever read.
 
 **Architecture**
 - **Full `channel.rs` acquisition/tracking split — deferred on purpose.** The
@@ -234,9 +238,6 @@ guesses. Tackle roughly top-to-bottom.
   cross-thread. Most locks fire on state *transitions* (not per tick), but
   batching per-channel updates into one per-ms apply would remove the contention
   and the double-lock at the cn0 update.
-- **`LnavState.bits` uses `rotate_left(1)`** on an 18 KB buffer per nav symbol
-  ([gps_lnav.rs](src/gps_lnav.rs)): same anti-pattern as the old `History`,
-  but at ~50 Hz it's negligible. Fix for consistency, not speed.
 
 **Multi-constellation**
 - **QZSS L1 C/A — cheap first step**: same 1023 Gold codes (PRN 193-202 live in

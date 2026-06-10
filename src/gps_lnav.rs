@@ -22,10 +22,20 @@ use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 
 const SECS_PER_WEEK: u32 = 7 * 24 * 60 * 60;
-const SDR_MAX_NSYM: usize = 18000;
+/// Rolling nav-bit window (bits): one 300-bit subframe plus the *next*
+/// subframe's 8-bit preamble — exactly what frame sync and decode look back at
+/// (a subframe is accepted only when bracketed by a preamble at both ends).
+const NAV_BIT_WINDOW: usize = 308;
 
-const THRESHOLD_SYNC: f64 = 0.4; // 0.02
-const THRESHOLD_LOST: f64 = 0.03; // 0.002
+/// Bit-edge (50 bps sync) acceptance gate: a candidate edge is taken when the
+/// ±-pattern correlation explains the energy (|p| >= r in `nav_sync_symbol`)
+/// AND the mean normalized prompt-I energy `r` itself clears this floor — i.e.
+/// the bits are strong, not just self-consistent noise.
+const THRESHOLD_SYNC: f64 = 0.4;
+/// Bit-quality gate while synced: a decoded 20 ms bit whose |mean prompt-I|
+/// falls below this is "weak" (the coherent sum nearly cancelled); see
+/// `WEAK_BIT_LIMIT` for the hysteresis before bit sync is declared lost.
+const THRESHOLD_LOST: f64 = 0.03;
 /// Consecutive weak 50 bps bits (|mean prompt-I| < THRESHOLD_LOST) tolerated before
 /// declaring bit sync lost. One weak bit is usually a momentary carrier wobble, not
 /// a real dropout; the per-subframe parity is the real data gate, so we ride through
@@ -67,7 +77,7 @@ impl LnavState {
             bit_sync: 0,
             nav_sync: 0,
             sync_state: SyncState::Normal,
-            bits: vec![0; SDR_MAX_NSYM],
+            bits: vec![0; NAV_BIT_WINDOW],
             count_parity_err: 0,
             weak_bits: 0,
         }
@@ -108,6 +118,9 @@ impl Channel {
                 self.nav.lnav.sync_state = SyncState::Normal;
             }
         } else if self.num_trk_samples >= 20 * 308 + 1000 {
+            // Earliest frame-sync attempt: the 308-bit window (20 code periods
+            // per bit) must hold real demodulated bits rather than the buffer's
+            // zero-fill, plus ~1 s (1000 periods) of pull-in margin.
             let sync = self.nav_get_frame_sync_state(preambule);
             if sync != SyncState::None {
                 self.nav_decode_lnav(sync);
@@ -134,7 +147,7 @@ impl Channel {
     }
 
     fn nav_get_frame_sync_state(&self, preambule: &[u8]) -> SyncState {
-        let bits = &self.nav.lnav.bits[SDR_MAX_NSYM - 308..];
+        let bits = self.nav.lnav.bits.as_slice();
         let bits_beg = &bits[0..preambule.len()];
         let bits_end = &bits[300..300 + preambule.len()];
         let mut sync_state = SyncState::None;
@@ -424,8 +437,8 @@ impl Channel {
 
     fn nav_decode_lnav(&mut self, sync: SyncState) {
         let rev = if sync == SyncState::Normal { 0 } else { 1 };
-        let bits_len = self.nav.lnav.bits.len();
-        let bits_raw = &self.nav.lnav.bits[bits_len - 308..bits_len - 8];
+        // The subframe is the window minus the trailing (next) preamble.
+        let bits_raw = &self.nav.lnav.bits[..NAV_BIT_WINDOW - 8];
         let bits: Vec<_> = bits_raw.iter().map(|v| v ^ rev).collect();
         let mut nav_data = vec![0; 300];
 
