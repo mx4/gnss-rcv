@@ -451,6 +451,9 @@ impl GnssRcvApp {
         let available_height = ui.available_height();
         let is_galileo = self.sig.is_boc11();
 
+        // Make the alternating stripe visible on a dark background.
+        ui.visuals_mut().faint_bg_color = egui::Color32::from_rgba_premultiplied(30, 36, 58, 220);
+
         let tb = TableBuilder::new(ui)
             .resizable(true)
             .striped(true)
@@ -533,19 +536,29 @@ impl GnssRcvApp {
                         } else {
                             egui::Color32::from_rgb(220, 80, 60)
                         };
-                        ui.colored_label(color, format!("{:.1}", cn0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.colored_label(color, format!("{:.1}", cn0));
+                        });
                     });
                     row.col(|ui| {
-                        ui.label(format!("{:.0}", doppler_hz));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(format!("{:.0}", doppler_hz));
+                        });
                     });
                     row.col(|ui| {
-                        ui.label(format!("{:4.0}", code_idx));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(format!("{:.0}", code_idx));
+                        });
                     });
                     row.col(|ui| {
-                        ui.label(format!("{:.2}", phi));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(format!("{:.2}", phi));
+                        });
                     });
                     row.col(|ui| {
-                        ui.label(if has_eph { "1" } else { "-" });
+                        if has_eph {
+                            ui.label("✓");
+                        }
                     });
                     if is_galileo {
                         row.col(|ui| {
@@ -563,7 +576,7 @@ impl GnssRcvApp {
 /// Polar sky plot: azimuth around the circle, elevation as radial distance from
 /// centre (90° elev = centre, 0° = horizon ring).
 fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
-    let size = 200.0_f32;
+    let size = 155.0_f32;
     let (response, painter) = ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
     let rect = response.rect;
     let c = rect.center();
