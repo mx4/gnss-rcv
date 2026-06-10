@@ -2240,7 +2240,6 @@ dependencies = [
  "gnss-rtk",
  "log",
  "map_3d",
- "once_cell",
  "p256",
  "plotters",
  "rayon",

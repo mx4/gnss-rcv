@@ -7,7 +7,6 @@ use gnss_rtk::prelude::{
     UserProfile, Vector3,
 };
 use map_3d::{Ellipsoid, ecef2geodetic};
-use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 
 use crate::{
@@ -221,8 +220,13 @@ fn klobuchar_l1_delay_m(
     SPEED_OF_LIGHT * f * delay
 }
 
-static SOLVER_EPHEMERIS: Lazy<Mutex<Vec<RxEphemeris>>> =
-    Lazy::new(|| Mutex::new(Vec::<RxEphemeris>::new()));
+/// The ephemerides of the epoch being solved, shared between `PositionSolver`
+/// (which writes them at the top of `compute_position`) and gnss-rtk's callback
+/// objects below (which look up per-SV data during `solver.ppp()`). The
+/// callbacks are constructed once with no per-call context, so this shared
+/// handle is the channel between them — instance-scoped, so multiple solvers
+/// (e.g. per-constellation) cannot see each other's data.
+type SharedEphemerides = Arc<Mutex<Vec<RxEphemeris>>>;
 
 struct NullEph;
 
@@ -232,11 +236,13 @@ impl EphemerisSource for NullEph {
     }
 }
 
-struct ReceiverOrbitSource;
+struct ReceiverOrbitSource {
+    ephs: SharedEphemerides,
+}
 
 impl OrbitSource for ReceiverOrbitSource {
     fn state_at(&self, epoch: Epoch, sv: SV, frame: Frame) -> Option<Orbit> {
-        let ephs = SOLVER_EPHEMERIS.lock().unwrap();
+        let ephs = self.ephs.lock().unwrap();
         let eph = ephs.iter().find(|e| e.sv == sv)?;
         let (x, y, z) = compute_sv_position_ecef(eph, epoch);
         Some(Orbit::from_position(
@@ -249,11 +255,13 @@ impl OrbitSource for ReceiverOrbitSource {
     }
 }
 
-struct ReceiverSpacebornBias;
+struct ReceiverSpacebornBias {
+    ephs: SharedEphemerides,
+}
 
 impl SpacebornBias for ReceiverSpacebornBias {
     fn clock_bias(&self, rtm: &BiasRuntime) -> SatelliteClockCorrection {
-        let ephs = SOLVER_EPHEMERIS.lock().unwrap();
+        let ephs = self.ephs.lock().unwrap();
         let Some(eph) = ephs.iter().find(|e| e.sv == rtm.sv) else {
             return SatelliteClockCorrection::default();
         };
@@ -262,7 +270,7 @@ impl SpacebornBias for ReceiverSpacebornBias {
     }
 
     fn group_delay(&self, rtm: &BiasRuntime) -> Duration {
-        let ephs = SOLVER_EPHEMERIS.lock().unwrap();
+        let ephs = self.ephs.lock().unwrap();
         ephs.iter()
             .find(|e| e.sv == rtm.sv)
             .map(|eph| Duration::from_seconds(eph.tgd))
@@ -306,6 +314,9 @@ type SolverInstance = Solver<
 
 pub struct PositionSolver {
     solver: SolverInstance,
+    /// This solver's epoch store, shared with its callback objects (see
+    /// [`SharedEphemerides`]); refreshed at the top of `compute_position`.
+    ephs: SharedEphemerides,
     // Last fix, used only as the receiver position for the ionosphere pierce
     // point; the solver itself needs no a-priori (it bootstraps via Bancroft).
     last_fix_ecef: Option<Vector3<f64>>,
@@ -340,10 +351,16 @@ fn make_config() -> Config {
 // Build a solver with no a-priori position: it bootstraps the first epoch with
 // Bancroft (closed-form) from the pseudoranges alone, then the Kalman filter
 // carries the state forward. Works anywhere on Earth without a starting guess.
-fn make_solver(almanac: &Almanac, earth_frame: Frame, cfg: &Config) -> SolverInstance {
+// `ephs` is the per-instance store its callback objects will read.
+fn make_solver(
+    almanac: &Almanac,
+    earth_frame: Frame,
+    cfg: &Config,
+    ephs: &SharedEphemerides,
+) -> SolverInstance {
     let eph = Rc::new(NullEph);
-    let orb = Rc::new(ReceiverOrbitSource);
-    let sb = Rc::new(ReceiverSpacebornBias);
+    let orb = Rc::new(ReceiverOrbitSource { ephs: ephs.clone() });
+    let sb = Rc::new(ReceiverSpacebornBias { ephs: ephs.clone() });
     let eb = Rc::new(ReceiverEnvironmentalBias);
     let tim = ReceiverTime;
     Solver::new_survey(
@@ -364,10 +381,12 @@ impl PositionSolver {
         let cfg = make_config();
         let almanac = Almanac::until_2035().expect("Almanac");
         let earth_frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
-        let solver = make_solver(&almanac, earth_frame, &cfg);
+        let ephs: SharedEphemerides = Arc::new(Mutex::new(Vec::new()));
+        let solver = make_solver(&almanac, earth_frame, &cfg, &ephs);
 
         Self {
             solver,
+            ephs,
             last_fix_ecef: None,
             pub_state,
         }
@@ -387,10 +406,9 @@ impl PositionSolver {
 
     /// Returns true if a position was resolved this call.
     pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
-        {
-            let mut glob_ephs = SOLVER_EPHEMERIS.lock().unwrap();
-            *glob_ephs = ephs.to_vec();
-        }
+        // Refresh this solver's epoch store; the callback objects read it
+        // during solver.ppp() below.
+        *self.ephs.lock().unwrap() = ephs.to_vec();
 
         let mut pool = vec![];
 
@@ -571,6 +589,33 @@ mod tests {
         e.toe_gpst = Epoch::from_time_of_week(947, 61_800 * 1_000_000_000, TimeScale::GST);
         e.toc_gpst = e.toe_gpst;
         e
+    }
+
+    // Two orbit sources with separate stores must not see each other's
+    // ephemerides — the property the old process-global SOLVER_EPHEMERIS
+    // static broke (it limited the process to one solver and let a second
+    // instance silently read the first one's data).
+    #[test]
+    fn orbit_sources_are_instance_scoped() {
+        let eph = galileo_meo_eph();
+        let sv = eph.sv;
+        let t = eph.toe_gpst;
+
+        let a = ReceiverOrbitSource {
+            ephs: Arc::new(Mutex::new(vec![eph])),
+        };
+        let b = ReceiverOrbitSource {
+            ephs: Arc::new(Mutex::new(Vec::new())),
+        };
+
+        let almanac = Almanac::until_2035().expect("Almanac");
+        let frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
+
+        assert!(a.state_at(t, sv, frame).is_some(), "own store is visible");
+        assert!(
+            b.state_at(t, sv, frame).is_none(),
+            "a second solver's empty store must not see the first one's data"
+        );
     }
 
     #[test]

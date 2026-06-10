@@ -43,7 +43,6 @@ gnss-rs = "2.6.0"
 # embeds the Earth orientation (pck11.pca) and planetary ephemeris (de440s.bsp)
 # required by gnss-rtk's Solver::new_survey to set up the EARTH_J2000 frame.
 anise = { version = "0.6", features = ["embed_ephem"] }
-once_cell = "1.21.4"
 map_3d = "0.1.7"
 egui = "0.31.1"
 eframe = "0.31.1"
