@@ -27,6 +27,10 @@ const HEIGHT: usize = 700;
 /// the boxes don't sprawl across the window.
 const LEFT_PANEL_W: f32 = 460.0;
 
+/// Common width for the format/signal dropdowns and the fs/fi fields, so the two
+/// columns of the controls grid line up.
+const FIELD_W: f32 = 115.0;
+
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Dashboard,
@@ -223,7 +227,8 @@ impl GnssRcvApp {
     }
 
     fn update_iq_type(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_label("iq-format")
+        egui::ComboBox::from_id_salt("iq_format")
+            .width(FIELD_W)
             .selected_text(self.iq_file_type.to_string())
             .show_ui(ui, |ui| {
                 for t in [
@@ -242,7 +247,8 @@ impl GnssRcvApp {
     }
 
     fn update_sig_type(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_label("signal")
+        egui::ComboBox::from_id_salt("signal")
+            .width(FIELD_W)
             .selected_text(sig_label(self.sig))
             .show_ui(ui, |ui| {
                 for s in [Signal::L1ca, Signal::GalileoE1b, Signal::GalileoE1c] {
@@ -251,21 +257,32 @@ impl GnssRcvApp {
             });
     }
 
-    fn update_freqs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.label("fs");
-            ui.add(
-                egui::DragValue::new(&mut self.fs)
-                    .speed(1000.0)
-                    .suffix(" Hz"),
-            );
-            ui.label("fi");
-            ui.add(
-                egui::DragValue::new(&mut self.fi)
-                    .speed(1000.0)
-                    .suffix(" Hz"),
-            );
-        });
+    /// The format / signal / fs / fi controls in a 2×2 grid: label-left, with the
+    /// fields all `FIELD_W` wide so the two columns line up and the dropdowns match.
+    fn update_controls(&mut self, ui: &mut egui::Ui) {
+        let h = ui.spacing().interact_size.y;
+        egui::Grid::new("rx_controls")
+            .num_columns(4)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("iq-format");
+                self.update_iq_type(ui);
+                ui.label("signal");
+                self.update_sig_type(ui);
+                ui.end_row();
+
+                ui.label("fs");
+                ui.add_sized(
+                    [FIELD_W, h],
+                    egui::DragValue::new(&mut self.fs).speed(1000.0).suffix(" Hz"),
+                );
+                ui.label("fi");
+                ui.add_sized(
+                    [FIELD_W, h],
+                    egui::DragValue::new(&mut self.fi).speed(1000.0).suffix(" Hz"),
+                );
+                ui.end_row();
+            });
     }
 
     fn update_start_stop(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -358,11 +375,7 @@ impl GnssRcvApp {
                                     egui::TextEdit::singleline(&mut self.iq_file),
                                 );
                             });
-                            ui.horizontal(|ui| {
-                                self.update_iq_type(ui);
-                                self.update_sig_type(ui);
-                            });
-                            self.update_freqs(ui);
+                            self.update_controls(ui);
                         });
                         // Status box.
                         egui::Frame::group(ui.style()).show(ui, |ui| {
