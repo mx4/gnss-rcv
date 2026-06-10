@@ -14,7 +14,7 @@ already had is 2013–2021 and carries no OSNMA bits).
 
 | Dataset | Bands | Format | OSNMA | Notes |
 |---|---|---|---|---|
-| **FGI OSNMA** (FGI-JSDR) | GPS L1 C/A + **Galileo E1** | real **i8**, **26 MHz**, **IF 6.39 MHz** (confirmed) | **✅ yes (2023)** | `fgi-osnma` in fetch.py. ~35 GB / 6 files, CC BY 4.0, **manual download** (Fairdata package flow). **✅ verified: Galileo-only fix at 60.182, 24.829 (Otaniemi/Espoo, Finland)** in ~48 s with `-t i8 --fs 26000000 --fi 6390000 --sig E1B` — cross-validates the BOC-τ on independent real data. Files: clean `OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat` (471 s; quote the path — it has a space), jammertest `…/Scenario2…/OSNMA_jammertest2023_17.1.6_740s.dat` (740 s). Both **GPS and Galileo fix** here, to ~30 m of each other (recorded 2023-10-31). (GPS needed the gentler LNAV sync recovery — before that it stalled at 3 ephemerides.) Has the OSNMA bits for the auth work. [Etsin](https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3) · [FGI-JSDR](https://www.maanmittauslaitos.fi/en/research/research/gnss-specialists/fgi-gnss-jamming-and-spoofing-dataset-repository-fgi-jsdr) |
+| **FGI OSNMA** (FGI-JSDR) | GPS L1 C/A + **Galileo E1** | real **i8**, **26 MHz**, **IF 6.39 MHz** (confirmed) | **✅ yes (2023)** | `fgi-osnma` in fetch.py. ~35 GB / 6 files, CC BY 4.0, **manual download** (Fairdata package flow). **✅ verified: Galileo-only fix at 60.182, 24.829 (Otaniemi/Espoo, Finland)** in ~48 s with `-t i8 --fs 26000000 --fi 6390000 --sig E1B` — cross-validates the BOC-τ on independent real data. Files: clean `OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat` (471 s; quote the path — it has a space), jammertest `…/Scenario2…/OSNMA_jammertest2023_17.1.6_740s.dat` (740 s). Both **GPS and Galileo fix** here, to ~30 m of each other (recorded 2023-10-31). (GPS needed the gentler LNAV sync recovery — before that it stalled at 3 ephemerides.) **OSNMA (`--osnma`): ✅ the 169-byte DSM-PKR public key verifies against the GSC 2023 Merkle root** — proving the real-signal OSNMA decode is byte-perfect — but this capture's PKR-dominated window carries no complete DSM-KROOT, so it stops short of full nav-data auth. Run with `--sats 4,9,21,31,34,36` (2.8× real-time). Full write-up: [docs/osnma.md](osnma.md). [Etsin](https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3) · [FGI-JSDR](https://www.maanmittauslaitos.fi/en/research/research/gnss-specialists/fgi-gnss-jamming-and-spoofing-dataset-repository-fgi-jsdr) |
 | **FGI-SpoofRepo** (FGI-JSDR) | GPS L1 C/A + **Galileo E1** + GPS L5 + Galileo E5a | raw IQ + spoofing types | no | Multi-band (also useful for a future L5/E5a). [Etsin](https://etsin.fairdata.fi/dataset/367379a8-7d78-4b08-91f0-8027ce7a621b). Repo characterized in [GPS Solutions 2024](https://link.springer.com/article/10.1007/s10291-024-01719-2). |
 
 ## For OSNMA crypto testing (not IQ)
@@ -25,8 +25,12 @@ already had is 2013–2021 and carries no OSNMA bits).
   acquire/track). From the [GSC OSNMA products](https://www.gsc-europa.eu/gsc-products/OSNMA).
 - **Trust anchor** for OSNMA: the **Merkle tree root** / ECDSA public key, also
   from the GSC ([MT](https://www.gsc-europa.eu/gsc-products/OSNMA/MT) /
-  [PKI](https://www.gsc-europa.eu/gsc-products/OSNMA/PKI)); must match the
-  recording's date (PKID).
+  [PKI](https://www.gsc-europa.eu/gsc-products/OSNMA/PKI)); **must match the
+  recording's epoch.** The Merkle tree was **renewed 2024-01-15**, so the GSC's
+  current files don't authenticate a pre-2024 capture. The **2023 anchor** (built
+  into [`osnma.rs`](../src/osnma.rs), used for the FGI recording) is Merkle root
+  `0E63F552…0148B8` + PKID-1 P-256 key `0374A925…F0F6DB0`. See
+  [docs/osnma.md](osnma.md) for the epoch timeline and the renewal keys.
 
 ## Already in fetch.py (have / used)
 

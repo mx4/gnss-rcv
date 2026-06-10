@@ -1,0 +1,109 @@
+# Galileo OSNMA
+
+OSNMA (Open Service Navigation Message Authentication) lets a receiver prove that
+the Galileo I/NAV ephemeris, clock and health it decoded were really signed by
+Galileo — defeating navigation-message spoofing. `gnss-rcv` decodes the OSNMA
+bits from the live E1-B signal and verifies them with the
+[`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate (`--osnma`).
+
+This note records how the pipeline is wired, the trust anchor it ships, and what
+we have and haven't been able to demonstrate on real recordings.
+
+## The trust chain
+
+OSNMA authenticates in three nested layers, each anchored by the one below:
+
+1. **TESLA MACs.** Every 30 s subframe carries MAC tags over the navigation data.
+   The MAC key is **disclosed one subframe later** — so a tag can't be forged in
+   real time, and a receiver validates it after the key arrives.
+2. **DSM-KROOT.** The root of the TESLA key chain (KROOT) is broadcast with an
+   **ECDSA signature**. Verifying it bootstraps trust in the whole chain.
+3. **Merkle tree + DSM-PKR.** The ECDSA public key is a leaf of a Merkle tree
+   whose 32-byte **root** the GSC publishes out of band. A DSM-PKR message carries
+   the public key plus its Merkle proof, so a receiver holding only the root can
+   authenticate the key.
+
+The single out-of-band secret a receiver needs is therefore the **Merkle root**
+(to verify a DSM-PKR) or, equivalently, a **known-good public key** (to verify the
+DSM-KROOT directly, skipping the DSM-PKR).
+
+## The receiver pipeline
+
+| Stage | Where | What |
+|---|---|---|
+| Extract | [`galileo_inav.rs`](../src/galileo_inav.rs) | The 40-bit OSNMA field is the odd page's "Reserved 1" at `page[132..172]` (just after the 16-bit Data j). `InavDecoder::assemble` lifts it into `InavWord.osnma` alongside the 128 data bits. |
+| Timestamp | [`navigation.rs`](../src/navigation.rs) | Each decoded page is buffered with the **GST at which it was transmitted**: the word-5 TOW anchor plus real elapsed time. |
+| Feed + report | [`receiver.rs`](../src/receiver.rs) | After the parallel channel step, the receiver drains every Galileo channel's page buffer into one shared verifier and logs each SV that reaches an authenticated state — the same sequential phase as the position fix. |
+| Verify | [`osnma.rs`](../src/osnma.rs) | `OsnmaVerifier` wraps `galileo_osnma::Osnma`; `pack_msb` packs our one-bit-per-byte arrays MSB-first into the crate's 16-byte I/NAV word and 5-byte OSNMA message. |
+
+### Why per-page GST timing is forgiving
+
+The GST is an input to the MAC, so it must be *correct* — but the crate floors
+every fed GST to its 30 s subframe (`gst.gst_subframe()`) before using it. So the
+per-page GST only has to land in the **right 30 s subframe**, which the word-5
+anchor (`eph.tow` read straight from the message, plus sample-clock elapsed time)
+achieves with sub-second margin. We don't need to reconstruct each page's exact
+2 s slot.
+
+## The 2023 trust anchor (built in)
+
+`OsnmaVerifier::galileo_2023()` loads both halves of the trust anchor in force
+during 2023, as published by the GSC and by Daniel Estévez:
+
+- **Merkle root** `0E63F552C8021709043C239032EFFE941BF22C8389032F5F2701E0FBC80148B8`
+- **ECDSA P-256 public key, PKID 1** `0374A925CFA0FF1805E5C5A58FDBA31BF0145D5B5BE2F062D3F8BB2EE98F0F6DB0`
+
+Loading both means the verifier can authenticate the stream's DSM-PKR (via the
+root) *and* its DSM-KROOT (via the key) without waiting 6 h for a DSM-PKR.
+
+### Watch the epoch — the tree was renewed in 2024
+
+The Galileo OSNMA **Merkle tree was renewed on 2024-01-15** (new root
+`832E15ED…F842F04E`, re-issuing the public keys: PKID 1 → `0397EB43…`, then PKID 2
+→ `02219204…` from 2025-12-10). The GSC's *current* downloadable trust files are
+post-renewal and **do not** authenticate a pre-2024 capture. The FGI 2023
+recording (2023-10-31) is from the **older** tree, hence the built-in 2023 values
+above. The PKID is **1**, not 0 — confirmed by the signal itself: the DSM-PKR in
+the FGI recording carries `new_public_key_id = 1` for `0374A925…`.
+
+## What we verified on the FGI clean recording
+
+Running `--osnma` over the FGI clean recording (471 s, `--sats 4,9,21,31,34,36`):
+
+> `verified public key in DSM-PKR: DsmPkr { number_of_blocks: 13, …`
+> `new_public_key_id: 1, new_public_key: Some([3, 116, 169, 37, …]) }`  ← `0374A925…`
+
+The crate reassembled the **169-byte DSM-PKR across 13 subframes and verified its
+public key against the GSC Merkle root**. An ECDSA-signed Merkle proof cannot pass
+by chance, so this proves the whole real-signal path — I/NAV decode → 40-bit field
+→ per-page GST → crate — is **byte-perfect**.
+
+### The DSM-KROOT gap (no full nav-data auth from this capture)
+
+Full nav-data authentication additionally needs a complete **DSM-KROOT** (to
+derive the TESLA root key). This recording's OSNMA broadcast is **DSM-PKR-
+dominated**: ~13 of its ~15 subframes carry the PKR, with only a couple of
+DSM-KROOT fragments (ids 0, 2) at the start. So the KROOT never completes and the
+verifier stays at `no valid TESLA key for the chain in force`. This is a property
+of the captured window — a cold receiver here genuinely can't reach full auth,
+whereas a warm receiver would already hold the KROOT from before the capture.
+
+To demonstrate full TESLA/MAC authentication end-to-end, feed a stream that *does*
+contain a complete DSM-KROOT — e.g. the GSC EUSPA OSNMA test vectors (a hex
+I/NAV+OSNMA stream, fed straight into `OsnmaVerifier`, no acquire/track), or a
+recording from a normal KROOT-broadcasting window.
+
+## Running it
+
+```sh
+RUST_LOG=warn,galileo_osnma=info ./target/release/gnss-rcv \
+  -f <recording> -t i8 --fs 26M --fi 6.39M --sig E1B --osnma \
+  --sats 4,9,21,31,34,36
+```
+
+**Restrict `--sats` to the visible satellites.** OSNMA itself costs ~5% (measured:
+60 s data, 6 sats → 22.6 s wall with `--osnma` vs 21.5 s without). The real cost
+is acquisition: with all 36 PRNs, ~30 never-locking channels re-search every step
+(~11× *slower* than real-time); the visible six run at **2.8× real-time**, so the
+whole 471 s recording processes in ~3 min. Raise `galileo_osnma` to `debug` for
+block-level DSM detail.

@@ -8,3 +8,6 @@ resources/*
 !resources/gen_gpssim.sh
 gnss.log
 plots/*png
+# OSNMA trust-anchor downloads from the GSC portal / destevez.net
+# (the values in use are embedded in src/osnma.rs and documented in docs/osnma.md)
+/OSNMA_*
