@@ -170,7 +170,6 @@ impl Channel {
         if self.is_ephemeris_complete() && !self.nav.eph.tx_anchored {
             self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
             self.nav.eph.tx_tow_gpst = self.nav.eph.tow_gpst;
-            self.nav.eph.tx_anchor_ts_sec = self.ts_sec;
             self.nav.eph.tx_anchored = true;
             log::warn!(
                 "{}: tx anchored tow={:?} phase={:.6}",

@@ -12,10 +12,9 @@ pub struct Ephemeris {
     // code_sec. Because num_trk_samples counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver
     // wall clock ts_sec. The absolute sub-ms code phase is kept in code_off_sec.
-    pub trk_phase: f64,        // current integer transmit-time
-    pub tow_trk_phase: f64,    // integer-ms phase at tx_tow_gpst (set once)
-    pub tx_tow_gpst: Epoch,    // GPS time pinned at first ephemeris lock
-    pub tx_anchor_ts_sec: f64, // receiver time when tx was anchored
+    pub trk_phase: f64,     // current integer transmit-time
+    pub tow_trk_phase: f64, // integer-ms phase at tx_tow_gpst (set once)
+    pub tx_tow_gpst: Epoch, // GPS time pinned at first ephemeris lock
     pub tx_anchored: bool,
     pub tow_gpst: Epoch,
     pub toe_gpst: Epoch, // cf toe

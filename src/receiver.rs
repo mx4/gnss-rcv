@@ -428,6 +428,9 @@ impl Receiver {
     }
 
     fn compute_fix(&mut self, ts_sec: f64) {
+        // Fix-attempt cadence, in data time. A solver call costs ~ms, so this is
+        // a logging/UI rate choice, not a perf one — but with -x it quantizes
+        // the time-to-first-fix.
         if ts_sec - self.last_fix_sec < 2.0 {
             return;
         }
@@ -437,7 +440,10 @@ impl Receiver {
             .values()
             .filter(|&ch| ch.is_state_tracking())
             .filter(|&ch| ch.is_ephemeris_complete())
-            .filter(|&ch| ch.nav.eph.tx_anchored && ch.ts_sec - ch.nav.eph.tx_anchor_ts_sec > 3.0)
+            // tx_anchored alone suffices: the anchor pins only once the
+            // ephemeris completes (>= 3 clean subframes, ~30 s of continuous
+            // tracking), so the tracking loops are long settled by then.
+            .filter(|&ch| ch.nav.eph.tx_anchored)
             .map(|ch| ch.nav.eph)
             .collect();
 
