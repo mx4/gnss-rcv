@@ -24,6 +24,13 @@ use crate::util::get_max_with_idx;
 /// depends on the correlation-peak shape *relative to this spacing*; that
 /// interaction is what the per-signal `DLL_DISC_GAIN_*` constants calibrate.
 const SP_CORR: f64 = 0.5;
+/// Offset of the "neutral" correlator (the C/N0 noise reference), in the same
+/// code units as `SP_CORR`: far enough out that the spreading-code correlation
+/// sits at its off-peak floor, so the tap measures noise only. Was a fixed 80
+/// *samples* — 40 chips at the default 2.046 MHz but shrinking with sample
+/// rate (3.3 chips at 25 MHz, inside the peak beyond ~54 MHz); in chips it is
+/// rate-invariant. Verified no C/N0 shift at 2.046/25 MHz (synth bench, 45 dB-Hz).
+const NEUTRAL_CORR: f64 = 40.0;
 const T_IDLE: f64 = 3.0;
 // A satellite in view acquires within a handful of attempts; the 10 ms
 // acquisition CN0 estimate is noisy near the threshold, so a weak-but-real SV
@@ -622,8 +629,10 @@ impl Channel {
         self.trk.sig_buf.extend_from_slice(&iq_vec2[lo_u..hi_u]);
         doppler_shift(&mut self.trk.sig_buf, fc, phi, fs);
 
-        let pos = (SP_CORR * self.code_sec * self.fs / self.code_len as f64) as usize;
-        let pos_neutral: usize = 80;
+        // Samples per code-unit (chip; BOC sub-chip for E1) at this sample rate.
+        let sp_per_chip = self.code_sec * self.fs / self.code_len as f64;
+        let pos = (SP_CORR * sp_per_chip) as usize;
+        let pos_neutral = (NEUTRAL_CORR * sp_per_chip) as usize;
 
         let sig = &self.trk.sig_buf;
         let code = &self.trk.prn_code;
