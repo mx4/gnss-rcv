@@ -45,26 +45,30 @@ anchor (`eph.tow` read straight from the message, plus sample-clock elapsed time
 achieves with sub-second margin. We don't need to reconstruct each page's exact
 2 s slot.
 
-## The 2023 trust anchor (built in)
+## Trust anchors (built in, auto-selected by epoch)
 
-`OsnmaVerifier::galileo_2023()` loads both halves of the trust anchor in force
-during 2023, as published by the GSC and by Daniel Estévez:
+Each anchor is a (Merkle root, ECDSA P-256 public key, PKID) the GSC published,
+valid for a range of GST weeks. All three known epochs are built into
+[`osnma.rs`](../src/osnma.rs) (`ANCHORS`), and `--osnma` picks the right one from
+the **decoded GST week** — `OsnmaVerifier::for_gst_week(week)` — so it works on any
+capture without the user choosing:
 
-- **Merkle root** `0E63F552C8021709043C239032EFFE941BF22C8389032F5F2701E0FBC80148B8`
-- **ECDSA P-256 public key, PKID 1** `0374A925CFA0FF1805E5C5A58FDBA31BF0145D5B5BE2F062D3F8BB2EE98F0F6DB0`
+| Epoch | From | Merkle root | Public key (PKID) |
+|---|---|---|---|
+| **2023** | (pre-renewal) | `0E63F552…0148B8` | `0374A925…F0F6DB0` (PKID 1) |
+| **2024** | 2024-01-15 (week 1273) | `832E15ED…F842F04E` | `0397EB43…3501F73B` (PKID 1) |
+| **2025** | 2025-12-10 (week 1372) | `832E15ED…F842F04E` | `02219204…D695FC99` (PKID 2) |
 
-Loading both means the verifier can authenticate the stream's DSM-PKR (via the
-root) *and* its DSM-KROOT (via the key) without waiting 6 h for a DSM-PKR.
+Loading both halves (root + key) lets the verifier authenticate the stream's
+DSM-PKR (via the root) *and* its DSM-KROOT (via the key) without waiting 6 h for a
+DSM-PKR.
 
-### Watch the epoch — the tree was renewed in 2024
-
-The Galileo OSNMA **Merkle tree was renewed on 2024-01-15** (new root
-`832E15ED…F842F04E`, re-issuing the public keys: PKID 1 → `0397EB43…`, then PKID 2
-→ `02219204…` from 2025-12-10). The GSC's *current* downloadable trust files are
-post-renewal and **do not** authenticate a pre-2024 capture. The FGI 2023
-recording (2023-10-31) is from the **older** tree, hence the built-in 2023 values
-above. The PKID is **1**, not 0 — confirmed by the signal itself: the DSM-PKR in
-the FGI recording carries `new_public_key_id = 1` for `0374A925…`.
+The Merkle tree was **renewed on 2024-01-15** — a new root distinct from 2023's,
+which is why the GSC's *current* downloadable files don't authenticate a pre-2024
+capture. The 2024 and 2025 publications share that renewed root; only the public
+key rotates (PKID 1 → 2 on 2025-12-10). The 2023 PKID is **1**, not 0 — confirmed
+by the signal itself: the DSM-PKR in the FGI recording carries
+`new_public_key_id = 1` for `0374A925…`.
 
 ## What we verified on the FGI clean recording
 
