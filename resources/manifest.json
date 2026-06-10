@@ -128,6 +128,18 @@
     ]
   },
   {
+    "name": "tuni2025",
+    "url": "https://zenodo.org/records/15470143/files/clearsky_signal_C-1.bin?download=1",
+    "dest": "clearsky_signal_C-1.bin",
+    "size": 0,
+    "archive": "raw",
+    "flags": "-t 2xf32 --fs 50000000 --sig E1B",
+    "note": "Tampere Univ. Galileo E1 clear-sky 2025, 50 MHz zero-IF 32-bit float, ~75s; fixes (Tampere 61.45\u00b0N 23.86\u00b0E)",
+    "tags": [
+      "galileo"
+    ]
+  },
+  {
     "name": "fgi-osnma",
     "url": "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
     "dest": "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat",
