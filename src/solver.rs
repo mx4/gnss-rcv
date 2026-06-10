@@ -153,11 +153,16 @@ pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)
 ///
 /// Reference: Saastamoinen (1973); standard atmosphere (ICAO).
 fn saastamoinen_tropo_m(lat: f64, h_m: f64, elev: f64) -> f64 {
-    if elev < 5.0_f64.to_radians() {
+    // Below 5° the 1/sin mapping blows up; a non-finite elevation (from a garbage
+    // prior fix) must also bail here (a plain `<` wouldn't catch NaN).
+    if elev.is_nan() || elev < 5.0_f64.to_radians() {
         return 0.0;
     }
-    // Standard atmosphere: surface pressure at height h_m [hPa].
-    let p_hpa = 1013.25 * (1.0 - 2.2558e-5 * h_m).powf(5.2568);
+    // Standard atmosphere: surface pressure at height h_m [hPa]. Clamp the base at
+    // 0: above ~44 km it goes negative and `.powf` of a negative base is NaN,
+    // which a garbage height from a bad fix would otherwise propagate into the
+    // pseudorange (and crash the solver). Pressure is ~0 up there anyway → ZHD ≈ 0.
+    let p_hpa = 1013.25 * (1.0 - 2.2558e-5 * h_m).max(0.0).powf(5.2568);
     // Saastamoinen gravity correction (latitude- and height-dependent).
     let f = 1.0 - 2.66e-3 * (2.0 * lat).cos() - 2.8e-4 * (h_m / 1000.0);
     // Zenith hydrostatic delay [m].
@@ -508,6 +513,13 @@ impl PositionSolver {
             );
 
             let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m;
+
+            // A non-finite pseudorange (e.g. a NaN correction from a garbage prior
+            // fix) would panic gnss-rtk's Duration math — drop the SV instead.
+            if !pr_m.is_finite() {
+                log::warn!("{}: dropping SV, non-finite pseudorange", eph.sv);
+                continue;
+            }
 
             if let Some(truth) = truth_ecef {
                 let we = EARTH_ROTATION_RATE * pseudo_range_sec;
