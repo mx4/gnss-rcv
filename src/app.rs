@@ -270,31 +270,41 @@ impl GnssRcvApp {
 
     fn update_start_stop(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let active = self.active.load(Ordering::SeqCst);
-        let btn_color = ui.visuals().selection.bg_fill;
+        let paused = self.paused.load(Ordering::SeqCst);
+        let accent = ui.visuals().selection.bg_fill;
+        let red = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
         let h = ui.spacing().interact_size.y;
         ui.horizontal(|ui| {
-            // start/stop takes the full row when idle; while running it shares the
-            // row with a pause/resume button.
-            let pause_w = if active { 100.0 } else { 0.0 };
+            // Primary run control: start (idle) -> pause (running) -> resume
+            // (paused). It takes the full row when idle, and shares it with the
+            // red stop button while running.
+            let stop_w = if active { 90.0 } else { 0.0 };
             let gap = if active { ui.spacing().item_spacing.x } else { 0.0 };
-            let main_w = (ui.available_width() - pause_w - gap).max(60.0);
-            let label = if active { "stop" } else { "start" };
+            let main_w = (ui.available_width() - stop_w - gap).max(60.0);
+            let label = if !active {
+                "start"
+            } else if paused {
+                "resume"
+            } else {
+                "pause"
+            };
             if ui
-                .add_sized([main_w, h], egui::Button::new(label).fill(btn_color))
+                .add_sized([main_w, h], egui::Button::new(label).fill(accent))
                 .clicked()
             {
-                if active {
-                    self.stop_async();
-                } else {
+                if !active {
                     self.start_async(ctx);
-                }
-            }
-            if active {
-                let paused = self.paused.load(Ordering::SeqCst);
-                let label = if paused { "resume" } else { "pause" };
-                if ui.add_sized([pause_w, h], egui::Button::new(label)).clicked() {
+                } else {
                     self.paused.store(!paused, Ordering::SeqCst);
                 }
+            }
+            // Stop (red), only while running — tears the run down.
+            if active
+                && ui
+                    .add_sized([stop_w, h], egui::Button::new("stop").fill(red))
+                    .clicked()
+            {
+                self.stop_async();
             }
         });
     }
