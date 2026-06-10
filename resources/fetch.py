@@ -12,6 +12,7 @@ or "all". Re-running skips files already present; interrupted downloads resume
 (curl -C -). Needs `curl` (plus `unzip`/`tar` for the archived recordings).
 """
 
+import json
 import os
 import re
 import sys
@@ -313,7 +314,19 @@ def resolve(target: str) -> List[Rec]:
     return []
 
 
+def write_manifest() -> None:
+    """Emit resources/manifest.json — the recordings list the desktop UI reads to
+    populate its file picker and auto-fill -t/--fs/--fi/--sig. Regenerated on
+    every run so it stays in sync with RECORDINGS (the single source of truth)."""
+    manifest = [
+        {"name": r.name, "dest": r.dest, "flags": r.flags, "note": r.note, "tags": list(r.tags)}
+        for r in RECORDINGS
+    ]
+    (HERE / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+
 def main(argv: List[str]) -> int:
+    write_manifest()  # keep the UI's recording list in sync with RECORDINGS
     args = list(argv)
     tag_filter = None
     if "--tag" in args:

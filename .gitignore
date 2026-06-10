@@ -6,6 +6,7 @@ resources/*
 !resources/README.md
 !resources/fetch.py
 !resources/gen_gpssim.sh
+!resources/manifest.json
 gnss.log
 plots/*png
 # OSNMA trust-anchor downloads from the GSC portal / destevez.net

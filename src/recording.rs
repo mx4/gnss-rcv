@@ -14,7 +14,7 @@ use std::str::FromStr;
 
 use crate::receiver::IQReader;
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IQFileType {
     TypePairFloat32,
     TypePairInt16,

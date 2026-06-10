@@ -1,0 +1,108 @@
+[
+  {
+    "name": "jks-1bit",
+    "dest": "gps.samples.1bit.I.fs5456.if4092.bin",
+    "flags": "-t 1bit --fs 5456000 --fi 1364000",
+    "note": "jks.com 1-bit real, ~82s; tracks ~7 SVs at a marginal ~30 dB-Hz",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "zenodo-sigmf",
+    "dest": "GPS-L1-2022-03-27.sigmf-data",
+    "flags": "-t 2xi16 --fs 4000000",
+    "note": "SigMF ci16, 4 MHz, ~15s; tracks but too short for a fix",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "cttc",
+    "dest": "2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
+    "flags": "-t 2xi16 --fs 4000000",
+    "note": "gnss-sdr CTTC Spain 2013, ~1.1 GiB; fixes (Castelldefels)",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "ion-rtlsdr",
+    "dest": "ION_RTLSDR_Bands-L1.rtlsdr",
+    "flags": "-t rtlsdr-file --fs 2048000",
+    "note": "ION rooftop RTL-SDR L1, 60s; fixes (Netherlands)",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "ion-bladerf",
+    "dest": "ION_BladeRF_Bands-L1.2xi16",
+    "flags": "-t 2xi16 --fs 10000000",
+    "note": "ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "ion-lime",
+    "dest": "ION_LimeSDR_Bands-L1.2xi16",
+    "flags": "-t 2xi16 --fs 10000000 --fi 420000",
+    "note": "ION LimeSDR L1, 10 MHz IF 420 kHz, 60s; fixes (Netherlands)",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "ion-hackrf",
+    "dest": "ION_HackRF_Bands-L1.2xi8",
+    "flags": "-t 2xi8 --fs 10000000 --fi 420000",
+    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "sjtu",
+    "dest": "SJTU_Bands-L1E1.dat",
+    "flags": "-t 4bit --fs 25000000 --fi 6250000",
+    "note": "ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs, no full fix",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "pocketsdr",
+    "dest": "L1_20211226_082212_12MHz_I.bin",
+    "flags": "-t i8 --fs 12000000 --fi 3000000 --qzss",
+    "note": "PocketSDR Tokyo L1, ~30s; tracks GPS + QZSS J194/195/199",
+    "tags": [
+      "gps",
+      "qzss",
+      "galileo"
+    ]
+  },
+  {
+    "name": "nov3",
+    "dest": "nov_3_time_18_48_st_ives",
+    "flags": "-t 2xf32",
+    "note": "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "fgi-osnma",
+    "dest": "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat",
+    "flags": "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
+    "note": "FGI OSNMA (Finland 2023), L1/E1 i8 26 MHz fi 6.39 MHz; Galileo fixes (Otaniemi); clean 460s + jammertest + OSNMA bits; manual, see docs/datasets.md",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  }
+]
