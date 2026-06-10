@@ -10,7 +10,7 @@ use std::thread;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 
-use crate::channel::State;
+use crate::channel::{History, State};
 use crate::code::Signal;
 use crate::receiver::{Receiver, ReceiverConfig};
 use crate::recording::IQFileType;
@@ -19,23 +19,30 @@ use crate::state::GnssState;
 
 const PI: f64 = std::f64::consts::PI;
 
-const WIDTH: usize = 800;
-const HEIGHT: usize = 600;
+const WIDTH: usize = 900;
+const HEIGHT: usize = 700;
+
+#[derive(PartialEq, Clone, Copy)]
+enum Tab {
+    Dashboard,
+    Diagnostics,
+}
 
 pub struct GnssRcvApp {
-    /// Recordings present on disk (from `resources/manifest.json`), in pick order.
     recordings: Vec<Recording>,
-    selected: usize, // index into `recordings` (meaningful only when non-empty)
-    // Run parameters, auto-filled from the selected recording but editable.
+    selected: usize,
     iq_file: String,
     iq_file_type: IQFileType,
     fs: f64,
     fi: f64,
     sig: Signal,
     osnma: bool,
+    plots: bool,
     needs_stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     pub_state: Arc<Mutex<GnssState>>,
+    tab: Tab,
+    diag_sv: Option<SV>,
 }
 
 impl Default for GnssRcvApp {
@@ -48,13 +55,17 @@ impl Default for GnssRcvApp {
             fs: 2_046_000.0,
             fi: 0.0,
             sig: Signal::L1ca,
-            osnma: true, // OSNMA on by default (it only acts on an E1B run)
+            osnma: true,
+            plots: false,
             active: Arc::new(AtomicBool::new(false)),
             needs_stop: Arc::new(AtomicBool::new(false)),
             pub_state: Arc::new(Mutex::new(GnssState::new())),
+            tab: Tab::Dashboard,
+            diag_sv: None,
         };
+        let default_idx = app.recordings.iter().position(|r| r.name == "nov3").unwrap_or(0);
         if !app.recordings.is_empty() {
-            app.apply_recording(0);
+            app.apply_recording(default_idx);
         }
         app
     }
@@ -75,7 +86,6 @@ fn async_receive(
             log::info!("run_loop");
             receiver.run_loop(0);
         }
-        // A bad path or unavailable source must not crash the UI; log and stop.
         Err(e) => log::error!("cannot start receiver for {}: {e}", config.file.display()),
     }
 
@@ -83,7 +93,6 @@ fn async_receive(
     log::info!("start_receiving: done");
 }
 
-/// Short label for the signal dropdown (Galileo `Signal` has no `Display`).
 fn sig_label(sig: Signal) -> &'static str {
     match sig {
         Signal::L1ca => "L1CA",
@@ -93,12 +102,10 @@ fn sig_label(sig: Signal) -> &'static str {
 }
 
 impl GnssRcvApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        Default::default()
+    pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool) -> Self {
+        Self { plots, ..Default::default() }
     }
 
-    /// Copy a provisioned recording's path + run parameters into the editable
-    /// fields, so picking a file auto-selects its format / fs / fi / signal.
     fn apply_recording(&mut self, i: usize) {
         self.selected = i;
         self.iq_file = self.recordings[i].path.to_string_lossy().into_owned();
@@ -139,6 +146,7 @@ impl GnssRcvApp {
             fi: self.fi,
             sig: self.sig,
             osnma: self.osnma,
+            plots: self.plots,
             ..Default::default()
         };
 
@@ -150,7 +158,7 @@ impl GnssRcvApp {
     }
 }
 
-pub fn egui_main() {
+pub fn egui_main(plots: bool) {
     log::warn!("egui_main");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([WIDTH as f32, HEIGHT as f32]),
@@ -159,7 +167,7 @@ pub fn egui_main() {
     eframe::run_native(
         "gnss-rcv",
         native_options,
-        Box::new(|cc| Ok(Box::new(GnssRcvApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(GnssRcvApp::new(cc, plots)))),
     )
     .unwrap();
 }
@@ -167,14 +175,11 @@ pub fn egui_main() {
 impl eframe::App for GnssRcvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.update_top(ctx);
-        self.update_mid(ctx);
-        self.update_table(ctx);
+        self.update_central(ctx);
     }
 }
 
 impl GnssRcvApp {
-    /// The IQ-file picker: every provisioned recording, picking one auto-fills its
-    /// run parameters. Empty when nothing is downloaded — type a path instead.
     fn update_file_picker(&mut self, ui: &mut egui::Ui) {
         let selected_text = self
             .recordings
@@ -246,8 +251,10 @@ impl GnssRcvApp {
         } else {
             "start"
         };
+        let btn_color = ui.visuals().selection.bg_fill;
+        let h = ui.spacing().interact_size.y;
         if ui
-            .add_sized(ui.available_size(), egui::Button::new(button_text.to_owned()))
+            .add_sized([ui.available_width(), h], egui::Button::new(button_text).fill(btn_color))
             .clicked()
         {
             if self.active.load(Ordering::SeqCst) {
@@ -259,98 +266,152 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
+        let (sv_elaz, tow_text, almanac_n, has_ion, has_utc, pos_text, pos_url) = {
+            let st = self.pub_state.lock().unwrap();
+            let mut sv_elaz: Vec<(SV, f64, f64)> = st
+                .channels
+                .iter()
+                .filter(|(_, cs)| cs.state == State::Tracking && cs.elevation_deg != 0.0)
+                .map(|(sv, cs)| (*sv, cs.elevation_deg, cs.azimuth_deg))
+                .collect();
+            sv_elaz.sort_by_key(|t| t.0);
+            let tow_text = format!("{:?}", st.tow_gpst);
+            let almanac_n = st.almanac.iter().filter(|a| a.sat != 0).count();
+            let (pos_text, pos_url) = if st.longitude != 0.0 {
+                (
+                    format!("lat={:.4}  lon={:.4}  alt={:.1} m", st.latitude, st.longitude, st.height),
+                    Some(format!("https://maps.google.com/?ll={},{}", st.latitude, st.longitude)),
+                )
+            } else {
+                ("no position fix".to_string(), None)
+            };
+            (sv_elaz, tow_text, almanac_n, st.ion_adj, st.utc_adj, pos_text, pos_url)
+        };
+
         egui::TopBottomPanel::top("top_panel")
             .resizable(false)
-            .min_height(25.0)
             .show(ctx, |ui| {
-                egui::Grid::new("TopGrid").num_columns(3).show(ui, |ui| {
-                    self.update_file_picker(ui);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.iq_file)
-                            .desired_width(f32::INFINITY)
-                            .clip_text(false),
-                    );
-                    ui.end_row();
-
-                    self.update_iq_type(ui);
-                    self.update_sig_type(ui);
-                    ui.checkbox(&mut self.osnma, "OSNMA");
-                    ui.end_row();
-
-                    self.update_freqs(ui);
-                    ui.end_row();
-                });
-                self.update_start_stop(ui, ctx);
-            });
-    }
-
-    fn update_mid(&mut self, ctx: &egui::Context) {
-        let pub_state = self.pub_state.lock().unwrap();
-        egui::TopBottomPanel::top("mid_panel")
-            .resizable(true)
-            .min_height(50.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("MidGrid0").show(ui, |ui| {
-                        ui.monospace(format!("{:?}", pub_state.tow_gpst).to_string());
-                        ui.add(egui::Separator::default().vertical());
+                ui.horizontal(|ui| {
+                    // Left column: all controls + status box.
+                    ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            let n = pub_state.almanac.iter().filter(|&alm| alm.sat != 0).count();
-                            ui.monospace(format!("almanac: {n}").to_string());
+                            self.update_file_picker(ui);
+                            let h = ui.spacing().interact_size.y;
+                            ui.add_sized(
+                                [ui.available_width(), h],
+                                egui::TextEdit::singleline(&mut self.iq_file),
+                            );
                         });
-
-                        if pub_state.ion_adj {
+                        ui.horizontal(|ui| {
+                            self.update_iq_type(ui);
+                            self.update_sig_type(ui);
+                            if self.sig.is_boc11() {
+                                ui.checkbox(&mut self.osnma, "OSNMA");
+                            }
+                        });
+                        self.update_freqs(ui);
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.monospace("ion: 1".to_string());
-                                ui.add(egui::Separator::default().vertical());
+                                ui.monospace(&tow_text);
+                                ui.separator();
+                                ui.monospace(format!("almanac: {almanac_n}"));
+                                if has_ion { ui.separator(); ui.monospace("ion: 1"); }
+                                if has_utc { ui.separator(); ui.monospace("utc: 1"); }
                             });
-                        }
-                        if pub_state.utc_adj {
-                            ui.horizontal(|ui| {
-                                ui.monospace("utc: 1".to_string());
-                                ui.add(egui::Separator::default().vertical());
-                            });
-                        }
-                        ui.end_row();
+                            if let Some(url) = &pos_url {
+                                ui.hyperlink_to(&pos_text, url);
+                            } else {
+                                ui.monospace(&pos_text);
+                            }
+                        });
                     });
-                    egui::Grid::new("MidGrid1").show(ui, |ui| {
-                        if pub_state.longitude != 0.0 {
-                            let s = format!(
-                                "lat={:.3} long={:.3} height={:.1}",
-                                pub_state.latitude, pub_state.longitude, pub_state.height
-                            );
-                            let url = format!(
-                                "https://maps.google.com/?ll={},{}",
-                                pub_state.latitude, pub_state.longitude
-                            );
-                            ui.hyperlink_to(s, url.to_string());
-                        } else {
-                            let s = "no position fix".to_string();
-                            ui.monospace(s);
-                        };
+                    // Right column: sky plot, pinned to the right edge.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                        draw_sky_plot(ui, &sv_elaz);
                     });
                 });
             });
     }
 
-    fn update_table(&mut self, ctx: &egui::Context) {
+    fn update_central(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                StripBuilder::new(ui)
-                    .size(Size::remainder().at_least(100.0)) // for the table
-                    .vertical(|mut strip| {
-                        strip.cell(|ui| {
-                            egui::ScrollArea::horizontal().show(ui, |ui| {
-                                self.table_ui(ui);
-                            });
-                        });
-                    });
+            self.update_start_stop(ui, ctx);
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.tab, Tab::Dashboard, "Dashboard");
+                ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
             });
+            ui.separator();
+            match self.tab {
+                Tab::Dashboard => {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        StripBuilder::new(ui)
+                            .size(Size::remainder().at_least(100.0))
+                            .vertical(|mut strip| {
+                                strip.cell(|ui| {
+                                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                                        self.table_ui(ui);
+                                    });
+                                });
+                            });
+                    });
+                }
+                Tab::Diagnostics => {
+                    self.update_diagnostics(ui);
+                }
+            }
         });
     }
+
+    fn update_diagnostics(&mut self, ui: &mut egui::Ui) {
+        let mut tracked_svs: Vec<SV> = {
+            let st = self.pub_state.lock().unwrap();
+            st.channels
+                .iter()
+                .filter(|(_, cs)| cs.state == State::Tracking)
+                .map(|(sv, _)| *sv)
+                .collect()
+        };
+        tracked_svs.sort();
+
+        egui::SidePanel::left("diag_sv_list")
+            .resizable(false)
+            .exact_width(58.0)
+            .show_inside(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for sv in &tracked_svs {
+                        if ui
+                            .selectable_label(self.diag_sv == Some(*sv), format!("{sv}"))
+                            .clicked()
+                        {
+                            self.diag_sv = Some(*sv);
+                        }
+                    }
+                });
+            });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            let selected = self.diag_sv;
+            if let Some(sv) = selected {
+                let hist = {
+                    let st = self.pub_state.lock().unwrap();
+                    st.histories.get(&sv).cloned()
+                };
+                if let Some(hist) = hist {
+                    draw_diagnostics_charts(ui, sv, &hist);
+                } else {
+                    ui.label("No data yet — waiting for first history snapshot (2 s).");
+                }
+            } else {
+                ui.label("Select a satellite from the list.");
+            }
+        });
+    }
+
     fn table_ui(&mut self, ui: &mut egui::Ui) {
         let available_height = ui.available_height();
-        let table = TableBuilder::new(ui)
+        let is_galileo = self.sig.is_boc11();
+
+        let tb = TableBuilder::new(ui)
             .resizable(true)
             .striped(true)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
@@ -359,42 +420,26 @@ impl GnssRcvApp {
             .column(Column::auto())
             .column(Column::auto())
             .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::remainder())
+            .column(Column::auto())  // ephemeris
             .min_scrolled_height(0.0)
             .max_scroll_height(available_height);
+        let tb = if is_galileo { tb.column(Column::remainder()) } else { tb };
 
-        // Show the constellation that matches the selected signal: Galileo (E1B/E1C)
-        // tracks PRNs 1..=36, GPS L1 C/A 1..=32.
-        let (constellation, max_prn) = if self.sig.is_boc11() {
+        let (constellation, max_prn) = if is_galileo {
             (Constellation::Galileo, 36)
         } else {
             (Constellation::GPS, 32)
         };
 
-        table
+        tb
             .header(20.0, |mut header| {
-                header.col(|ui| {
-                    ui.strong("SV");
-                });
-                header.col(|ui| {
-                    ui.strong("dB-Hz");
-                });
-                header.col(|ui| {
-                    ui.strong("doppler");
-                });
-                header.col(|ui| {
-                    ui.strong("code_idx");
-                });
-                header.col(|ui| {
-                    ui.strong("phi");
-                });
-                header.col(|ui| {
-                    ui.strong("ephemeris");
-                });
-                header.col(|ui| {
-                    ui.strong("osnma");
-                });
+                header.col(|ui| { ui.strong("SV"); });
+                header.col(|ui| { ui.strong("dB-Hz"); });
+                header.col(|ui| { ui.strong("doppler"); });
+                header.col(|ui| { ui.strong("code_idx"); });
+                header.col(|ui| { ui.strong("phi"); });
+                header.col(|ui| { ui.strong("ephemeris"); });
+                if is_galileo { header.col(|ui| { ui.strong("osnma"); }); }
             })
             .body(|mut body| {
                 for row_index in 1..=max_prn {
@@ -418,33 +463,195 @@ impl GnssRcvApp {
                     let osnma_verified = channel.unwrap().osnma_verified;
 
                     body.row(row_height, |mut row| {
-                        row.col(|ui| {
-                            ui.label(format!("{}", sv).to_string());
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{:.1}", cn0).to_string());
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{:.0}", doppler_hz).to_string());
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{:4.0}", code_idx).to_string());
-                        });
-                        row.col(|ui| {
-                            ui.label(format!("{:.2}", phi).to_string());
-                        });
-                        row.col(|ui| {
-                            let s = if has_eph { "1" } else { "-" };
-                            ui.label(s.to_string());
-                        });
-                        row.col(|ui| {
-                            // OSNMA: green ✓ once this SV's nav data is authenticated.
-                            if osnma_verified {
-                                ui.colored_label(egui::Color32::GREEN, "✓ verified");
-                            }
-                        });
+                        row.col(|ui| { ui.label(format!("{}", sv)); });
+                        row.col(|ui| { ui.label(format!("{:.1}", cn0)); });
+                        row.col(|ui| { ui.label(format!("{:.0}", doppler_hz)); });
+                        row.col(|ui| { ui.label(format!("{:4.0}", code_idx)); });
+                        row.col(|ui| { ui.label(format!("{:.2}", phi)); });
+                        row.col(|ui| { ui.label(if has_eph { "1" } else { "-" }); });
+                        if is_galileo {
+                            row.col(|ui| {
+                                if osnma_verified {
+                                    ui.colored_label(egui::Color32::GREEN, "✓ verified");
+                                }
+                            });
+                        }
                     });
                 }
             });
     }
+}
+
+/// Polar sky plot: azimuth around the circle, elevation as radial distance from
+/// centre (90° elev = centre, 0° = horizon ring).
+fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
+    let size = 200.0_f32;
+    let (response, painter) =
+        ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
+    let rect = response.rect;
+    let c = rect.center();
+    let r = size * 0.42;
+
+    // Background
+    painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(15, 15, 30));
+
+    // Concentric elevation rings (horizon, 30°, 60°)
+    for (elev, stroke_w) in [(0.0_f64, 1.5_f32), (30.0, 0.6), (60.0, 0.6)] {
+        let ring_r = r * (1.0 - elev as f32 / 90.0);
+        painter.circle_stroke(
+            c,
+            ring_r,
+            egui::Stroke::new(stroke_w, egui::Color32::from_rgb(60, 70, 90)),
+        );
+    }
+
+    // Cardinal labels
+    let lo = r + 10.0;
+    let font = egui::FontId::proportional(10.0);
+    let grey = egui::Color32::from_rgb(130, 140, 160);
+    painter.text(egui::pos2(c.x, c.y - lo), egui::Align2::CENTER_BOTTOM, "N", font.clone(), grey);
+    painter.text(egui::pos2(c.x, c.y + lo), egui::Align2::CENTER_TOP, "S", font.clone(), grey);
+    painter.text(egui::pos2(c.x + lo, c.y), egui::Align2::LEFT_CENTER, "E", font.clone(), grey);
+    painter.text(egui::pos2(c.x - lo, c.y), egui::Align2::RIGHT_CENTER, "W", font.clone(), grey);
+
+    // SV dots
+    for (sv, elev_deg, azim_deg) in sv_elaz {
+        let azim_rad = azim_deg.to_radians() as f32;
+        let dist = r * (1.0 - *elev_deg as f32 / 90.0);
+        let sx = c.x + dist * azim_rad.sin();
+        let sy = c.y - dist * azim_rad.cos();
+        let pos = egui::pos2(sx, sy);
+        painter.circle_filled(pos, 5.0, egui::Color32::from_rgb(80, 200, 100));
+        painter.text(
+            pos + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_TOP,
+            format!("{sv}"),
+            egui::FontId::proportional(8.0),
+            egui::Color32::WHITE,
+        );
+    }
+}
+
+/// Live diagnostics charts for one SV's rolling History, drawn with egui Painter.
+fn draw_diagnostics_charts(ui: &mut egui::Ui, sv: SV, hist: &History) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let cn0: Vec<f64> = hist.cn0.iter().copied().collect();
+        let doppler: Vec<f64> = hist.doppler_hz.iter().copied().collect();
+        let phi: Vec<f64> = hist.phi_error.iter().copied().collect();
+        let cpo: Vec<f64> = hist.code_phase_offset.iter().copied().collect();
+        let n_iq = usize::min(hist.corr_p.len(), 2000);
+        let iq: Vec<(f64, f64)> =
+            hist.corr_p.iter().rev().take(n_iq).map(|c| (c.re, c.im)).collect();
+
+        mini_line_chart(ui, format!("{sv} C/N0 dB-Hz"), &cn0, egui::Color32::RED);
+        mini_line_chart(ui, format!("{sv} Doppler Hz"), &doppler, egui::Color32::BLUE);
+        mini_line_chart(ui, format!("{sv} Phase error rad"), &phi, egui::Color32::YELLOW);
+        mini_line_chart(ui, format!("{sv} Code phase offset"), &cpo, egui::Color32::from_rgb(200, 120, 50));
+        iq_scatter_chart(ui, format!("{sv} IQ scatter"), &iq);
+    });
+}
+
+/// Small line chart drawn with Painter. Width = available, height fixed at 100 px.
+fn mini_line_chart(ui: &mut egui::Ui, label: impl Into<String>, data: &[f64], color: egui::Color32) {
+    if data.len() < 2 {
+        return;
+    }
+    let label = label.into();
+    let desired = egui::vec2(ui.available_width(), 100.0);
+    let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
+    let rect = response.rect;
+
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 18, 28));
+
+    let y_min = data.iter().copied().fold(f64::MAX, f64::min);
+    let y_max = data.iter().copied().fold(f64::MIN, f64::max);
+    let y_range = (y_max - y_min).max(1e-9);
+    let n = data.len() as f32;
+    let w = rect.width();
+    let h = rect.height() - 14.0; // reserve bottom for label
+    let base_y = rect.max.y - 14.0;
+
+    let to_screen = |i: usize, v: f64| {
+        let x = rect.min.x + (i as f32 / (n - 1.0)) * w;
+        let y = base_y - ((v - y_min) / y_range) as f32 * h;
+        egui::pos2(x, y)
+    };
+
+    let points: Vec<egui::Pos2> = data.iter().enumerate().map(|(i, &v)| to_screen(i, v)).collect();
+    let shape = egui::epaint::PathShape::line(points, egui::Stroke::new(1.0, color));
+    painter.add(egui::Shape::Path(shape));
+
+    // Y-axis range label (right-aligned)
+    let font = egui::FontId::proportional(9.0);
+    let dim = egui::Color32::from_rgb(100, 110, 130);
+    painter.text(
+        egui::pos2(rect.max.x - 2.0, rect.min.y + 2.0),
+        egui::Align2::RIGHT_TOP,
+        format!("{y_max:.1}"),
+        font.clone(),
+        dim,
+    );
+    painter.text(
+        egui::pos2(rect.max.x - 2.0, base_y - 2.0),
+        egui::Align2::RIGHT_BOTTOM,
+        format!("{y_min:.1}"),
+        font.clone(),
+        dim,
+    );
+    // Bottom label
+    painter.text(
+        egui::pos2(rect.min.x + 4.0, rect.max.y - 12.0),
+        egui::Align2::LEFT_TOP,
+        &label,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(160, 170, 190),
+    );
+}
+
+/// IQ scatter chart drawn with Painter, fixed 180×180.
+fn iq_scatter_chart(ui: &mut egui::Ui, label: impl Into<String>, data: &[(f64, f64)]) {
+    if data.len() < 4 {
+        return;
+    }
+    let label = label.into();
+    let sz = 180.0_f32;
+    let (response, painter) = ui.allocate_painter(egui::vec2(sz, sz), egui::Sense::hover());
+    let rect = response.rect;
+
+    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 18, 28));
+
+    let amp: f64 = data
+        .iter()
+        .flat_map(|(re, im)| [re.abs(), im.abs()])
+        .fold(0.0_f64, f64::max)
+        * 1.4;
+    let amp = amp.max(1e-12);
+    let cx = rect.center().x;
+    let cy = rect.center().y;
+    let scale = (sz as f64 * 0.45 / amp) as f32;
+
+    // Axes
+    let ax_color = egui::Color32::from_rgb(50, 55, 70);
+    painter.line_segment(
+        [egui::pos2(rect.min.x, cy), egui::pos2(rect.max.x, cy)],
+        egui::Stroke::new(0.5, ax_color),
+    );
+    painter.line_segment(
+        [egui::pos2(cx, rect.min.y), egui::pos2(cx, rect.max.y)],
+        egui::Stroke::new(0.5, ax_color),
+    );
+
+    for (re, im) in data {
+        let x = cx + (*re as f32) * scale;
+        let y = cy - (*im as f32) * scale;
+        painter.circle_filled(egui::pos2(x, y), 1.0, egui::Color32::GREEN);
+    }
+
+    painter.text(
+        egui::pos2(rect.min.x + 4.0, rect.max.y - 12.0),
+        egui::Align2::LEFT_TOP,
+        &label,
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_rgb(160, 170, 190),
+    );
 }

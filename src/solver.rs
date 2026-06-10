@@ -414,6 +414,13 @@ impl PositionSolver {
             let (iono_m, tropo_m) = if let Some(rx_ecef) = self.last_fix_ecef {
                 let sat = compute_sv_position_ecef(eph, now_gpst);
                 let (elev, azim) = elevation_azimuth(rx_ecef, sat);
+                {
+                    let mut st = self.pub_state.lock().unwrap();
+                    if let Some(ch) = st.channels.get_mut(&eph.sv) {
+                        ch.elevation_deg = elev.to_degrees();
+                        ch.azimuth_deg = azim.to_degrees();
+                    }
+                }
                 let (lat, lon, h_m) =
                     ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
                 let iono = if iono_valid && elev > 0.0 {

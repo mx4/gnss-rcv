@@ -1,4 +1,4 @@
-use crate::{almanac::Almanac, channel::State};
+use crate::{almanac::Almanac, channel::{History, State}};
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 use std::collections::HashMap;
@@ -17,6 +17,8 @@ pub struct ChannelState {
     /// Galileo OSNMA: this SV's navigation data has been cryptographically
     /// authenticated (set by the receiver-level verifier; always false off OSNMA).
     pub osnma_verified: bool,
+    pub elevation_deg: f64,
+    pub azimuth_deg: f64,
 }
 impl Default for ChannelState {
     fn default() -> Self {
@@ -28,6 +30,8 @@ impl Default for ChannelState {
             phi: 0.0,
             has_eph: false,
             osnma_verified: false,
+            elevation_deg: 0.0,
+            azimuth_deg: 0.0,
         }
     }
 }
@@ -46,6 +50,7 @@ pub struct GnssState {
     pub height: f64,
 
     pub channels: HashMap<SV, ChannelState>,
+    pub histories: HashMap<SV, History>,
     pub update_func: UpdateFunc,
 }
 
@@ -68,6 +73,7 @@ impl GnssState {
             longitude: 0.0,
             height: 0.0,
             channels: HashMap::<SV, ChannelState>::new(),
+            histories: HashMap::new(),
             update_func: UpdateFunc {
                 func: Box::new(|| {}),
             },

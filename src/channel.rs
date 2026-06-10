@@ -99,7 +99,7 @@ pub struct Tracking {
 // are pushed at the back, the oldest are dropped from the front once the buffer
 // reaches HISTORY_NUM. VecDeque makes that pop_front O(1); a Vec would memmove
 // the whole (HISTORY_NUM-element) buffer on every code period.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct History {
     last_log_ts: f64,
     last_plot_ts: f64,
@@ -107,6 +107,7 @@ pub struct History {
     pub(crate) code_phase_offset: VecDeque<f64>,
     pub(crate) phi_error: VecDeque<f64>,
     pub(crate) doppler_hz: VecDeque<f64>,
+    pub(crate) cn0: VecDeque<f64>,
     pub corr_p: VecDeque<Complex64>,
 }
 
@@ -123,6 +124,9 @@ impl History {
         }
         if self.code_phase_offset.len() > HISTORY_NUM {
             self.code_phase_offset.pop_front();
+        }
+        if self.cn0.len() > HISTORY_NUM {
+            self.cn0.pop_front();
         }
     }
 }
@@ -507,15 +511,19 @@ impl Channel {
     }
 
     fn update_all_plots(&mut self, force: bool) {
-        if !self.plots {
-            return;
-        }
         if !force && self.ts_sec - self.hist.last_plot_ts <= 2.0 {
             return;
         }
-
-        plot_channel(self.sv, &self.hist);
         self.hist.last_plot_ts = self.ts_sec;
+
+        if self.plots {
+            plot_channel(self.sv, &self.hist, self.code_sec);
+        }
+
+        // Publish a history snapshot at 2-second cadence for the diagnostics tab.
+        if let Ok(mut st) = self.pub_state.lock() {
+            st.histories.insert(self.sv, self.hist.clone());
+        }
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex64]) {
@@ -889,6 +897,7 @@ impl Channel {
             self.nav_decode();
         }
 
+        self.hist.cn0.push_back(self.trk.cn0);
         self.hist.doppler_hz.push_back(self.trk.doppler_hz);
         self.hist.trim();
         self.update_all_plots(false);

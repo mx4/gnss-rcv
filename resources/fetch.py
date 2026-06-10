@@ -95,7 +95,7 @@ RECORDINGS: List[Rec] = [
     Rec("nov3",
         "https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip",
         "nov_3_time_18_48_st_ives", 12699331696, "zip",
-        "-t 2xf32",
+        "-t 2xf32 --fs 2046000",
         "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)", ("gps",)),
     Rec("fgi-osnma",
         "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
@@ -319,7 +319,8 @@ def write_manifest() -> None:
     populate its file picker and auto-fill -t/--fs/--fi/--sig. Regenerated on
     every run so it stays in sync with RECORDINGS (the single source of truth)."""
     manifest = [
-        {"name": r.name, "dest": r.dest, "flags": r.flags, "note": r.note, "tags": list(r.tags)}
+        {"name": r.name, "url": r.url, "dest": r.dest, "size": r.size, "archive": r.archive,
+         "flags": r.flags, "note": r.note, "tags": list(r.tags)}
         for r in RECORDINGS
     ]
     (HERE / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")

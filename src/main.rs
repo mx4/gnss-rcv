@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use structopt::StructOpt;
 
 use gnss_rcv::code::Signal;
-use gnss_rcv::plots::plot_remove_old_graph;
+use gnss_rcv::plots::{plot_generate_html, plot_remove_old_graph};
 use gnss_rcv::receiver::{Receiver, ReceiverConfig};
 use gnss_rcv::recording::IQFileType;
 use gnss_rcv::state::GnssState;
@@ -141,6 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_ctrl_c(exit_req.clone());
     if opt.plots {
         plot_remove_old_graph();
+        plot_generate_html();
     }
 
     log::warn!(
@@ -157,7 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if opt.use_ui {
-        gnss_rcv::egui_main();
+        gnss_rcv::egui_main(opt.plots);
         return Ok(());
     }
 
