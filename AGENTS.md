@@ -322,7 +322,7 @@ Without these gnss-rcv cannot integrate with any external tool:
 | Item | Notes |
 |---|---|
 | **Galileo E1** | BOC(1,1) correlator, 4092-chip memory codes, I/NAV FEC decoder. Highest ROI after GPS. See detailed plan below. |
-| **Galileo OSNMA** | ✅ wired (`--osnma`): I/NAV → 40-bit field (`page[132..172]`) → one shared verifier over the [`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate ([`osnma.rs`](src/osnma.rs)), GST per page from the word-5 anchor. On the FGI 2023 recording the **DSM-PKR public key verifies against the GSC Merkle root** (decode byte-perfect); full nav-data auth pends a complete DSM-KROOT (absent from that PKR-dominated capture). 2023 trust anchor built in; mind the 2024-01-15 tree renewal. Full write-up: [docs/osnma.md](docs/osnma.md). |
+| **Galileo OSNMA** | ✅ wired (automatic on any E1B run): I/NAV → 40-bit field (`page[132..172]`) → one shared verifier over the [`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate ([`osnma.rs`](src/osnma.rs)), GST per page from the word-5 anchor. On the FGI 2023 recording the **DSM-PKR public key verifies against the GSC Merkle root** (decode byte-perfect); full nav-data auth pends a complete DSM-KROOT (absent from that PKR-dominated capture). 2023/2024/2025 trust anchors built in, auto-selected by decoded GST week. Full write-up: [docs/osnma.md](docs/osnma.md). |
 | **GPS L2C / L5** | Dual-frequency → ionosphere-free combination; opens the door to PPP. |
 | **GLONASS L1** | FDMA (per-SV carrier); breaks single-IF assumption end-to-end. Hard. |
 | **BeiDou B1** | Completes global coverage. |

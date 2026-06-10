@@ -116,13 +116,11 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
 ### Other useful options
 - `--sig <signal>`: which signal to receive — `L1CA` (GPS/QZSS, default) or
   `E1B` / `E1C` (Galileo E1). Selecting `E1B` switches the whole chain to the
-  4 ms BOC(1,1) code and Galileo I/NAV decode.
+  4 ms BOC(1,1) code and Galileo I/NAV decode, and **automatically verifies
+  Galileo OSNMA** message authentication (anti-spoofing) — the trust anchor is
+  picked from the decoded epoch (2023/2024/2025). See [docs/osnma.md](docs/osnma.md).
 - `--num-msec N` / `--off-msec N`: process only N ms, or start N ms into the file.
 - `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
-- `--osnma`: verify Galileo **OSNMA** message authentication on an `E1B` run
-  (anti-spoofing). Decodes the 40-bit OSNMA field per page and checks it with the
-  [`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate against a
-  built-in 2023 trust anchor. See [docs/osnma.md](docs/osnma.md).
 - `-p` / `--plots`: write per-SV diagnostic PNGs to `plots/` (off by default).
 - `-x` / `--exit-on-fix`: stop as soon as the first position fix is computed.
 - `--json <path>`: write a machine-readable end-of-run summary (fix, funnel,

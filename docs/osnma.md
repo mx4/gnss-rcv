@@ -4,7 +4,8 @@ OSNMA (Open Service Navigation Message Authentication) lets a receiver prove tha
 the Galileo I/NAV ephemeris, clock and health it decoded were really signed by
 Galileo — defeating navigation-message spoofing. `gnss-rcv` decodes the OSNMA
 bits from the live E1-B signal and verifies them with the
-[`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate (`--osnma`).
+[`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate —
+automatically, on any E1-B (`--sig E1B`) run.
 
 This note records how the pipeline is wired, the trust anchor it ships, and what
 we have and haven't been able to demonstrate on real recordings.
@@ -49,9 +50,9 @@ achieves with sub-second margin. We don't need to reconstruct each page's exact
 
 Each anchor is a (Merkle root, ECDSA P-256 public key, PKID) the GSC published,
 valid for a range of GST weeks. All three known epochs are built into
-[`osnma.rs`](../src/osnma.rs) (`ANCHORS`), and `--osnma` picks the right one from
-the **decoded GST week** — `OsnmaVerifier::for_gst_week(week)` — so it works on any
-capture without the user choosing:
+[`osnma.rs`](../src/osnma.rs) (`ANCHORS`), and the receiver picks the right one
+from the **decoded GST week** — `OsnmaVerifier::for_gst_week(week)` — so it works on
+any capture without the user choosing:
 
 | Epoch | From | Merkle root | Public key (PKID) |
 |---|---|---|---|
@@ -72,7 +73,7 @@ by the signal itself: the DSM-PKR in the FGI recording carries
 
 ## What we verified on the FGI clean recording
 
-Running `--osnma` over the FGI clean recording (471 s, `--sats 4,9,21,31,34,36`):
+Running an E1B decode over the FGI clean recording (471 s, `--sats 4,9,21,31,34,36`):
 
 > `verified public key in DSM-PKR: DsmPkr { number_of_blocks: 13, …`
 > `new_public_key_id: 1, new_public_key: Some([3, 116, 169, 37, …]) }`  ← `0374A925…`
@@ -116,14 +117,16 @@ acquire/track), or a recording from a clean KROOT-broadcasting window.
 
 ## Running it
 
+OSNMA runs automatically on any E1B decode — there's no flag:
+
 ```sh
 RUST_LOG=warn,galileo_osnma=info ./target/release/gnss-rcv \
-  -f <recording> -t i8 --fs 26M --fi 6.39M --sig E1B --osnma \
+  -f <recording> -t i8 --fs 26M --fi 6.39M --sig E1B \
   --sats 4,9,21,31,34,36
 ```
 
 **Restrict `--sats` to the visible satellites.** OSNMA itself costs ~5% (measured:
-60 s data, 6 sats → 22.6 s wall with `--osnma` vs 21.5 s without). The real cost
+60 s data, 6 sats → 22.6 s wall vs 21.5 s for the same E1B decode pre-OSNMA). The real cost
 is acquisition: with all 36 PRNs, ~30 never-locking channels re-search every step
 (~11× *slower* than real-time); the visible six run at **2.8× real-time**, so the
 whole 471 s recording processes in ~3 min. Raise `galileo_osnma` to `debug` for
