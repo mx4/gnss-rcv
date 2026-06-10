@@ -30,9 +30,10 @@
     "size": 240000000,
     "archive": "raw",
     "flags": "-t 2xi16 --fs 4000000",
-    "note": "SigMF ci16, 4 MHz, ~15s; tracks but too short for a fix",
+    "note": "SigMF ci16, 4 MHz, ~15s; GPS + E1B both track (5 SVs each), too short for a fix",
     "tags": [
-      "gps"
+      "gps",
+      "galileo"
     ]
   },
   {
@@ -42,9 +43,10 @@
     "size": 0,
     "archive": "tgz",
     "flags": "-t 2xi16 --fs 4000000",
-    "note": "gnss-sdr CTTC Spain 2013, ~1.1 GiB; fixes (Castelldefels)",
+    "note": "gnss-sdr CTTC Spain 2013, ~1.1 GiB; GPS fix + EGNOS; also 3 Galileo IOV E1B ephemerides (E11/E12/E20)",
     "tags": [
-      "gps"
+      "gps",
+      "galileo"
     ]
   },
   {

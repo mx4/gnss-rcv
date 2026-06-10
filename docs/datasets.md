@@ -40,7 +40,7 @@ already had is 2013–2021 and carries no OSNMA bits).
 | ION SJTU (Shanghai, L1+E1, 25 MHz, 60 s) | yes | tracks 4 E1 SVs but decode too sparse for a fix |
 | ION BladeRF / HackRF / RTL-SDR | some | too short / narrow / don't nav-decode |
 | PocketSDR (Tokyo, Dec 2021) | yes | ~30 s; GPS+QZSS; too short for an E1 ephemeris |
-| CTTC (Spain, 2013) | no (GPS) | GPS fix + **EGNOS SBAS** S120/S126 |
+| CTTC (Spain, 2013) | **IOV** | GPS fix + **EGNOS SBAS** S120/S126; also `--sig E1B` decodes **3 Galileo IOV ephemerides** (E11/E12/E20, GST week 710) — the 2013 4-satellite constellation, too sparse for a Galileo-only fix but real dual-constellation data |
 
 ## Evaluated — not usable for us
 
