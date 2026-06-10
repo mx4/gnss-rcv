@@ -606,11 +606,14 @@ impl GnssRcvApp {
 /// Polar sky plot: azimuth around the circle, elevation as radial distance from
 /// centre (90° elev = centre, 0° = horizon ring).
 fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
-    let size = 155.0_f32;
+    let size = 168.0_f32;
     let (response, painter) = ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
     let rect = response.rect;
     let c = rect.center();
-    let r = size * 0.42;
+    // Leave room outside the ring for the N/E/S/W labels so they aren't clipped at
+    // the box edges: each label sits 9 px past the ring, is ~5 px tall, plus a few
+    // px of margin (= 18). Otherwise S spills off the bottom.
+    let r = size * 0.5 - 18.0;
 
     // No background fill: let the panel show through so the plot blends into the
     // UI rather than sitting in its own dark box.
