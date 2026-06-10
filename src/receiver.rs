@@ -76,10 +76,6 @@ pub struct ReceiverConfig {
     pub exit_on_fix: bool,
     /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
     pub json: Option<PathBuf>,
-    /// Verify Galileo OSNMA on an E1B run. The trust anchor (Merkle root +
-    /// public key) is selected automatically from the decoded GST week, so it
-    /// works across the 2023 / 2024 / 2025 OSNMA epochs.
-    pub osnma: bool,
 }
 
 impl Default for ReceiverConfig {
@@ -99,7 +95,6 @@ impl Default for ReceiverConfig {
             plots: false,
             exit_on_fix: false,
             json: None,
-            osnma: false,
         }
     }
 }
@@ -122,7 +117,8 @@ pub struct Receiver {
     exit_req: Arc<AtomicBool>,
     stats: RunStats,
     json_out: Option<PathBuf>,
-    /// Galileo OSNMA: enabled by `--osnma`. The verifier is built lazily once the
+    /// Galileo OSNMA: on automatically for an E1B signal (it's where the OSNMA
+    /// bits are, and the overhead is ~5%). The verifier is built lazily once the
     /// first decoded GST week reveals the epoch (so the right 2023/2024/2025 trust
     /// anchor is chosen), then fed every channel's decoded I/NAV pages each step.
     /// `osnma_authenticated` is the set of PRNs already reported, logged once each.
@@ -395,7 +391,7 @@ impl Receiver {
             exit_req,
             stats: RunStats::default(),
             json_out: cfg.json.clone(),
-            osnma_enabled: cfg.osnma,
+            osnma_enabled: matches!(cfg.sig, Signal::GalileoE1b),
             osnma: None,
             osnma_authenticated: HashSet::new(),
         }
@@ -504,17 +500,23 @@ impl Receiver {
             }
             return;
         }
-        // Build the verifier lazily from the first decoded page's GST week, so the
-        // trust anchor matches the capture's OSNMA epoch (2023 / 2024 / 2025).
+        // Build the verifier lazily from the GST week of the first page that
+        // actually carries OSNMA bits, so the trust anchor matches the capture's
+        // epoch (2023/2024/2025) and a pre-OSNMA E1B stream (e.g. 2013 IOV) never
+        // spuriously activates it.
         if self.osnma.is_none() {
-            let Some(week) = self
+            let week = self
                 .channels
                 .values()
-                .filter_map(|ch| ch.nav.osnma_pages.first())
-                .map(|p| p.week)
-                .next()
-            else {
-                return; // no I/NAV pages decoded yet
+                .flat_map(|ch| ch.nav.osnma_pages.iter())
+                .find(|p| p.word.osnma.iter().any(|&b| b != 0))
+                .map(|p| p.week);
+            let Some(week) = week else {
+                // No OSNMA bits seen yet; drain so buffers don't grow unbounded.
+                for ch in self.channels.values_mut() {
+                    ch.nav.osnma_pages.clear();
+                }
+                return;
             };
             log::warn!(
                 "OSNMA: GST week {week} -> {} trust anchor",

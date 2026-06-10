@@ -74,11 +74,6 @@ struct Options {
         help = "write an end-of-run JSON summary to <path> ('-' = stdout)"
     )]
     json: Option<PathBuf>,
-    #[structopt(
-        long,
-        help = "verify Galileo OSNMA (E1B; trust anchor auto-selected by epoch: 2023/2024/2025)"
-    )]
-    osnma: bool,
 }
 
 fn init_logging(log_file: &PathBuf) {
@@ -177,7 +172,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         plots: opt.plots,
         exit_on_fix: opt.exit_on_fix,
         json: opt.json.clone(),
-        osnma: opt.osnma,
     };
     let mut receiver = Receiver::new(
         &config,

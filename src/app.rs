@@ -36,7 +36,6 @@ pub struct GnssRcvApp {
     fs: f64,
     fi: f64,
     sig: Signal,
-    osnma: bool,
     plots: bool,
     needs_stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
@@ -55,7 +54,6 @@ impl Default for GnssRcvApp {
             fs: 2_046_000.0,
             fi: 0.0,
             sig: Signal::L1ca,
-            osnma: true,
             plots: false,
             active: Arc::new(AtomicBool::new(false)),
             needs_stop: Arc::new(AtomicBool::new(false)),
@@ -152,7 +150,6 @@ impl GnssRcvApp {
             fs: self.fs,
             fi: self.fi,
             sig: self.sig,
-            osnma: self.osnma,
             plots: self.plots,
             ..Default::default()
         };
@@ -331,9 +328,6 @@ impl GnssRcvApp {
                         ui.horizontal(|ui| {
                             self.update_iq_type(ui);
                             self.update_sig_type(ui);
-                            if self.sig.is_boc11() {
-                                ui.checkbox(&mut self.osnma, "OSNMA");
-                            }
                         });
                         self.update_freqs(ui);
                         egui::Frame::group(ui.style()).show(ui, |ui| {
