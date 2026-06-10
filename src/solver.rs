@@ -161,6 +161,19 @@ fn saastamoinen_tropo_m(lat: f64, h_m: f64, elev: f64) -> f64 {
     (zhd + zwd) / elev.sin()
 }
 
+/// Klobuchar single-frequency ionospheric delay on L1, in metres.
+///
+/// The broadcast model from IS-GPS-200 20.3.3.5.2.5 (Figure 20-4) / Klobuchar
+/// (1987): a thin-shell ionosphere whose vertical delay is a fixed night-time
+/// bias plus a half-cosine bump peaking at 14:00 local time, with amplitude and
+/// period given by cubic polynomials (in geomagnetic latitude) whose
+/// coefficients are the broadcast `alpha`/`beta` (subframe 4, page 18); the
+/// vertical delay is mapped to the slant path by an obliquity factor. Corrects
+/// ~50% of the ionospheric error RMS.
+///
+/// `lat`/`lon`/`elev`/`azim` are radians, `gps_sod` GPS seconds-of-day. The ICD
+/// formulates everything in *semicircles* (1 sc = π rad) — hence the `/ PI`
+/// conversions — and the numeric constants below are the ICD's, verbatim.
 fn klobuchar_l1_delay_m(
     alpha: &[f64; 4],
     beta: &[f64; 4],
@@ -170,16 +183,28 @@ fn klobuchar_l1_delay_m(
     azim: f64,
     gps_sod: f64,
 ) -> f64 {
+    // Earth-centred angle between receiver and ionospheric pierce point (sc).
     let psi = 0.0137 / (elev / PI + 0.11) - 0.022;
+    // Pierce-point latitude (sc), clamped to ±0.416 sc (±74.9°).
     let phi = (lat / PI + psi * azim.cos()).clamp(-0.416, 0.416);
+    // Pierce-point longitude (sc).
     let lam = lon / PI + psi * azim.sin() / (phi * PI).cos();
+    // Geomagnetic latitude of the pierce point: (0.064, 1.617) sc is the
+    // geomagnetic pole (78.3°N, 291.0°E) the alpha/beta fits are framed on.
     let phi = phi + 0.064 * ((lam - 1.617) * PI).cos();
+    // Local solar time at the pierce point: 43200 s per semicircle of longitude.
     let mut tt = 43200.0 * lam + gps_sod;
-    tt -= (tt / 86400.0).floor() * 86400.0;
+    tt -= (tt / 86400.0).floor() * 86400.0; // wrap to [0, 86400)
+    // Obliquity (vertical → slant) factor: 1 at zenith, ~3 at the horizon.
     let f = 1.0 + 16.0 * (0.53 - elev / PI).powi(3);
+    // Amplitude (s) and period (s) of the daytime cosine, cubic in geomagnetic
+    // latitude, with the ICD floors (amp ≥ 0; period ≥ 72000 s = 20 h).
     let amp = (alpha[0] + phi * (alpha[1] + phi * (alpha[2] + phi * alpha[3]))).max(0.0);
     let per = (beta[0] + phi * (beta[1] + phi * (beta[2] + phi * beta[3]))).max(72000.0);
+    // Phase relative to the diurnal peak at 50400 s (14:00 local).
     let x = 2.0 * PI * (tt - 50400.0) / per;
+    // Day side (|x| < 1.57 ≈ π/2): cos(x) as its 4th-order Taylor series, per
+    // the ICD. Night side: only the fixed 5 ns (~1.5 m vertical) bias remains.
     let delay = if x.abs() < 1.57 {
         5.0e-9 + amp * (1.0 + x * x * (-0.5 + x * x / 24.0))
     } else {
@@ -500,16 +525,16 @@ impl PositionSolver {
                 // gnss-rtk reports longitude in [0, 360); wrap to [-180, 180] so
                 // the value is usable directly (e.g. Google Maps ?ll= links).
                 let lon = (pvt.lat_long_alt_deg_deg_m.1 + 180.0).rem_euclid(360.0) - 180.0;
-                let height = pvt.lat_long_alt_deg_deg_m.2 / 1000.0;
+                let height_m = pvt.lat_long_alt_deg_deg_m.2;
 
                 self.pub_state.lock().unwrap().latitude = lat;
                 self.pub_state.lock().unwrap().longitude = lon;
-                self.pub_state.lock().unwrap().height = height;
+                self.pub_state.lock().unwrap().height = height_m;
 
                 log::warn!(
                     "{}",
                     format!(
-                        "position fix: {lat:.6},{lon:.6} h={height:.1}km  https://maps.google.com/?ll={lat},{lon}"
+                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  https://maps.google.com/?ll={lat},{lon}"
                     )
                     .green()
                 );

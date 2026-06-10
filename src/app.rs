@@ -188,7 +188,7 @@ impl GnssRcvApp {
             .unwrap_or("(no provisioned recordings)")
             .to_owned();
         let mut clicked = None;
-        egui::ComboBox::from_label("recording")
+        egui::ComboBox::from_id_source("file_picker")
             .width(230.0)
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
@@ -363,26 +363,31 @@ impl GnssRcvApp {
     }
 
     fn update_diagnostics(&mut self, ui: &mut egui::Ui) {
-        let mut tracked_svs: Vec<SV> = {
+        let mut tracked_svs: Vec<(SV, f64)> = {
             let st = self.pub_state.lock().unwrap();
             st.channels
                 .iter()
                 .filter(|(_, cs)| cs.state == State::Tracking)
-                .map(|(sv, _)| *sv)
+                .map(|(sv, cs)| (*sv, cs.cn0))
                 .collect()
         };
-        tracked_svs.sort();
+        tracked_svs.sort_by_key(|(sv, _)| *sv);
 
         egui::SidePanel::left("diag_sv_list")
             .resizable(false)
             .exact_width(58.0)
             .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for sv in &tracked_svs {
-                        if ui
-                            .selectable_label(self.diag_sv == Some(*sv), format!("{sv}"))
-                            .clicked()
-                        {
+                    for (sv, cn0) in &tracked_svs {
+                        let color = if *cn0 >= 40.0 {
+                            egui::Color32::from_rgb(80, 200, 100)
+                        } else if *cn0 >= 35.0 {
+                            egui::Color32::from_rgb(220, 190, 50)
+                        } else {
+                            egui::Color32::from_rgb(220, 80, 60)
+                        };
+                        let label = egui::RichText::new(format!("{sv}")).color(color);
+                        if ui.selectable_label(self.diag_sv == Some(*sv), label).clicked() {
                             self.diag_sv = Some(*sv);
                         }
                     }
@@ -464,7 +469,16 @@ impl GnssRcvApp {
 
                     body.row(row_height, |mut row| {
                         row.col(|ui| { ui.label(format!("{}", sv)); });
-                        row.col(|ui| { ui.label(format!("{:.1}", cn0)); });
+                        row.col(|ui| {
+                            let color = if cn0 >= 40.0 {
+                                egui::Color32::from_rgb(80, 200, 100)
+                            } else if cn0 >= 35.0 {
+                                egui::Color32::from_rgb(220, 190, 50)
+                            } else {
+                                egui::Color32::from_rgb(220, 80, 60)
+                            };
+                            ui.colored_label(color, format!("{:.1}", cn0));
+                        });
                         row.col(|ui| { ui.label(format!("{:.0}", doppler_hz)); });
                         row.col(|ui| { ui.label(format!("{:4.0}", code_idx)); });
                         row.col(|ui| { ui.label(format!("{:.2}", phi)); });
@@ -505,14 +519,14 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
         );
     }
 
-    // Cardinal labels
-    let lo = r + 10.0;
+    // Cardinal labels — CENTER_CENTER keeps them within the allocated rect.
+    let lo = r + 9.0;
     let font = egui::FontId::proportional(10.0);
     let grey = egui::Color32::from_rgb(130, 140, 160);
-    painter.text(egui::pos2(c.x, c.y - lo), egui::Align2::CENTER_BOTTOM, "N", font.clone(), grey);
-    painter.text(egui::pos2(c.x, c.y + lo), egui::Align2::CENTER_TOP, "S", font.clone(), grey);
-    painter.text(egui::pos2(c.x + lo, c.y), egui::Align2::LEFT_CENTER, "E", font.clone(), grey);
-    painter.text(egui::pos2(c.x - lo, c.y), egui::Align2::RIGHT_CENTER, "W", font.clone(), grey);
+    painter.text(egui::pos2(c.x, c.y - lo), egui::Align2::CENTER_CENTER, "N", font.clone(), grey);
+    painter.text(egui::pos2(c.x, c.y + lo), egui::Align2::CENTER_CENTER, "S", font.clone(), grey);
+    painter.text(egui::pos2(c.x + lo, c.y), egui::Align2::CENTER_CENTER, "E", font.clone(), grey);
+    painter.text(egui::pos2(c.x - lo, c.y), egui::Align2::CENTER_CENTER, "W", font.clone(), grey);
 
     // SV dots
     for (sv, elev_deg, azim_deg) in sv_elaz {
@@ -543,82 +557,100 @@ fn draw_diagnostics_charts(ui: &mut egui::Ui, sv: SV, hist: &History) {
         let iq: Vec<(f64, f64)> =
             hist.corr_p.iter().rev().take(n_iq).map(|c| (c.re, c.im)).collect();
 
-        mini_line_chart(ui, format!("{sv} C/N0 dB-Hz"), &cn0, egui::Color32::RED);
-        mini_line_chart(ui, format!("{sv} Doppler Hz"), &doppler, egui::Color32::BLUE);
-        mini_line_chart(ui, format!("{sv} Phase error rad"), &phi, egui::Color32::YELLOW);
-        mini_line_chart(ui, format!("{sv} Code phase offset"), &cpo, egui::Color32::from_rgb(200, 120, 50));
-        iq_scatter_chart(ui, format!("{sv} IQ scatter"), &iq);
+        mini_line_chart(ui, &format!("{sv} C/N0 dB-Hz"),        &cn0,    egui::Color32::from_rgb(80, 200, 100),  10.0);
+        mini_line_chart(ui, &format!("{sv} Doppler Hz"),         &doppler, egui::Color32::from_rgb(80, 140, 255), 4000.0);
+        mini_line_chart(ui, &format!("{sv} Phase error rad"),    &phi,    egui::Color32::YELLOW,                  0.5);
+        mini_line_chart(ui, &format!("{sv} Code phase offset"),  &cpo,    egui::Color32::from_rgb(200, 120, 50),  200.0);
+        iq_scatter_chart(ui, &format!("{sv} IQ scatter"), &iq);
     });
 }
 
-/// Small line chart drawn with Painter. Width = available, height fixed at 100 px.
-fn mini_line_chart(ui: &mut egui::Ui, label: impl Into<String>, data: &[f64], color: egui::Color32) {
+/// Line chart with min/max envelope rendering for dense data, label above, grid lines.
+/// `min_range` prevents the y-axis from zooming into noise on stable signals.
+fn mini_line_chart(ui: &mut egui::Ui, label: &str, data: &[f64], color: egui::Color32, min_range: f64) {
     if data.len() < 2 {
         return;
     }
-    let label = label.into();
-    let desired = egui::vec2(ui.available_width(), 100.0);
+
+    ui.add_space(3.0);
+    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(150, 165, 185)));
+
+    let desired = egui::vec2(ui.available_width(), 90.0);
     let (response, painter) = ui.allocate_painter(desired, egui::Sense::hover());
     let rect = response.rect;
-
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 18, 28));
-
-    let y_min = data.iter().copied().fold(f64::MAX, f64::min);
-    let y_max = data.iter().copied().fold(f64::MIN, f64::max);
-    let y_range = (y_max - y_min).max(1e-9);
-    let n = data.len() as f32;
     let w = rect.width();
-    let h = rect.height() - 14.0; // reserve bottom for label
-    let base_y = rect.max.y - 14.0;
+    let h = rect.height();
 
-    let to_screen = |i: usize, v: f64| {
-        let x = rect.min.x + (i as f32 / (n - 1.0)) * w;
-        let y = base_y - ((v - y_min) / y_range) as f32 * h;
-        egui::pos2(x, y)
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(15, 17, 26));
+
+    // Y range: enforce a minimum span so stable signals don't autoscale into noise.
+    let raw_min = data.iter().copied().fold(f64::MAX, f64::min);
+    let raw_max = data.iter().copied().fold(f64::MIN, f64::max);
+    let span = (raw_max - raw_min).max(min_range);
+    let mid = (raw_max + raw_min) / 2.0;
+    let y_lo = mid - span / 2.0;
+    let y_hi = mid + span / 2.0;
+
+    let to_y = |v: f64| -> f32 {
+        (rect.max.y - ((v - y_lo) / (y_hi - y_lo)) as f32 * h).clamp(rect.min.y, rect.max.y)
     };
 
-    let points: Vec<egui::Pos2> = data.iter().enumerate().map(|(i, &v)| to_screen(i, v)).collect();
-    let shape = egui::epaint::PathShape::line(points, egui::Stroke::new(1.0, color));
-    painter.add(egui::Shape::Path(shape));
+    // Subtle horizontal grid lines at 25 / 50 / 75 %.
+    let grid = egui::Stroke::new(0.5, egui::Color32::from_rgb(32, 37, 52));
+    for frac in [0.25_f32, 0.5, 0.75] {
+        let y = rect.min.y + h * frac;
+        painter.line_segment([egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)], grid);
+    }
 
-    // Y-axis range label (right-aligned)
-    let font = egui::FontId::proportional(9.0);
-    let dim = egui::Color32::from_rgb(100, 110, 130);
-    painter.text(
-        egui::pos2(rect.max.x - 2.0, rect.min.y + 2.0),
-        egui::Align2::RIGHT_TOP,
-        format!("{y_max:.1}"),
-        font.clone(),
-        dim,
-    );
-    painter.text(
-        egui::pos2(rect.max.x - 2.0, base_y - 2.0),
-        egui::Align2::RIGHT_BOTTOM,
-        format!("{y_min:.1}"),
-        font.clone(),
-        dim,
-    );
-    // Bottom label
-    painter.text(
-        egui::pos2(rect.min.x + 4.0, rect.max.y - 12.0),
-        egui::Align2::LEFT_TOP,
-        &label,
-        egui::FontId::proportional(10.0),
-        egui::Color32::from_rgb(160, 170, 190),
-    );
+    // Draw: connected polyline when data fits in pixels, min/max envelope when dense.
+    let n = data.len();
+    let px = w as usize;
+    if n <= px {
+        let pts: Vec<egui::Pos2> = data
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| egui::pos2(rect.min.x + (i as f32 / (n - 1) as f32) * w, to_y(v)))
+            .collect();
+        painter.add(egui::Shape::Path(egui::epaint::PathShape::line(
+            pts,
+            egui::Stroke::new(1.0, color),
+        )));
+    } else {
+        for col in 0..px {
+            let s = col * n / px;
+            let e = ((col + 1) * n / px).min(n);
+            let bucket = &data[s..e];
+            let lo = bucket.iter().copied().fold(f64::MAX, f64::min);
+            let hi = bucket.iter().copied().fold(f64::MIN, f64::max);
+            let x = rect.min.x + col as f32 + 0.5;
+            painter.line_segment(
+                [egui::pos2(x, to_y(hi)), egui::pos2(x, to_y(lo))],
+                egui::Stroke::new(1.0, color),
+            );
+        }
+    }
+
+    // Y-axis min / max in the corners.
+    let dim = egui::Color32::from_rgb(85, 95, 115);
+    let fnt = egui::FontId::proportional(8.0);
+    painter.text(egui::pos2(rect.max.x - 2.0, rect.min.y + 2.0), egui::Align2::RIGHT_TOP,    format!("{y_hi:.1}"), fnt.clone(), dim);
+    painter.text(egui::pos2(rect.max.x - 2.0, rect.max.y - 2.0), egui::Align2::RIGHT_BOTTOM, format!("{y_lo:.1}"), fnt.clone(), dim);
 }
 
-/// IQ scatter chart drawn with Painter, fixed 180×180.
-fn iq_scatter_chart(ui: &mut egui::Ui, label: impl Into<String>, data: &[(f64, f64)]) {
+/// IQ scatter chart drawn with Painter, fixed 180×180, label above.
+fn iq_scatter_chart(ui: &mut egui::Ui, label: &str, data: &[(f64, f64)]) {
     if data.len() < 4 {
         return;
     }
-    let label = label.into();
+
+    ui.add_space(3.0);
+    ui.label(egui::RichText::new(label).size(10.0).color(egui::Color32::from_rgb(150, 165, 185)));
+
     let sz = 180.0_f32;
     let (response, painter) = ui.allocate_painter(egui::vec2(sz, sz), egui::Sense::hover());
     let rect = response.rect;
 
-    painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(18, 18, 28));
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(15, 17, 26));
 
     let amp: f64 = data
         .iter()
@@ -630,28 +662,13 @@ fn iq_scatter_chart(ui: &mut egui::Ui, label: impl Into<String>, data: &[(f64, f
     let cy = rect.center().y;
     let scale = (sz as f64 * 0.45 / amp) as f32;
 
-    // Axes
-    let ax_color = egui::Color32::from_rgb(50, 55, 70);
-    painter.line_segment(
-        [egui::pos2(rect.min.x, cy), egui::pos2(rect.max.x, cy)],
-        egui::Stroke::new(0.5, ax_color),
-    );
-    painter.line_segment(
-        [egui::pos2(cx, rect.min.y), egui::pos2(cx, rect.max.y)],
-        egui::Stroke::new(0.5, ax_color),
-    );
+    let ax = egui::Stroke::new(0.5, egui::Color32::from_rgb(40, 46, 62));
+    painter.line_segment([egui::pos2(rect.min.x, cy), egui::pos2(rect.max.x, cy)], ax);
+    painter.line_segment([egui::pos2(cx, rect.min.y), egui::pos2(cx, rect.max.y)], ax);
 
     for (re, im) in data {
         let x = cx + (*re as f32) * scale;
         let y = cy - (*im as f32) * scale;
-        painter.circle_filled(egui::pos2(x, y), 1.0, egui::Color32::GREEN);
+        painter.circle_filled(egui::pos2(x, y), 1.0, egui::Color32::from_rgb(80, 200, 100));
     }
-
-    painter.text(
-        egui::pos2(rect.min.x + 4.0, rect.max.y - 12.0),
-        egui::Align2::LEFT_TOP,
-        &label,
-        egui::FontId::proportional(10.0),
-        egui::Color32::from_rgb(160, 170, 190),
-    );
 }

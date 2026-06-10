@@ -40,6 +40,10 @@ pub const P2_59: f64 = p2(59); // Galileo af2
 pub const SC2RAD: f64 = 3.141_592_653_589_8;
 
 pub const SPEED_OF_LIGHT: f64 = 299_792_458.0;
-pub const EARTH_MU_GPS: f64 = 3.9860058e14; // WGS-84 µ (IS-GPS-200)
+/// WGS-84 µ mandated for the broadcast-ephemeris user algorithm (IS-GPS-200
+/// Table 20-IV). Deliberately the *original* WGS-84 value, NOT the refined
+/// 3.986004418e14: the control segment fits the broadcast orbit with this µ, so
+/// the receiver must match it (same convention trap as `SC2RAD`).
+pub const EARTH_MU_GPS: f64 = 3.986005e14;
 pub const EARTH_MU_GAL: f64 = 3.986004418e14; // GTRF µ (Galileo OS SIS ICD)
 pub const EARTH_ROTATION_RATE: f64 = 7.2921151467e-5; // shared GPS/Galileo Ωe

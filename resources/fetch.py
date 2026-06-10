@@ -47,6 +47,11 @@ class Rec:
 
 # fmt: off
 RECORDINGS: List[Rec] = [
+    Rec("nov3",
+        "https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip",
+        "nov_3_time_18_48_st_ives", 12699331696, "zip",
+        "-t 2xf32 --fs 2046000",
+        "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)", ("gps",)),
     Rec("jks-1bit",
         "http://www.jks.com/gps/gps.samples.1bit.I.fs5456.if4092.bin",
         "gps.samples.1bit.I.fs5456.if4092.bin", 55791616, "raw",
@@ -92,11 +97,6 @@ RECORDINGS: List[Rec] = [
         "L1_20211226_082212_12MHz_I.bin", 364904448, "zip",
         "-t i8 --fs 12000000 --fi 3000000 --qzss",
         "PocketSDR Tokyo L1, ~30s; tracks GPS + QZSS J194/195/199", ("gps", "qzss", "galileo")),
-    Rec("nov3",
-        "https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip",
-        "nov_3_time_18_48_st_ives", 12699331696, "zip",
-        "-t 2xf32 --fs 2046000",
-        "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)", ("gps",)),
     Rec("fgi-osnma",
         "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
         "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat", 0, "manual",

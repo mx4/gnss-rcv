@@ -1,7 +1,22 @@
 [
   {
+    "name": "nov3",
+    "url": "https://github.com/codyd51/gypsum/releases/download/1.0/nov_3_time_18_48_st_ives.zip",
+    "dest": "nov_3_time_18_48_st_ives",
+    "size": 12699331696,
+    "archive": "zip",
+    "flags": "-t 2xf32 --fs 2046000",
+    "note": "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
     "name": "jks-1bit",
+    "url": "http://www.jks.com/gps/gps.samples.1bit.I.fs5456.if4092.bin",
     "dest": "gps.samples.1bit.I.fs5456.if4092.bin",
+    "size": 55791616,
+    "archive": "raw",
     "flags": "-t 1bit --fs 5456000 --fi 1364000",
     "note": "jks.com 1-bit real, ~82s; tracks ~7 SVs at a marginal ~30 dB-Hz",
     "tags": [
@@ -10,7 +25,10 @@
   },
   {
     "name": "zenodo-sigmf",
+    "url": "https://zenodo.org/records/6394603/files/GPS-L1-2022-03-27.sigmf-data?download=1",
     "dest": "GPS-L1-2022-03-27.sigmf-data",
+    "size": 240000000,
+    "archive": "raw",
     "flags": "-t 2xi16 --fs 4000000",
     "note": "SigMF ci16, 4 MHz, ~15s; tracks but too short for a fix",
     "tags": [
@@ -19,7 +37,10 @@
   },
   {
     "name": "cttc",
+    "url": "https://sourceforge.net/projects/gnss-sdr/files/data/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.tar.gz",
     "dest": "2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
+    "size": 0,
+    "archive": "tgz",
     "flags": "-t 2xi16 --fs 4000000",
     "note": "gnss-sdr CTTC Spain 2013, ~1.1 GiB; fixes (Castelldefels)",
     "tags": [
@@ -28,7 +49,10 @@
   },
   {
     "name": "ion-rtlsdr",
+    "url": "https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8",
     "dest": "ION_RTLSDR_Bands-L1.rtlsdr",
+    "size": 245760000,
+    "archive": "raw",
     "flags": "-t rtlsdr-file --fs 2048000",
     "note": "ION rooftop RTL-SDR L1, 60s; fixes (Netherlands)",
     "tags": [
@@ -37,7 +61,10 @@
   },
   {
     "name": "ion-bladerf",
+    "url": "https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16",
     "dest": "ION_BladeRF_Bands-L1.2xi16",
+    "size": 527335424,
+    "archive": "raw",
     "flags": "-t 2xi16 --fs 10000000",
     "note": "ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix",
     "tags": [
@@ -47,7 +74,10 @@
   },
   {
     "name": "ion-lime",
+    "url": "https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16",
     "dest": "ION_LimeSDR_Bands-L1.2xi16",
+    "size": 2459077760,
+    "archive": "raw",
     "flags": "-t 2xi16 --fs 10000000 --fi 420000",
     "note": "ION LimeSDR L1, 10 MHz IF 420 kHz, 60s; fixes (Netherlands)",
     "tags": [
@@ -57,7 +87,10 @@
   },
   {
     "name": "ion-hackrf",
+    "url": "https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8",
     "dest": "ION_HackRF_Bands-L1.2xi8",
+    "size": 1200000000,
+    "archive": "raw",
     "flags": "-t 2xi8 --fs 10000000 --fi 420000",
     "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
     "tags": [
@@ -67,7 +100,10 @@
   },
   {
     "name": "sjtu",
+    "url": "https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat",
     "dest": "SJTU_Bands-L1E1.dat",
+    "size": 749899776,
+    "archive": "raw",
     "flags": "-t 4bit --fs 25000000 --fi 6250000",
     "note": "ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs, no full fix",
     "tags": [
@@ -77,7 +113,10 @@
   },
   {
     "name": "pocketsdr",
+    "url": "http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip",
     "dest": "L1_20211226_082212_12MHz_I.bin",
+    "size": 364904448,
+    "archive": "zip",
     "flags": "-t i8 --fs 12000000 --fi 3000000 --qzss",
     "note": "PocketSDR Tokyo L1, ~30s; tracks GPS + QZSS J194/195/199",
     "tags": [
@@ -87,17 +126,11 @@
     ]
   },
   {
-    "name": "nov3",
-    "dest": "nov_3_time_18_48_st_ives",
-    "flags": "-t 2xf32",
-    "note": "main dev recording, 12.7 GiB; fixes (St Ives, Cambs UK)",
-    "tags": [
-      "gps"
-    ]
-  },
-  {
     "name": "fgi-osnma",
+    "url": "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
     "dest": "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat",
+    "size": 0,
+    "archive": "manual",
     "flags": "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
     "note": "FGI OSNMA (Finland 2023), L1/E1 i8 26 MHz fi 6.39 MHz; Galileo fixes (Otaniemi); clean 460s + jammertest + OSNMA bits; manual, see docs/datasets.md",
     "tags": [

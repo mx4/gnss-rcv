@@ -334,6 +334,13 @@ impl Channel {
                 log::warn!("{}: {:?}", self.sv, alm);
             } else if svid == 51 {
                 let toas = getbitu(buf, 68, 8) * 4096;
+                // The almanac reference week WNa is only 8 bits (mod 256), so
+                // unlike subframe 1's 10-bit field "+2048" reconstructs the full
+                // week only for weeks 2048..2303 (2019-04 through 2024-03);
+                // later captures get a stale week here. Almanac data is
+                // display-only (the fix uses the ephemeris), so the skew is
+                // cosmetic; the proper fix is anchoring WNa to subframe 1's week
+                // (same "GPS week rollover" roadmap item).
                 let week = getbitu(buf, 76, 8) + 2048;
 
                 const ARRAY_SVH_IDX: [usize; 24] = [
@@ -475,6 +482,11 @@ impl Channel {
 /// Subframe 1: GPS week + clock (af0/af1/af2, tgd, toc).
 fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
     eph.tow = getbitu(buf, 30, 17) * 6;
+    // The broadcast week is mod-1024 (10 bits, IS-GPS-200 20.3.3.3.1.1); +2048
+    // pins it to the third GPS-week epoch, i.e. weeks 2048..3071 = 2019-04-07
+    // through 2038-11-20. Recordings outside that window decode the wrong week;
+    // a date-anchored resolver is an open roadmap item (AGENTS.md, "GPS week
+    // rollover").
     eph.week = getbitu(buf, 60, 10) + 2048;
     eph.code = getbitu(buf, 70, 2);
     eph.sva = getbitu(buf, 72, 4);

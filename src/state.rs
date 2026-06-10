@@ -47,6 +47,7 @@ pub struct GnssState {
     pub iono_beta: [f64; 4],
     pub latitude: f64,
     pub longitude: f64,
+    /// Fix altitude above the WGS-84 ellipsoid, in metres.
     pub height: f64,
 
     pub channels: HashMap<SV, ChannelState>,
