@@ -36,7 +36,7 @@ impl Navigation {
     pub fn new(sv: SV) -> Self {
         Self {
             eph: Ephemeris::new(sv),
-            lnav: LnavState::new(),
+            lnav: LnavState::new(sv),
             inav: InavDecoder::new(),
             sbas: SbasL1Channel::new(),
             osnma_anchor: None,

@@ -20,6 +20,7 @@ use crate::{
 use colored::Colorize;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
+use std::collections::VecDeque;
 
 const SECS_PER_WEEK: u32 = 7 * 24 * 60 * 60;
 /// Rolling nav-bit window (bits): one 300-bit subframe plus the *next*
@@ -51,6 +52,13 @@ const MASK: [u32; 6] = [
 ];
 /// LNAV TLM preamble (8 bits).
 const PREAMBLE: u32 = 0x8b;
+/// The TLM preamble, MSB first, one bit per byte (= `PREAMBLE` unpacked).
+const PREAMBLE_BITS: [u8; 8] = [1, 0, 0, 0, 1, 0, 1, 1];
+/// One LNAV data bit spans 20 C/A code periods (50 bps over 1 ms codes).
+const PERIODS_PER_BIT: usize = 20;
+/// Prompt window kept by the decoder: bit-edge detection reads 2·19 periods
+/// straddling a candidate edge (see `sync_bit`), plus slack for wrap repeats.
+const PROMPT_WINDOW: usize = 40;
 
 #[derive(PartialEq, Debug, Default)]
 pub(crate) enum SyncState {
@@ -60,172 +68,255 @@ pub(crate) enum SyncState {
     None,
 }
 
-/// GPS L1 C/A LNAV decoder state: 50 bps bit/frame sync and the rolling symbol
-/// buffer the parity decoder reads.
+/// One step of the LNAV decoder (the return of [`LnavState::push_prompt`]).
+pub(crate) enum LnavOut {
+    None,
+    /// A parity-valid subframe: 300 parity-stripped bits, one per byte.
+    Subframe([u8; 300]),
+    /// A frame-synced subframe failed the word parity check.
+    ParityError,
+}
+
+/// Streaming GPS/QZSS L1 C/A LNAV decoder. Fed one *normalized* prompt
+/// (re/|c|) per code period via [`push_prompt`](Self::push_prompt), it finds
+/// the 50 bps bit boundary, demodulates bits (20 periods each, with weak-bit
+/// hysteresis), frame-syncs on the 0x8B preamble bracketing a 300-bit
+/// subframe, checks the 30-bit-word Hamming parity, and emits the subframe.
+/// Self-contained: no access to the channel's tracking state. The channel
+/// mirrors its code-phase-wrap bookkeeping via [`wrap_drop`](Self::wrap_drop)
+/// / [`wrap_repeat`](Self::wrap_repeat) so the prompt stream stays aligned to
+/// *transmitted* code periods — the grid the 20-period bits divide.
 pub(crate) struct LnavState {
-    bit_sync: usize, // beginning of a navigation bit in num_trk_samples
-    nav_sync: usize, // beginning/end of a navigation frame in num_trk_samples
+    sv: SV,
+    prompts: VecDeque<f64>, // last PROMPT_WINDOW normalized prompts
+    count: usize,           // transmitted code periods seen (wrap-corrected)
+    bit_sync: usize,        // `count` at a navigation-bit boundary (0 = none)
+    nav_sync: usize,        // `count` at the last decoded frame end (0 = none)
     sync_state: SyncState,
-    bits: Vec<u8>, // navigation bits
-    count_parity_err: usize,
-    weak_bits: usize, // consecutive weak bits since the last strong one (hysteresis)
+    bits: Vec<u8>,      // rolling NAV_BIT_WINDOW navigation bits
+    bits_filled: usize, // bits demodulated since the last (re)bit-sync
+    weak_bits: usize,   // consecutive weak bits (hysteresis, see WEAK_BIT_LIMIT)
 }
 
 impl LnavState {
-    pub fn new() -> Self {
+    pub fn new(sv: SV) -> Self {
         Self {
+            sv,
+            prompts: VecDeque::with_capacity(PROMPT_WINDOW + 1),
+            count: 0,
             bit_sync: 0,
             nav_sync: 0,
             sync_state: SyncState::Normal,
             bits: vec![0; NAV_BIT_WINDOW],
-            count_parity_err: 0,
+            bits_filled: 0,
             weak_bits: 0,
         }
     }
 
     pub fn reset(&mut self) {
+        self.prompts.clear();
+        self.count = 0;
         self.bit_sync = 0;
         self.nav_sync = 0;
         self.sync_state = SyncState::Normal;
         self.bits.fill(0);
+        self.bits_filled = 0;
         self.weak_bits = 0;
     }
-}
 
-impl Channel {
-    /// GPS/QZSS LNAV decode entry: advance bit sync, then on a frame boundary run
-    /// frame sync and decode the subframe.
-    pub(crate) fn nav_decode_gps_lnav(&mut self) {
-        const PREAMBULE: [u8; 8] = [1, 0, 0, 0, 1, 0, 1, 1];
-        let preambule = &PREAMBULE[0..];
+    /// The channel re-correlated the same transmitted code period (positive
+    /// code-phase wrap): withdraw the just-pushed prompt; its replacement
+    /// arrives next period.
+    pub fn wrap_drop(&mut self) {
+        if self.prompts.pop_back().is_some() {
+            self.count -= 1;
+        }
+    }
 
-        if !self.nav_sync_symbol(20) {
-            return;
+    /// The channel skipped a transmitted code period (negative code-phase
+    /// wrap): repeat the last prompt to keep the period grid continuous.
+    pub fn wrap_repeat(&mut self) {
+        if let Some(&v) = self.prompts.back() {
+            self.prompts.push_back(v);
+            if self.prompts.len() > PROMPT_WINDOW {
+                self.prompts.pop_front();
+            }
+            self.count += 1;
+        }
+    }
+
+    /// Feed one normalized prompt (one code period). Returns a parity-valid
+    /// subframe / a parity failure on a frame boundary, `None` otherwise.
+    pub fn push_prompt(&mut self, p_norm: f64, ts_sec: f64) -> LnavOut {
+        self.prompts.push_back(p_norm);
+        if self.prompts.len() > PROMPT_WINDOW {
+            self.prompts.pop_front();
+        }
+        self.count += 1;
+
+        if !self.sync_bit(ts_sec) {
+            return LnavOut::None;
         }
 
-        if self.nav.lnav.nav_sync > 0 {
+        if self.nav_sync > 0 {
             #[allow(clippy::comparison_chain)]
-            if self.num_trk_samples == self.nav.lnav.nav_sync + 300 * 20 {
-                let sync = self.nav_get_frame_sync_state(preambule);
-                if sync == self.nav.lnav.sync_state {
-                    self.nav_decode_lnav(sync);
+            if self.count == self.nav_sync + 300 * PERIODS_PER_BIT {
+                let sync = self.frame_sync_state(ts_sec);
+                if sync == self.sync_state {
+                    return self.decode_frame(sync);
                 }
-            } else if self.num_trk_samples > self.nav.lnav.nav_sync + 300 * 20 {
+            } else if self.count > self.nav_sync + 300 * PERIODS_PER_BIT {
                 // Missed the frame boundary: drop frame sync and re-find the
                 // preamble, but KEEP bit sync — a frame-sync slip shouldn't cost
                 // the full ~7 s bit-resync. (Parity errors likewise keep bit sync.)
-                self.nav.lnav.nav_sync = 0;
-                self.nav.lnav.sync_state = SyncState::Normal;
+                self.nav_sync = 0;
+                self.sync_state = SyncState::Normal;
             }
-        } else if self.num_trk_samples >= 20 * 308 + 1000 {
-            // Earliest frame-sync attempt: the 308-bit window (20 code periods
-            // per bit) must hold real demodulated bits rather than the buffer's
-            // zero-fill, plus ~1 s (1000 periods) of pull-in margin.
-            let sync = self.nav_get_frame_sync_state(preambule);
+        } else if self.bits_filled >= NAV_BIT_WINDOW {
+            // Only search for the frame once the 308-bit window holds bits
+            // demodulated under the *current* bit sync, not zero-fill/stale ones.
+            let sync = self.frame_sync_state(ts_sec);
             if sync != SyncState::None {
-                self.nav_decode_lnav(sync);
+                return self.decode_frame(sync);
             }
         }
+        LnavOut::None
     }
 
-    /// Mean of the last `n` prompt correlations, each projected onto the unit
-    /// circle (re/|c| = cos of the carrier phase error) so the result is
-    /// amplitude-invariant — see the normalization note in `nav_sync_symbol`.
-    fn nav_mean_ip(&self, n: usize) -> f64 {
-        let mut p = 0.0;
-        let len = self.hist.corr_p.len();
-
-        for i in 0..n {
-            let c = self.hist.corr_p[len - n + i];
-            p += c.re / c.norm();
-        }
-        p / n as f64
-    }
-
-    fn nav_add_bit(&mut self, bit: u8) {
-        self.nav.lnav.bits.rotate_left(1);
-        *self.nav.lnav.bits.last_mut().unwrap() = bit;
-    }
-
-    fn nav_get_frame_sync_state(&self, preambule: &[u8]) -> SyncState {
-        let bits = self.nav.lnav.bits.as_slice();
-        let bits_beg = &bits[0..preambule.len()];
-        let bits_end = &bits[300..300 + preambule.len()];
-        let mut sync_state = SyncState::None;
-
-        if bits_equal(preambule, bits_beg) && bits_equal(preambule, bits_end) {
-            sync_state = SyncState::Normal;
-        } else if bits_opposed(preambule, bits_beg) && bits_opposed(preambule, bits_end) {
-            sync_state = SyncState::Reversed;
-        }
-        if sync_state != SyncState::None {
-            log::info!(
-                "{}: FRAME SYNC {sync_state:?}: ts={:.3}",
-                self.sv,
-                self.ts_sec
-            );
-        }
-
-        sync_state
-    }
-
-    fn nav_sync_symbol(&mut self, num: usize) -> bool {
-        if self.nav.lnav.bit_sync == 0 {
-            let n = if num <= 2 { 1 } else { num - 1 };
-            let len = self.hist.corr_p.len();
-
-            let mut p = 0.0;
-            let mut r = 0.0;
-            for i in 0..2 * n {
-                let code = if i < n { -1.0 } else { 1.0 };
-                let corr = self.hist.corr_p[len - 2 * n + i];
-                // Project onto the unit circle (cos of the phase error). corr_p's
-                // absolute scale varies with IQ format and recording level (the
-                // f32 reader passes raw amplitudes through; int formats only
-                // bound them to ~[-1, 1]), while THRESHOLD_SYNC/THRESHOLD_LOST
-                // are fixed constants in normalized units — so this
-                // normalization is required, not cosmetic.
-                let corr_re = corr.re / corr.norm();
-
-                p += corr_re * code;
-                r += corr_re.abs();
+    /// Advance bit sync by one period. Returns true when a navigation bit was
+    /// demodulated this period (i.e. the frame logic should run).
+    fn sync_bit(&mut self, ts_sec: f64) -> bool {
+        const N: usize = PERIODS_PER_BIT - 1;
+        if self.bit_sync == 0 {
+            // Edge detection: correlate the last 2N prompts against a -/+ step.
+            // Fires only when the step exactly explains the window (|p| >= r)
+            // and the signal level itself is strong (r >= THRESHOLD_SYNC).
+            if self.prompts.len() < 2 * N {
+                return false;
             }
-
-            p /= 2.0 * n as f64;
-            r /= 2.0 * n as f64;
+            let len = self.prompts.len();
+            let (mut p, mut r) = (0.0, 0.0);
+            for i in 0..2 * N {
+                let code = if i < N { -1.0 } else { 1.0 };
+                let v = self.prompts[len - 2 * N + i];
+                p += v * code;
+                r += v.abs();
+            }
+            p /= (2 * N) as f64;
+            r /= (2 * N) as f64;
 
             if p.abs() >= r && r >= THRESHOLD_SYNC {
-                self.nav.lnav.bit_sync = self.num_trk_samples - n;
+                self.bit_sync = self.count - N;
                 log::info!(
-                    "{}: SYNC: p={:.5} ssync={}",
+                    "{}: SYNC: p={:.5} ssync={} ts={ts_sec:.3}",
                     self.sv,
                     p,
-                    self.nav.lnav.bit_sync
+                    self.bit_sync
                 );
             }
-        } else if (self.num_trk_samples - self.nav.lnav.bit_sync).is_multiple_of(num) {
-            let p = self.nav_mean_ip(num);
+        } else if (self.count - self.bit_sync).is_multiple_of(PERIODS_PER_BIT) {
+            let p = self.mean_ip(PERIODS_PER_BIT);
             if p.abs() >= THRESHOLD_LOST {
-                self.nav.lnav.weak_bits = 0; // strong bit: clear the weak streak
+                self.weak_bits = 0; // strong bit: clear the weak streak
             } else {
                 // Weak bit (the 20 ms coherent sum nearly cancelled). Ride out a
                 // brief run — keep bit sync and still add the bit (its sign),
                 // preserving the 300-bit alignment — but declare loss after a
                 // sustained streak. Parity is the real gate for the noisy bits.
-                self.nav.lnav.weak_bits += 1;
-                if self.nav.lnav.weak_bits >= WEAK_BIT_LIMIT {
-                    self.nav.lnav.bit_sync = 0;
-                    self.nav.lnav.sync_state = SyncState::Normal;
-                    self.nav.lnav.weak_bits = 0;
+                self.weak_bits += 1;
+                if self.weak_bits >= WEAK_BIT_LIMIT {
+                    self.bit_sync = 0;
+                    self.sync_state = SyncState::Normal;
+                    self.weak_bits = 0;
+                    self.bits_filled = 0;
                     log::info!("{}: SYNC {} p={}", self.sv, "LOST".to_string().red(), p);
                     return false;
                 }
             }
-            let sym: u8 = if p >= 0.0 { 1 } else { 0 };
-            self.nav_add_bit(sym);
+            self.add_bit(if p >= 0.0 { 1 } else { 0 });
             return true;
         }
         false
+    }
+
+    /// Mean of the last `n` prompts (already normalized to re/|c|).
+    fn mean_ip(&self, n: usize) -> f64 {
+        let len = self.prompts.len();
+        let n = n.min(len);
+        self.prompts.iter().skip(len - n).sum::<f64>() / n as f64
+    }
+
+    fn add_bit(&mut self, bit: u8) {
+        self.bits.rotate_left(1);
+        *self.bits.last_mut().unwrap() = bit;
+        self.bits_filled += 1;
+    }
+
+    /// Check for the preamble bracketing the bit window (upright or inverted).
+    fn frame_sync_state(&self, ts_sec: f64) -> SyncState {
+        let bits = self.bits.as_slice();
+        let bits_beg = &bits[0..PREAMBLE_BITS.len()];
+        let bits_end = &bits[300..300 + PREAMBLE_BITS.len()];
+        let mut sync_state = SyncState::None;
+
+        if bits_equal(&PREAMBLE_BITS, bits_beg) && bits_equal(&PREAMBLE_BITS, bits_end) {
+            sync_state = SyncState::Normal;
+        } else if bits_opposed(&PREAMBLE_BITS, bits_beg) && bits_opposed(&PREAMBLE_BITS, bits_end) {
+            sync_state = SyncState::Reversed;
+        }
+        if sync_state != SyncState::None {
+            log::info!("{}: FRAME SYNC {sync_state:?}: ts={ts_sec:.3}", self.sv);
+        }
+
+        sync_state
+    }
+
+    /// Parity-check the frame-synced 300-bit subframe and strip the parity.
+    fn decode_frame(&mut self, sync: SyncState) -> LnavOut {
+        let rev = if sync == SyncState::Normal { 0 } else { 1 };
+        // The subframe is the window minus the trailing (next) preamble.
+        let bits: Vec<u8> = self.bits[..NAV_BIT_WINDOW - 8]
+            .iter()
+            .map(|v| v ^ rev)
+            .collect();
+        let mut nav_data = [0u8; 300];
+
+        if test_lnav_parity(&bits, &mut nav_data) {
+            self.nav_sync = self.count;
+            self.sync_state = sync;
+            LnavOut::Subframe(nav_data)
+        } else {
+            self.nav_sync = 0;
+            self.sync_state = SyncState::Normal;
+            LnavOut::ParityError
+        }
+    }
+}
+
+impl Channel {
+    /// GPS/QZSS LNAV decode entry: feed the streaming decoder one normalized
+    /// prompt per code period; on a parity-valid subframe, parse it into the
+    /// ephemeris/almanac (the receiver-side bookkeeping the decoder is free of).
+    pub(crate) fn nav_decode_gps_lnav(&mut self) {
+        let Some(&c_p) = self.hist.corr_p.back() else {
+            return;
+        };
+        // Feed re/|c| (cos of the carrier phase error): corr_p's absolute scale
+        // varies with IQ format and recording level (the f32 reader passes raw
+        // amplitudes through; int formats only bound them to ~[-1, 1]), while
+        // the decoder's sync thresholds are fixed constants in normalized units.
+        match self.nav.lnav.push_prompt(c_p.re / c_p.norm(), self.ts_sec) {
+            LnavOut::None => {}
+            LnavOut::ParityError => {
+                self.stats.parity_errors += 1;
+                log::warn!("{}: PARITY ERROR", self.sv);
+            }
+            LnavOut::Subframe(nav_data) => {
+                self.stats.subframes += 1;
+                let id = self.nav_decode_lnav_subframe(&nav_data);
+                log::info!("{}: LNAV: id={id} -- {}", self.sv, hex_str(&nav_data));
+            }
+        }
     }
 
     fn nav_decode_lnav_subframe4(&mut self, buf: &[u8]) {
@@ -441,56 +532,34 @@ impl Channel {
 
         subframe_id
     }
+}
 
-    fn nav_decode_lnav(&mut self, sync: SyncState) {
-        let rev = if sync == SyncState::Normal { 0 } else { 1 };
-        // The subframe is the window minus the trailing (next) preamble.
-        let bits_raw = &self.nav.lnav.bits[..NAV_BIT_WINDOW - 8];
-        let bits: Vec<_> = bits_raw.iter().map(|v| v ^ rev).collect();
-        let mut nav_data = vec![0; 300];
+/// Check the 30-bit-word Hamming parity of a 300-bit subframe (one bit per
+/// byte) and write the 240 parity-stripped data bits into `nav_data`
+/// (`setbitu` layout, parity bits zeroed). Returns false on the first bad word.
+pub(crate) fn test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
+    assert_eq!(bits.len(), 300);
 
-        if Self::nav_test_lnav_parity(&bits, &mut nav_data) {
-            self.nav.lnav.nav_sync = self.num_trk_samples;
-            self.nav.lnav.sync_state = sync;
-            self.stats.subframes += 1;
-
-            let id = self.nav_decode_lnav_subframe(&nav_data);
-            let hex_str = hex_str(&nav_data[0..300]);
-            log::info!("{}: LNAV: id={id} -- {hex_str}", self.sv);
-        } else {
-            self.nav.lnav.nav_sync = 0;
-            self.nav.lnav.sync_state = SyncState::Normal;
-            self.nav.lnav.count_parity_err += 1;
-            self.stats.parity_errors += 1;
-
-            log::warn!("{}: PARITY ERROR", self.sv);
+    let mut data: u32 = 0;
+    for i in 0..10 {
+        for j in 0..30 {
+            data = (data << 1) | bits[i * 30 + j] as u32;
         }
-    }
-
-    pub(crate) fn nav_test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
-        assert_eq!(bits.len(), 300);
-
-        let mut data: u32 = 0;
-        for i in 0..10 {
-            for j in 0..30 {
-                data = (data << 1) | bits[i * 30 + j] as u32;
-            }
-            if data & (1 << 30) != 0 {
-                data ^= 0x3FFFFFC0;
-            }
-            #[allow(clippy::needless_range_loop)]
-            for j in 0..6 {
-                let v0 = (data >> 6) & MASK[j];
-                let v1: u8 = ((data >> (5 - j)) & 1) as u8;
-                if xor_bits(v0) != v1 {
-                    return false;
-                }
-            }
-            setbitu(nav_data, 30 * i, 24, (data >> 6) & 0xFFFFFF);
-            setbitu(nav_data, 30 * i + 24, 6, 0);
+        if data & (1 << 30) != 0 {
+            data ^= 0x3FFFFFC0;
         }
-        true
+        #[allow(clippy::needless_range_loop)]
+        for j in 0..6 {
+            let v0 = (data >> 6) & MASK[j];
+            let v1: u8 = ((data >> (5 - j)) & 1) as u8;
+            if xor_bits(v0) != v1 {
+                return false;
+            }
+        }
+        setbitu(nav_data, 30 * i, 24, (data >> 6) & 0xFFFFFF);
+        setbitu(nav_data, 30 * i + 24, 6, 0);
     }
+    true
 }
 
 // --- LNAV subframe field parsers --------------------------------------------
@@ -726,7 +795,7 @@ mod tests {
             let tx = encode_subframe(source);
             let mut nav_data = vec![0u8; 300];
             assert!(
-                Channel::nav_test_lnav_parity(&tx, &mut nav_data),
+                test_lnav_parity(&tx, &mut nav_data),
                 "subframe {} must pass the receiver's parity check",
                 k + 1
             );
@@ -754,6 +823,37 @@ mod tests {
             "omg_dot = {}",
             eph.omg_dot
         );
+    }
+
+    // The decoder is a self-contained state machine: fed normalized prompts
+    // (20 per bit, rendered from the canned encoder), it must bit-sync,
+    // frame-sync and emit parity-valid subframes — no Channel, no recording.
+    // This is the hermetic LNAV-pipeline test the Channel coupling used to
+    // make impossible.
+    #[test]
+    fn lnav_decoder_decodes_subframes_from_raw_prompts() {
+        let sv = SV::new(Constellation::GPS, 7);
+        let mut dec = LnavState::new(sv);
+        let (mut subframes, mut parity_errors) = (0, 0);
+
+        for &b in &ephemeris_nav_bits(3) {
+            for _ in 0..PERIODS_PER_BIT {
+                match dec.push_prompt(b as f64, 0.0) {
+                    LnavOut::Subframe(data) => {
+                        subframes += 1;
+                        // every emitted subframe carries the TLM preamble
+                        assert_eq!(getbitu(&data, 0, 8), PREAMBLE);
+                    }
+                    LnavOut::ParityError => parity_errors += 1,
+                    LnavOut::None => {}
+                }
+            }
+        }
+
+        // 9 subframes in the stream; bit sync + filling the 308-bit window
+        // consume roughly the first one, the rest must decode cleanly.
+        assert!(subframes >= 5, "decoded only {subframes} subframes");
+        assert_eq!(parity_errors, 0, "clean stream must not parity-fail");
     }
 
     fn hex_to_bytes(s: &str) -> Vec<u8> {

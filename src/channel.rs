@@ -761,6 +761,9 @@ impl Channel {
             if self.hist.corr_p.pop_back().is_some() {
                 self.num_trk_samples -= 1;
             }
+            // The LNAV decoder keeps its own prompt window/period counter;
+            // mirror the wrap there (no-op for non-GPS/QZSS signals).
+            self.nav.lnav.wrap_drop();
             // 0-1-2-3-4
             // 0-0-1-2-3
             // 0-1-2-3-5
@@ -771,6 +774,7 @@ impl Channel {
                 self.hist.corr_p.push_back(v);
                 self.num_trk_samples += 1;
             }
+            self.nav.lnav.wrap_repeat();
             // 0-1-2-3-4
             // 1-2-3-4-4
             // 2-3-4-4-5
