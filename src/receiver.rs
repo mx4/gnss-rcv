@@ -76,8 +76,9 @@ pub struct ReceiverConfig {
     pub exit_on_fix: bool,
     /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
     pub json: Option<PathBuf>,
-    /// Verify Galileo OSNMA (anchored on the built-in 2023 public key). Only
-    /// meaningful for an E1B signal from the 2023 epoch (e.g. the FGI dataset).
+    /// Verify Galileo OSNMA on an E1B run. The trust anchor (Merkle root +
+    /// public key) is selected automatically from the decoded GST week, so it
+    /// works across the 2023 / 2024 / 2025 OSNMA epochs.
     pub osnma: bool,
 }
 
@@ -121,9 +122,11 @@ pub struct Receiver {
     exit_req: Arc<AtomicBool>,
     stats: RunStats,
     json_out: Option<PathBuf>,
-    /// Galileo OSNMA verifier (None unless `--osnma`), fed every channel's
-    /// decoded I/NAV pages after each step; plus the set of PRNs already reported
-    /// authenticated, so each is logged once.
+    /// Galileo OSNMA: enabled by `--osnma`. The verifier is built lazily once the
+    /// first decoded GST week reveals the epoch (so the right 2023/2024/2025 trust
+    /// anchor is chosen), then fed every channel's decoded I/NAV pages each step.
+    /// `osnma_authenticated` is the set of PRNs already reported, logged once each.
+    osnma_enabled: bool,
     osnma: Option<OsnmaVerifier>,
     osnma_authenticated: HashSet<u8>,
 }
@@ -392,7 +395,8 @@ impl Receiver {
             exit_req,
             stats: RunStats::default(),
             json_out: cfg.json.clone(),
-            osnma: cfg.osnma.then(OsnmaVerifier::galileo_2023),
+            osnma_enabled: cfg.osnma,
+            osnma: None,
             osnma_authenticated: HashSet::new(),
         }
     }
@@ -494,12 +498,31 @@ impl Receiver {
     /// they don't grow unbounded. Runs after the parallel channel step, in the
     /// same sequential aggregation phase as the position fix.
     fn feed_osnma(&mut self) {
-        let Some(verifier) = self.osnma.as_mut() else {
+        if !self.osnma_enabled {
             for ch in self.channels.values_mut() {
                 ch.nav.osnma_pages.clear();
             }
             return;
-        };
+        }
+        // Build the verifier lazily from the first decoded page's GST week, so the
+        // trust anchor matches the capture's OSNMA epoch (2023 / 2024 / 2025).
+        if self.osnma.is_none() {
+            let Some(week) = self
+                .channels
+                .values()
+                .filter_map(|ch| ch.nav.osnma_pages.first())
+                .map(|p| p.week)
+                .next()
+            else {
+                return; // no I/NAV pages decoded yet
+            };
+            log::warn!(
+                "OSNMA: GST week {week} -> {} trust anchor",
+                OsnmaVerifier::anchor_name(week)
+            );
+            self.osnma = Some(OsnmaVerifier::for_gst_week(week));
+        }
+        let verifier = self.osnma.as_mut().unwrap();
         for ch in self.channels.values_mut() {
             let prn = ch.sv.prn;
             let galileo = ch.sv.constellation == Constellation::Galileo;

@@ -42,6 +42,81 @@ pub const MERKLE_ROOT_2023: [u8; 32] = [
     0x1B, 0xF2, 0x2C, 0x83, 0x89, 0x03, 0x2F, 0x5F, 0x27, 0x01, 0xE0, 0xFB, 0xC8, 0x01, 0x48, 0xB8,
 ];
 
+/// Galileo OSNMA Merkle tree root after the **2024-01-15 renewal** (a new tree,
+/// distinct from [`MERKLE_ROOT_2023`]). The PKID-1 and PKID-2 publications share
+/// this root; only the public key rotates. GSC value.
+/// Hex: `832E15EDE55655EAC6E399A539477B7C034CCE24C3C93FFC904ACD9BF842F04E`.
+pub const MERKLE_ROOT_RENEWED: [u8; 32] = [
+    0x83, 0x2E, 0x15, 0xED, 0xE5, 0x56, 0x55, 0xEA, 0xC6, 0xE3, 0x99, 0xA5, 0x39, 0x47, 0x7B, 0x7C,
+    0x03, 0x4C, 0xCE, 0x24, 0xC3, 0xC9, 0x3F, 0xFC, 0x90, 0x4A, 0xCD, 0x9B, 0xF8, 0x42, 0xF0, 0x4E,
+];
+
+/// Galileo OSNMA ECDSA P-256 public key, **PKID 1**, in force from the 2024-01-15
+/// renewal until the 2025-12-10 rotation. Compressed SEC1 point, GSC value.
+/// Hex: `0397EB43789AA0F6D052A638468ECF5278E6F6DF8465ECB8D8B84B8C7A3501F73B`.
+pub const PUBKEY_2024_PKID1: [u8; 33] = [
+    0x03, 0x97, 0xEB, 0x43, 0x78, 0x9A, 0xA0, 0xF6, 0xD0, 0x52, 0xA6, 0x38, 0x46, 0x8E, 0xCF, 0x52,
+    0x78, 0xE6, 0xF6, 0xDF, 0x84, 0x65, 0xEC, 0xB8, 0xD8, 0xB8, 0x4B, 0x8C, 0x7A, 0x35, 0x01, 0xF7,
+    0x3B,
+];
+
+/// Galileo OSNMA ECDSA P-256 public key, **PKID 2**, in force from 2025-12-10.
+/// Compressed SEC1 point, GSC value.
+/// Hex: `02219204B5CA6C46B623EEED6CDD2CDDB1F7D6A7532767E5B8DA0DE1EBD695FC99`.
+pub const PUBKEY_2025_PKID2: [u8; 33] = [
+    0x02, 0x21, 0x92, 0x04, 0xB5, 0xCA, 0x6C, 0x46, 0xB6, 0x23, 0xEE, 0xED, 0x6C, 0xDD, 0x2C, 0xDD,
+    0xB1, 0xF7, 0xD6, 0xA7, 0x53, 0x27, 0x67, 0xE5, 0xB8, 0xDA, 0x0D, 0xE1, 0xEB, 0xD6, 0x95, 0xFC,
+    0x99,
+];
+
+/// A GSC OSNMA trust anchor: the Merkle tree root + the in-force ECDSA P-256
+/// public key (and its PKID) for a range of GST weeks. The Merkle tree was
+/// renewed on 2024-01-15 (new root, PKID reset), and the public key rotated to
+/// PKID 2 on 2025-12-10 under that renewed tree.
+struct Anchor {
+    name: &'static str,
+    /// First GST week this anchor applies to (until the next, newer one).
+    from_gst_week: u16,
+    merkle_root: [u8; 32],
+    pubkey_sec1: [u8; 33],
+    pkid: u8,
+}
+
+/// Published OSNMA trust anchors, newest first. Week boundaries are the GSC
+/// applicability dates: 2024-01-15 = GST week 1273, 2025-12-10 = GST week 1372.
+/// See the GSC OSNMA MT/PKI products (<https://www.gsc-europa.eu/gsc-products/OSNMA>).
+const ANCHORS: &[Anchor] = &[
+    Anchor {
+        name: "2025 (PKID 2)",
+        from_gst_week: 1372,
+        merkle_root: MERKLE_ROOT_RENEWED,
+        pubkey_sec1: PUBKEY_2025_PKID2,
+        pkid: 2,
+    },
+    Anchor {
+        name: "2024 (PKID 1)",
+        from_gst_week: 1273,
+        merkle_root: MERKLE_ROOT_RENEWED,
+        pubkey_sec1: PUBKEY_2024_PKID1,
+        pkid: 1,
+    },
+    Anchor {
+        name: "2023 (PKID 1)",
+        from_gst_week: 0,
+        merkle_root: MERKLE_ROOT_2023,
+        pubkey_sec1: PUBKEY_2023_PKID1,
+        pkid: 1,
+    },
+];
+
+/// The trust anchor in force at GST `week` (ANCHORS is newest-first).
+fn anchor_for_gst_week(week: u16) -> &'static Anchor {
+    ANCHORS
+        .iter()
+        .find(|a| week >= a.from_gst_week)
+        .unwrap_or(&ANCHORS[ANCHORS.len() - 1])
+}
+
 /// One decoded I/NAV page awaiting OSNMA processing: the word plus the GST
 /// (Galileo week + time-of-week in seconds) at which it was transmitted.
 pub struct OsnmaPage {
@@ -109,6 +184,21 @@ impl OsnmaVerifier {
             .expect("built-in 2023 OSNMA anchor is valid")
     }
 
+    /// New verifier using the built-in GSC trust anchor in force at GST `week`,
+    /// picking the epoch automatically (2023 / 2024 / 2025). This is what a live
+    /// receiver wants: the decoded GST week selects the right root + public key.
+    pub fn for_gst_week(week: u16) -> Self {
+        let a = anchor_for_gst_week(week);
+        Self::from_merkle_and_p256(a.merkle_root, &a.pubkey_sec1, a.pkid)
+            .expect("built-in OSNMA anchor is a valid P-256 point")
+    }
+
+    /// Name of the trust anchor [`for_gst_week`](Self::for_gst_week) selects for
+    /// `week` (for logging).
+    pub fn anchor_name(week: u16) -> &'static str {
+        anchor_for_gst_week(week).name
+    }
+
     /// Feed one decoded I/NAV page transmitted by `prn` (Galileo E-number, 1..=36)
     /// at the given GST — Galileo week number and time-of-week in seconds, taken
     /// at the *start* of the page transmission.
@@ -159,6 +249,25 @@ mod tests {
     fn the_2023_pubkey_parses() {
         assert!(OsnmaVerifier::from_p256_pubkey(&PUBKEY_2023_PKID1, 1).is_some());
         let _ = OsnmaVerifier::galileo_2023();
+    }
+
+    // Every built-in anchor decodes to a valid P-256 key, and the GST week selects
+    // the right epoch (2024-01-15 = week 1273, 2025-12-10 = week 1372).
+    #[test]
+    fn anchors_parse_and_select_by_gst_week() {
+        for a in ANCHORS {
+            assert!(
+                OsnmaVerifier::from_p256_pubkey(&a.pubkey_sec1, a.pkid).is_some(),
+                "{}",
+                a.name
+            );
+        }
+        assert_eq!(OsnmaVerifier::anchor_name(1262), "2023 (PKID 1)"); // FGI recording
+        assert_eq!(OsnmaVerifier::anchor_name(1272), "2023 (PKID 1)"); // day before renewal
+        assert_eq!(OsnmaVerifier::anchor_name(1273), "2024 (PKID 1)"); // renewal
+        assert_eq!(OsnmaVerifier::anchor_name(1371), "2024 (PKID 1)");
+        assert_eq!(OsnmaVerifier::anchor_name(1372), "2025 (PKID 2)"); // rotation
+        assert_eq!(OsnmaVerifier::anchor_name(1500), "2025 (PKID 2)");
     }
 
     // Packing is MSB-first: bit 0 -> MSB of byte 0.

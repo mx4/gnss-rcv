@@ -76,7 +76,7 @@ struct Options {
     json: Option<PathBuf>,
     #[structopt(
         long,
-        help = "verify Galileo OSNMA (E1B, 2023-epoch trust anchor; e.g. FGI dataset)"
+        help = "verify Galileo OSNMA (E1B; trust anchor auto-selected by epoch: 2023/2024/2025)"
     )]
     osnma: bool,
 }
