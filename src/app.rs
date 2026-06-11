@@ -601,7 +601,6 @@ impl GnssRcvApp {
                 let phi = (channel.unwrap().phi % 1.0) * 2.0 * PI;
                 let doppler_hz = channel.unwrap().doppler_hz;
                 let code_idx = channel.unwrap().code_idx;
-                let has_eph = channel.unwrap().has_eph;
                 let eph_pages = channel.unwrap().eph_pages;
                 let osnma_verified = channel.unwrap().osnma_verified;
 
@@ -637,13 +636,16 @@ impl GnssRcvApp {
                         });
                     });
                     row.col(|ui| {
-                        // Complete → green check; otherwise show collection
-                        // progress (Galileo needs 5 I/NAV words, GPS 3 subframes).
-                        if has_eph {
-                            ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✓");
+                        // How many orbit/clock messages are decoded (Galileo: 5
+                        // I/NAV words, GPS: 3 subframes). The fraction turns green
+                        // on a full set — no ✓ glyph, which egui's bundled fonts
+                        // render as a tofu box (U+2713 is unsupported).
+                        let needed = if is_galileo { 5 } else { 3 };
+                        let text = format!("{eph_pages}/{needed}");
+                        if eph_pages >= needed {
+                            ui.colored_label(egui::Color32::from_rgb(80, 200, 100), text);
                         } else {
-                            let needed = if is_galileo { 5 } else { 3 };
-                            ui.weak(format!("{eph_pages}/{needed}"));
+                            ui.weak(text);
                         }
                     });
                     if is_galileo {
