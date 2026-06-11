@@ -13,9 +13,10 @@
 //! seconds, so even a 40 s capture yields a usable regional grid.
 //!
 //! The IGP band geometry (which mask bit is which lat/lon) is transcribed
-//! from RTKLIB's `igpband1` table (= DO-229 Annex A); the high-latitude
-//! bands 9-10 (|lat| > 55°, 10° cells) are not interpolated — `delay_m`
-//! returns `None` there and the caller falls back to Klobuchar/none.
+//! from RTKLIB's `igpband1`/`igpband2` tables (= DO-229 Annex A). Cells are
+//! 5°×5° below |lat| 55° and 10°×10° between 55° and 75° (needed as far
+//! south as Tampere — high-latitude pierce points land there); polewards of
+//! 75° `delay_m` returns `None` and the caller falls back to Klobuchar/none.
 
 use crate::sbas_l1::SbasMessage;
 use std::collections::HashMap;
@@ -69,7 +70,20 @@ fn band_columns(band: u8) -> &'static [Column] {
                (120, &X3, 101), (125, &X2, 128), (130, &X4, 151), (135, &X2, 179)],
         8 => &[(140, &X3, 1), (145, &X2, 28), (150, &X3, 51), (155, &X2, 78),
                (160, &X3, 101), (165, &X2, 128), (170, &X3, 151), (175, &X2, 178)],
-        _ => &[], // bands 9-10 (high latitude) not supported
+        _ => &[],
+    }
+}
+
+/// Bands 9-10 (the horizontal, high-latitude bands): rows of fixed latitude,
+/// `(lat, lon_start, lon_step, count, first_mask_bit)`, from RTKLIB / DO-229.
+#[rustfmt::skip]
+fn band_rows(band: u8) -> &'static [(i16, i16, i16, usize, usize)] {
+    match band {
+        9 => &[(60, -180, 5, 72, 1), (65, -180, 10, 36, 73), (70, -180, 10, 36, 109),
+               (75, -180, 10, 36, 145), (85, -180, 30, 12, 181)],
+        10 => &[(-60, -180, 5, 72, 1), (-65, -180, 10, 36, 73), (-70, -180, 10, 36, 109),
+                (-75, -180, 10, 36, 145), (-85, -170, 30, 12, 181)],
+        _ => &[],
     }
 }
 
@@ -78,6 +92,11 @@ fn igp_coords(band: u8, n: usize) -> Option<(i16, i16)> {
     for &(lon, lats, first) in band_columns(band) {
         if n >= first && n < first + lats.len() {
             return Some((lats[n - first], lon));
+        }
+    }
+    for &(lat, lon0, step, count, first) in band_rows(band) {
+        if n >= first && n < first + count {
+            return Some((lat, lon0 + step * (n - first) as i16));
         }
     }
     None
@@ -180,29 +199,39 @@ impl SbasIonoGrid {
     }
 
     /// Vertical delay (m) at geographic `(lat, lon)` degrees, by 4-point
-    /// bilinear interpolation over the surrounding 5°×5° cell (DO-229
-    /// A.4.4.10.3). `None` outside the 5° region (|lat| > 55°) or when a
-    /// cell corner with non-zero weight lacks a delay (the 3-point fallback
-    /// is not implemented); zero-weight corners — the point sits exactly on
-    /// the opposite cell edge — may be absent.
+    /// bilinear interpolation over the surrounding grid cell (DO-229
+    /// A.4.4.10.3): a 5°×5° cell below |lat| 55°, a 10°×10° cell anchored on
+    /// the 55°/65°/75° rows between 55° and 75° (RTKLIB's `searchigp`
+    /// convention). `None` polewards of 75°, or when a cell corner with
+    /// non-zero weight lacks a delay (the 3-point fallback is not
+    /// implemented); zero-weight corners — the point sits exactly on the
+    /// opposite cell edge — may be absent.
     pub fn vertical_delay_m(&self, lat: f64, lon: f64) -> Option<f64> {
-        if lat.abs() > 55.0 {
+        if lat.abs() >= 75.0 {
             return None;
         }
         let lon = (lon + 180.0).rem_euclid(360.0) - 180.0;
-        let lat0 = (lat / 5.0).floor() * 5.0;
-        let lon0 = (lon / 5.0).floor() * 5.0;
-        let x = (lon - lon0) / 5.0;
-        let y = (lat - lat0) / 5.0;
+        let (lat0, lon0, cell) = if lat.abs() < 55.0 {
+            ((lat / 5.0).floor() * 5.0, (lon / 5.0).floor() * 5.0, 5.0)
+        } else {
+            // 10° cells on the ...55, 65, 75 latitude rows (both hemispheres).
+            (
+                ((lat - 5.0) / 10.0).floor() * 10.0 + 5.0,
+                (lon / 10.0).floor() * 10.0,
+                10.0,
+            )
+        };
+        let x = (lon - lon0) / cell;
+        let y = (lat - lat0) / cell;
         let at = |la: f64, lo: f64| -> Option<f64> {
             let lo = if lo >= 180.0 { lo - 360.0 } else { lo };
             self.delays.get(&(la as i16, lo as i16)).map(|&d| d as f64)
         };
         let corners = [
             ((1.0 - x) * (1.0 - y), at(lat0, lon0)),
-            (x * (1.0 - y), at(lat0, lon0 + 5.0)),
-            ((1.0 - x) * y, at(lat0 + 5.0, lon0)),
-            (x * y, at(lat0 + 5.0, lon0 + 5.0)),
+            (x * (1.0 - y), at(lat0, lon0 + cell)),
+            ((1.0 - x) * y, at(lat0 + cell, lon0)),
+            (x * y, at(lat0 + cell, lon0 + cell)),
         ];
         let mut sum = 0.0;
         for (w, d) in corners {
@@ -305,8 +334,39 @@ mod tests {
         assert!((c - 5.0).abs() < 1e-9, "centre {c}");
         // Outside the populated cell: no extrapolation.
         assert_eq!(g.vertical_delay_m(48.0, 2.5), None);
-        // High latitude region unsupported.
-        assert_eq!(g.vertical_delay_m(60.0, 2.5), None);
+        // Polar region unsupported.
+        assert_eq!(g.vertical_delay_m(80.0, 2.5), None);
+    }
+
+    #[test]
+    fn high_latitude_uses_ten_degree_cells() {
+        // A Tampere-like pierce point (61.5°N, 24°E) sits in the 10°×10° cell
+        // on the 55/65 rows — corners straight from band 5's lat ladders.
+        let igps = [(55, 20), (55, 30), (65, 20), (65, 30)];
+        let mut g = SbasIonoGrid::default();
+        g.feed(&mt18(5, &igps));
+        // Mask order: column-major by lon (20, 25, 30...), south to north —
+        // (55,20), (65,20) first (lon 20 = X3), then (55,30), (65,30).
+        g.feed(&mt26(5, 0, &[2.0, 4.0, 6.0, 8.0]));
+        assert_eq!(g.len(), 4);
+        assert_eq!(g.vertical_delay_m(55.0, 20.0), Some(2.0));
+        let c = g.vertical_delay_m(60.0, 25.0).unwrap();
+        assert!((c - 5.0).abs() < 1e-9, "centre {c}");
+        assert_eq!(g.vertical_delay_m(61.5, 35.0), None); // unpopulated cell
+    }
+
+    #[test]
+    fn band9_geometry_spot_checks() {
+        // Band 9 rows (60..85°N): bit 1 = (60, -180); the 65° row starts at
+        // bit 73 with 10° spacing; the 85° row is 30°-spaced.
+        assert_eq!(igp_coords(9, 1), Some((60, -180)));
+        assert_eq!(igp_coords(9, 72), Some((60, 175)));
+        assert_eq!(igp_coords(9, 74), Some((65, -170)));
+        assert_eq!(igp_coords(9, 181), Some((85, -180)));
+        assert_eq!(igp_coords(9, 192), Some((85, 150)));
+        // Band 10 (south): the 85°S row is offset to -170.
+        assert_eq!(igp_coords(10, 181), Some((-85, -170)));
+        assert_eq!(igp_coords(10, 193), None);
     }
 
     #[test]
