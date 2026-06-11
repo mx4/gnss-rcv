@@ -579,6 +579,8 @@ impl Receiver {
             }
             log::warn!("{}: {}", sv, "OSNMA authenticated".green());
         }
+        // Surface DSM-KROOT assembly progress (the gate to full authentication).
+        self.pub_state.lock().unwrap().osnma_kroot = verifier.kroot_progress();
     }
 
     /// Share the pause flag (set by the UI before `run_loop`). While it is `true`,

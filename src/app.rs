@@ -335,7 +335,7 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64)> = st
                 .channels
@@ -360,7 +360,13 @@ impl GnssRcvApp {
                 ("no position fix".to_string(), None)
             };
             (
-                sv_elaz, tow_text, st.ion_adj, st.utc_adj, pos_text, pos_url,
+                sv_elaz,
+                tow_text,
+                st.ion_adj,
+                st.utc_adj,
+                pos_text,
+                pos_url,
+                st.osnma_kroot,
             )
         };
 
@@ -401,6 +407,32 @@ impl GnssRcvApp {
                                 ui.hyperlink_to(&pos_text, url);
                             } else {
                                 ui.monospace(&pos_text);
+                            }
+                            // OSNMA DSM-KROOT assembly: the TESLA root key arrives
+                            // one block per 30 s subframe, and full authentication
+                            // can't complete until every block is in.
+                            if let Some((got, total)) = osnma_kroot {
+                                let done = got >= total;
+                                let label = if done {
+                                    format!("KROOT ✓  {got}/{total} blocks")
+                                } else {
+                                    format!("KROOT  {got}/{total} blocks")
+                                };
+                                let fill = if done {
+                                    egui::Color32::from_rgb(80, 200, 100)
+                                } else {
+                                    egui::Color32::from_rgb(70, 110, 180)
+                                };
+                                ui.add(
+                                    egui::ProgressBar::new(got as f32 / total as f32)
+                                        .text(label)
+                                        .fill(fill),
+                                )
+                                .on_hover_text(
+                                    "OSNMA TESLA root key (DSM-KROOT): blocks \
+                                     assembled / needed before nav data can be \
+                                     authenticated",
+                                );
                             }
                         });
                         // Start/stop, sitting to the left of the sky plot.

@@ -57,6 +57,10 @@ pub struct GnssState {
     pub longitude: f64,
     /// Fix altitude above the WGS-84 ellipsoid, in metres.
     pub height: f64,
+    /// Galileo OSNMA DSM-KROOT assembly progress as `(blocks_received, total)`,
+    /// or `None` until the first block (which carries the total) arrives. Drives
+    /// the UI's KROOT progress bar.
+    pub osnma_kroot: Option<(u8, u8)>,
 
     pub channels: HashMap<SV, ChannelState>,
     pub histories: HashMap<SV, History>,
@@ -81,6 +85,7 @@ impl GnssState {
             latitude: 0.0,
             longitude: 0.0,
             height: 0.0,
+            osnma_kroot: None,
             channels: HashMap::<SV, ChannelState>::new(),
             histories: HashMap::new(),
             update_func: UpdateFunc {

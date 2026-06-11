@@ -17,6 +17,7 @@
 
 use crate::galileo_inav::InavWord;
 use galileo_osnma::storage::FullStorage;
+use galileo_osnma::subframe::CollectSubframe;
 use galileo_osnma::{Gst, InavBand, MerkleTreeNode, Osnma, PublicKey, Svn};
 use p256::ecdsa::VerifyingKey;
 
@@ -125,12 +126,48 @@ pub struct OsnmaPage {
     pub word: InavWord,
 }
 
+/// DSM-KROOT block count for the 4-bit NB field (OSNMA SIS ICD v1.1 §3.2.1.1;
+/// same table the `galileo_osnma` crate uses). 0 = reserved / unknown.
+fn kroot_blocks_for_nb(nb: u8) -> u8 {
+    match nb {
+        1 => 7,
+        2 => 8,
+        3 => 9,
+        4 => 10,
+        5 => 11,
+        6 => 12,
+        7 => 13,
+        8 => 14,
+        _ => 0,
+    }
+}
+
 /// Verifies Galileo OSNMA over a stream of decoded I/NAV pages.
 pub struct OsnmaVerifier {
     osnma: Osnma<FullStorage>,
+    // The DSM-KROOT (TESLA root key) is broadcast in blocks, one per 30 s
+    // subframe; the verifier can only check the chain once every block has
+    // arrived. The crate collects them but hides the partial state, so we run a
+    // parallel subframe assembler and track the block bitmap ourselves purely to
+    // surface assembly progress in the UI.
+    subframe: CollectSubframe,
+    kroot_dsm_id: Option<u8>,
+    kroot_received: u16, // bitmap of received block IDs
+    kroot_needed: u8,    // total blocks (from block 0's NB field); 0 = unknown
 }
 
 impl OsnmaVerifier {
+    /// Wrap a constructed `Osnma` with a fresh DSM-KROOT progress tracker.
+    fn wrap(osnma: Osnma<FullStorage>) -> Self {
+        OsnmaVerifier {
+            osnma,
+            subframe: CollectSubframe::new(),
+            kroot_dsm_id: None,
+            kroot_received: 0,
+            kroot_needed: 0,
+        }
+    }
+
     /// New verifier anchored on the GSC Merkle tree root (32 bytes).
     ///
     /// No ECDSA public key is supplied, so the verifier recovers it from a
@@ -140,9 +177,7 @@ impl OsnmaVerifier {
     /// or [`from_merkle_and_p256`](Self::from_merkle_and_p256)).
     pub fn new(merkle_root: MerkleTreeNode) -> Self {
         // only_slowmac = false: process all ADKDs, not just Slow MAC (ADKD=12).
-        OsnmaVerifier {
-            osnma: Osnma::from_merkle_tree(merkle_root, None, false),
-        }
+        Self::wrap(Osnma::from_merkle_tree(merkle_root, None, false))
     }
 
     /// New verifier trusting a single ECDSA P-256 public key directly (a SEC1
@@ -154,9 +189,7 @@ impl OsnmaVerifier {
     pub fn from_p256_pubkey(sec1: &[u8], pkid: u8) -> Option<Self> {
         let vk = VerifyingKey::from_sec1_bytes(sec1).ok()?;
         let pubkey = PublicKey::from_p256(vk, pkid).force_valid();
-        Some(OsnmaVerifier {
-            osnma: Osnma::from_pubkey(pubkey, false),
-        })
+        Some(Self::wrap(Osnma::from_pubkey(pubkey, false)))
     }
 
     /// New verifier anchored on a Merkle tree root *and* a known ECDSA P-256
@@ -170,9 +203,11 @@ impl OsnmaVerifier {
     ) -> Option<Self> {
         let vk = VerifyingKey::from_sec1_bytes(sec1).ok()?;
         let pubkey = PublicKey::from_p256(vk, pkid).force_valid();
-        Some(OsnmaVerifier {
-            osnma: Osnma::from_merkle_tree(merkle_root, Some(pubkey), false),
-        })
+        Some(Self::wrap(Osnma::from_merkle_tree(
+            merkle_root,
+            Some(pubkey),
+            false,
+        )))
     }
 
     /// New verifier for the 2023 OSNMA epoch — anchors captures from before the
@@ -211,8 +246,55 @@ impl OsnmaVerifier {
         self.osnma
             .feed_inav(&pack_msb::<16>(&word.bits), svn, gst, InavBand::E1B);
         if word.osnma.iter().any(|&b| b != 0) {
-            self.osnma.feed_osnma(&pack_msb::<5>(&word.osnma), svn, gst);
+            let osnma_msg = pack_msb::<5>(&word.osnma);
+            self.osnma.feed_osnma(&osnma_msg, svn, gst);
+            // Mirror the feed into our own subframe assembler to watch DSM-KROOT
+            // blocks accumulate. On a completed subframe, HKROOT byte 1 is the
+            // DSM header (id + block id) and byte 2 is the block's first byte
+            // (block 0 carries NB). Copy those two out so the borrow ends before
+            // we touch the tracker.
+            let dsm = self
+                .subframe
+                .feed(&osnma_msg, svn, gst)
+                .map(|(hkroot, _, _)| (hkroot[1], hkroot[2]));
+            if let Some((dsm_header, block_first)) = dsm {
+                self.note_dsm_block(dsm_header, block_first);
+            }
         }
+    }
+
+    /// Update the DSM-KROOT block tracker from one completed subframe's HKROOT.
+    /// `dsm_header` (HKROOT byte 1) splits into DSM id (high nibble) and block id
+    /// (low nibble); ids ≥ 12 are DSM-PKR and ignored here. For block 0,
+    /// `block_first` (HKROOT byte 2) carries the NB field in its high nibble.
+    fn note_dsm_block(&mut self, dsm_header: u8, block_first: u8) {
+        let dsm_id = dsm_header >> 4;
+        let block_id = dsm_header & 0x0F;
+        if dsm_id >= 12 {
+            return; // DSM-PKR — not the KROOT we report progress for
+        }
+        if self.kroot_dsm_id != Some(dsm_id) {
+            // A different DSM-KROOT is now on air — restart collection.
+            self.kroot_dsm_id = Some(dsm_id);
+            self.kroot_received = 0;
+            self.kroot_needed = 0;
+        }
+        self.kroot_received |= 1u16 << block_id;
+        if block_id == 0 {
+            self.kroot_needed = kroot_blocks_for_nb(block_first >> 4);
+        }
+    }
+
+    /// DSM-KROOT assembly progress as `(blocks_received, blocks_total)`, once the
+    /// first block (which carries the total) has been seen — else `None`. When
+    /// the two are equal the KROOT is complete and the TESLA chain can verify.
+    pub fn kroot_progress(&self) -> Option<(u8, u8)> {
+        let total = self.kroot_needed;
+        if total == 0 {
+            return None; // block 0 not yet received → total unknown
+        }
+        let mask = (1u16 << total) - 1;
+        Some(((self.kroot_received & mask).count_ones() as u8, total))
     }
 
     /// Whether satellite `prn` currently has authenticated CED + health data
