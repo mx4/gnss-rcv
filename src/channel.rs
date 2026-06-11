@@ -613,6 +613,7 @@ impl Channel {
         self.num_tx_codes = 0.0;
         self.subfr_at_lock = self.stats.subframes;
         self.nav.eph.tx_anchored = false;
+        self.publish(|cs| cs.tx_anchored = false);
         self.nav.eph.tow_trk_phase = 0.0;
         self.nav.init();
     }

@@ -30,6 +30,13 @@ pub struct Navigation {
     /// and decoded pages buffered for the receiver-level verifier to drain.
     pub(crate) osnma_anchor: Option<(u32, f64)>,
     pub(crate) osnma_pages: Vec<OsnmaPage>,
+    /// Latest TOW-bearing message's `(tow_gpst + decode latency, trk_phase)`
+    /// pair, remembered even before the ephemeris completes. `trk_phase`
+    /// counts transmitted code periods continuously while tracking, so the
+    /// pair stays valid until lock is lost — letting the transmit anchor pin
+    /// *retroactively* the moment the ephemeris completes instead of waiting
+    /// for the next TOW message (up to a 30 s word-5 cycle on Galileo).
+    pub(crate) tow_pair: Option<(Epoch, f64)>,
 }
 
 impl Navigation {
@@ -41,6 +48,7 @@ impl Navigation {
             sbas: SbasL1Channel::new(),
             osnma_anchor: None,
             osnma_pages: Vec::new(),
+            tow_pair: None,
         }
     }
 
@@ -52,6 +60,7 @@ impl Navigation {
         // The I/NAV symbol stream restarts, so the page-timing anchor is stale.
         self.osnma_anchor = None;
         self.osnma_pages.clear();
+        self.tow_pair = None; // phase continuity broken with the re-lock
     }
 }
 
@@ -171,6 +180,9 @@ impl Channel {
             );
         }
         log::warn!("{}: I/NAV word type {} (CRC ok)", self.sv, word.word_type);
+        // Words 1-4 can be the ones completing the ephemeris: anchor from the
+        // remembered word-5 pair instead of waiting for the next word 5.
+        self.try_anchor_tx();
         if !was_valid && self.nav.eph.is_valid() {
             log::warn!(
                 "{}: Galileo ephemeris complete (GST week {}, toe {} s)",
@@ -241,31 +253,50 @@ impl Channel {
     /// ION LimeSDR capture). Both constants are verified directly against
     /// synthetic ground truth by `tx_anchor_latency_measured_against_synthetic_truth`.
     pub(crate) fn nav_anchor_tx(&mut self, decode_latency_sec: f64) {
-        if self.is_ephemeris_complete() {
-            self.pub_state
-                .lock()
-                .unwrap()
-                .channels
-                .get_mut(&self.sv)
-                .unwrap()
-                .has_eph = true;
-        }
         self.nav.eph.ts_sec = self.ts_sec;
-        // Pin once. Re-anchoring would reset the reference and turn the absolute
-        // inter-SV range (carried in code_off_sec) into a relative one.
-        if self.is_ephemeris_complete() && !self.nav.eph.tx_anchored {
-            self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
-            self.nav.eph.tx_tow_gpst =
-                self.nav.eph.tow_gpst + Duration::from_seconds(decode_latency_sec);
-            self.nav.eph.tx_anchored = true;
-            log::warn!(
-                "{}: tx anchored tow={:?} phase={:.6}",
-                self.sv,
-                self.nav.eph.tx_tow_gpst,
-                self.nav.eph.tow_trk_phase
-            );
-        }
+        // Remember this TOW edge's (epoch, phase) pair; the anchor can then pin
+        // from it at any later moment of the same continuous track.
+        self.nav.tow_pair = Some((
+            self.nav.eph.tow_gpst + Duration::from_seconds(decode_latency_sec),
+            self.nav.eph.trk_phase,
+        ));
+        self.try_anchor_tx();
         self.update_gpst_time(self.nav.eph.tow_gpst);
+    }
+
+    /// Pin the transmit anchor from the remembered TOW pair once the ephemeris
+    /// is complete — called both from TOW-bearing messages (via
+    /// [`nav_anchor_tx`]) and from any message that completes the ephemeris,
+    /// so completion never waits for the *next* TOW message. Pins once:
+    /// re-anchoring would reset the reference and turn the absolute inter-SV
+    /// range (carried in code_off_sec) into a relative one.
+    pub(crate) fn try_anchor_tx(&mut self) {
+        if !self.is_ephemeris_complete() {
+            return;
+        }
+        {
+            let mut st = self.pub_state.lock().unwrap();
+            let cs = st.channels.get_mut(&self.sv).unwrap();
+            cs.has_eph = true;
+        }
+        if self.nav.eph.tx_anchored {
+            return;
+        }
+        let Some((tow_gpst, phase)) = self.nav.tow_pair else {
+            return;
+        };
+        self.nav.eph.tow_trk_phase = phase;
+        self.nav.eph.tx_tow_gpst = tow_gpst;
+        self.nav.eph.tx_anchored = true;
+        if let Some(cs) = self.pub_state.lock().unwrap().channels.get_mut(&self.sv) {
+            cs.tx_anchored = true;
+        }
+        log::warn!(
+            "{}: tx anchored tow={:?} phase={:.6}",
+            self.sv,
+            self.nav.eph.tx_tow_gpst,
+            self.nav.eph.tow_trk_phase
+        );
     }
 
     /// Publish the current time-of-week to the shared UI state.

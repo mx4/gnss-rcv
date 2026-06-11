@@ -845,38 +845,51 @@ impl PositionSolver {
             let var: Vec<f64> = meas.iter().map(|m| m.var_m2).collect();
             if let Some(sol) = wls_solve(&m, &svp, &gal, &var, x0) {
                 let pos = Vector3::new(sol.pos[0], sol.pos[1], sol.pos[2]);
-                self.last_fix_ecef = Some(pos);
-                let (lat_rad, lon_rad, height_m) =
-                    ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
-                let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
-                {
-                    let mut st = self.pub_state.lock().unwrap();
-                    st.latitude = lat;
-                    st.longitude = lon;
-                    st.height = height_m;
-                    st.hdop = sol.hdop;
-                    st.vdop = sol.vdop;
-                    st.fix_sv_count = meas.len();
-                }
-                let mut sig: Vec<String> = sol
-                    .sigma
-                    .iter()
-                    .map(|(c, s)| {
-                        let label = match c {
-                            Constellation::Galileo => "gal",
-                            _ => "gps",
-                        };
-                        format!("σ{label}={s:.1}m")
-                    })
-                    .collect();
-                sig.sort();
-                let sig = sig.join(" ");
-                let isb = if sol.isb_m != 0.0 {
-                    format!(" isb={:+.1}ns", sol.isb_m / SPEED_OF_LIGHT * 1e9)
+                // A 4-SV pool has no redundancy: Gauss-Newton seeded from the
+                // geocentre can converge to the mirror root of the two-solution
+                // GNSS ambiguity, and the self-calibrated sigmas cannot see it
+                // (4 measurements, 4 unknowns, residuals ~0). A terrestrial
+                // receiver sits near the geoid — reject anything else and let
+                // gnss-rtk (Bancroft-initialised) arbitrate.
+                let r = pos.norm();
+                if !(6.25e6..6.5e6).contains(&r) {
+                    log::warn!(
+                        "WLS solution off-Earth (|pos|={:.0} km); trying gnss-rtk",
+                        r / 1000.0
+                    );
                 } else {
-                    String::new()
-                };
-                log::warn!(
+                    self.last_fix_ecef = Some(pos);
+                    let (lat_rad, lon_rad, height_m) =
+                        ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
+                    let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
+                    {
+                        let mut st = self.pub_state.lock().unwrap();
+                        st.latitude = lat;
+                        st.longitude = lon;
+                        st.height = height_m;
+                        st.hdop = sol.hdop;
+                        st.vdop = sol.vdop;
+                        st.fix_sv_count = meas.len();
+                    }
+                    let mut sig: Vec<String> = sol
+                        .sigma
+                        .iter()
+                        .map(|(c, s)| {
+                            let label = match c {
+                                Constellation::Galileo => "gal",
+                                _ => "gps",
+                            };
+                            format!("σ{label}={s:.1}m")
+                        })
+                        .collect();
+                    sig.sort();
+                    let sig = sig.join(" ");
+                    let isb = if sol.isb_m != 0.0 {
+                        format!(" isb={:+.1}ns", sol.isb_m / SPEED_OF_LIGHT * 1e9)
+                    } else {
+                        String::new()
+                    };
+                    log::warn!(
                     "{}",
                     format!(
                         "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
@@ -886,10 +899,11 @@ impl PositionSolver {
                         sol.cdt_m / SPEED_OF_LIGHT * 1e3
                     )
                     .green()
-                );
-                return true;
+                    );
+                    return true;
+                }
             }
-            log::warn!("WLS solve failed (underdetermined/singular); trying gnss-rtk");
+            log::warn!("WLS solve failed or rejected; trying gnss-rtk");
         }
 
         // gnss-rtk fallback/cross-check: its pool is built only here, from

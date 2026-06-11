@@ -19,6 +19,9 @@ pub struct ChannelState {
     pub code_idx: f64,
     pub phi: f64,
     pub has_eph: bool,
+    /// Transmit-time anchor pinned — the SV is actually usable by the solver
+    /// (a complete ephemeris alone is not; see `nav_anchor_tx`).
+    pub tx_anchored: bool,
     /// Ephemeris decode progress: distinct ephemeris-bearing messages collected
     /// so far (Galileo I/NAV words 1-5, or GPS LNAV subframes 1-3). Full set =
     /// `has_eph`. Shown per-SV in the diagnostics table.
@@ -42,6 +45,7 @@ impl Default for ChannelState {
             code_idx: 0.0,
             phi: 0.0,
             has_eph: false,
+            tx_anchored: false,
             eph_pages: 0,
             osnma_verified: false,
             elevation_deg: 0.0,

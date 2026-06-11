@@ -732,6 +732,7 @@ impl GnssRcvApp {
                 let eph_pages = channel.unwrap().eph_pages;
                 let osnma_verified = channel.unwrap().osnma_verified;
                 let sbas_msgs = channel.unwrap().sbas_msgs;
+                let tx_anchored = channel.unwrap().tx_anchored;
 
                 body.row(row_height, |mut row| {
                     row.col(|ui| {
@@ -782,7 +783,16 @@ impl GnssRcvApp {
                             if eph_pages >= needed {
                                 // Heavy check U+2714 — a real emoji NotoEmoji
                                 // renders (the plain U+2713 ✓ is a tofu box).
-                                ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✔");
+                                // Green only once the transmit-time anchor is
+                                // pinned — i.e. the SV is actually usable by
+                                // the solver, not just fully decoded.
+                                if tx_anchored {
+                                    ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✔");
+                                } else {
+                                    ui.weak("✔").on_hover_text(
+                                        "ephemeris complete; pinning the transmit-time anchor",
+                                    );
+                                }
                             }
                         });
                     });
