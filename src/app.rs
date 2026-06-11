@@ -356,8 +356,9 @@ impl GnssRcvApp {
                 ui.horizontal(|ui| {
                     ui.label("signal");
                     if !self.sig.is_boc11() {
-                        ui.checkbox(&mut self.sbas, "SBAS")
-                            .on_hover_text("also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)");
+                        ui.checkbox(&mut self.sbas, "SBAS").on_hover_text(
+                            "also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)",
+                        );
                     }
                 });
                 self.update_sig_type(ui);
@@ -839,14 +840,15 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
         grey,
     );
 
-    // SV dots
+    // SV dots, tinted by constellation — same palette as the SV table, so an
+    // orange dot on the plot is the same SBAS GEO as the orange row.
     for (sv, elev_deg, azim_deg) in sv_elaz {
         let azim_rad = azim_deg.to_radians() as f32;
         let dist = r * (1.0 - *elev_deg as f32 / 90.0);
         let sx = c.x + dist * azim_rad.sin();
         let sy = c.y - dist * azim_rad.cos();
         let pos = egui::pos2(sx, sy);
-        painter.circle_filled(pos, 5.0, egui::Color32::from_rgb(80, 200, 100));
+        painter.circle_filled(pos, 5.0, constellation_color(sv.constellation));
         painter.text(
             pos + egui::vec2(6.0, -6.0),
             egui::Align2::LEFT_TOP,
