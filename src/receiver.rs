@@ -296,6 +296,20 @@ fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     if qzss {
         svs.extend((193..=202_u8).map(|prn| SV::new(Constellation::QZSS, prn)));
     }
+    // SBAS and QZSS are L1 C/A signals: on a Galileo E1 session there is no
+    // spreading code for them (and no multi-signal stepping yet), so building
+    // their channels would panic in Channel::new. Drop them with a note — the
+    // UI carries a sticky --sbas flag across signal switches.
+    if matches!(sig, Signal::GalileoE1b | Signal::GalileoE1c) {
+        let before = svs.len();
+        svs.retain(|sv| !matches!(sv.constellation, Constellation::SBAS | Constellation::QZSS));
+        if svs.len() != before {
+            log::warn!(
+                "dropping {} SBAS/QZSS satellites: L1 C/A signals, not decodable in an E1 session",
+                before - svs.len()
+            );
+        }
+    }
     svs
 }
 
@@ -1925,6 +1939,15 @@ mod tests {
         assert_eq!(l.len(), 2);
         assert_eq!(l[0], SV::new(Constellation::Galileo, 4));
         assert_eq!(l[1], SV::new(Constellation::Galileo, 11));
+
+        // SBAS/QZSS are L1 C/A signals: an E1 session must drop them instead
+        // of panicking in Channel::new ("no spreading code for E1B PRN 120" —
+        // the tuni2025 UI crash, where the sticky --sbas flag followed a
+        // signal switch to E1B). Both the appended blocks and explicit tokens.
+        let l = get_sat_list("4", Signal::GalileoE1b, true, true);
+        assert_eq!(l, vec![SV::new(Constellation::Galileo, 4)]);
+        let l = get_sat_list("4,S120,J193", Signal::GalileoE1b, false, false);
+        assert_eq!(l, vec![SV::new(Constellation::Galileo, 4)]);
     }
 
     #[test]
