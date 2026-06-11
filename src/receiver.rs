@@ -1483,7 +1483,8 @@ mod tests {
         // The math itself is the production solver (promoted to solver.rs as
         // the live path); this helper only prepares raw uncorrected
         // measurements from the snapshots.
-        let sol = crate::solver::wls_solve(&meas, &svp, &gal, x0).expect("wls_solve");
+        let sol = crate::solver::wls_solve(&meas, &svp, &gal, &vec![0.0; meas.len()], x0)
+            .expect("wls_solve");
         (sol.pos, sol.cdt_m, sol.isb_m, sol.sigma)
     }
 

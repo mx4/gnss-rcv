@@ -258,6 +258,7 @@ pub(crate) fn wls_solve(
     meas: &[f64],
     svp: &[[f64; 3]],
     gal: &[bool],
+    var0: &[f64],
     x0: [f64; 3],
 ) -> Option<WlsSolution> {
     use std::collections::HashMap;
@@ -319,7 +320,10 @@ pub(crate) fn wls_solve(
                     if gal[i] { 1.0 } else { 0.0 },
                 ];
                 let r = meas[i] - (rho + cdt + if gal[i] { isb } else { 0.0 });
-                let w = 1.0 / sigma.get(&cons_of(gal[i])).copied().unwrap_or(1.0).powi(2);
+                // Per-measurement variance: the self-calibrated constellation
+                // floor plus this SV's broadcast prior (SBAS UDRE + GIVE).
+                let w =
+                    1.0 / (sigma.get(&cons_of(gal[i])).copied().unwrap_or(1.0).powi(2) + var0[i]);
                 for j in 0..ns {
                     b[j] += w * h[j] * r;
                     for k in 0..ns {
@@ -615,7 +619,8 @@ impl PositionSolver {
         let mut pool = vec![];
         // Inputs for the live WLS solver, built alongside the gnss-rtk pool
         // from the same corrected pseudoranges.
-        let (mut wls_meas, mut wls_svp, mut wls_gal) = (vec![], vec![], vec![]);
+        let (mut wls_meas, mut wls_svp, mut wls_gal, mut wls_var) =
+            (vec![], vec![], vec![], vec![]);
 
         let tx_gpst: Vec<Epoch> = ephs
             .iter()
@@ -676,6 +681,9 @@ impl PositionSolver {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
 
+            // This SV's broadcast residual-error variance (SBAS UDRE + slant
+            // GIVE), accumulated below and fed to the WLS as its weight prior.
+            let mut sv_var_m2 = 0.0;
             // Ionosphere and troposphere both need a receiver position (pierce
             // point / elevation angle). We have one once there's a previous fix;
             // before that both corrections are 0 (a few metres, dwarfed by the
@@ -704,7 +712,11 @@ impl PositionSolver {
                 let iono = if elev > 0.0 {
                     sbas_iono
                         .as_ref()
-                        .and_then(|g| g.delay_m(lat, lon, elev, azim))
+                        .and_then(|g| g.delay_var_m(lat, lon, elev, azim))
+                        .map(|(d, v)| {
+                            sv_var_m2 += v;
+                            d
+                        })
                         .unwrap_or_else(|| {
                             if iono_valid {
                                 klobuchar_l1_delay_m(
@@ -744,8 +756,9 @@ impl PositionSolver {
             // receiver-clock state cannot absorb them.
             let mut sbas_m = 0.0;
             if let Some(c) = &sbas_corr {
-                if let Some(prc) = c.fast_prc_m(eph.sv, ts_sec) {
+                if let Some((prc, var)) = c.fast_prc_var_m(eph.sv, ts_sec) {
                     sbas_m += prc;
+                    sv_var_m2 += var;
                 }
                 if let Some((dpos, dclk)) = c.long_term(eph.sv, eph.iode as u8, gps_sod) {
                     sbas_m += SPEED_OF_LIGHT * dclk;
@@ -783,6 +796,7 @@ impl PositionSolver {
                 wls_meas.push(pr_m + clock_corr * SPEED_OF_LIGHT);
                 wls_svp.push([cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2]);
                 wls_gal.push(eph.sv.constellation == Constellation::Galileo);
+                wls_var.push(sv_var_m2);
             }
 
             if let Some(truth) = truth_ecef {
@@ -817,7 +831,7 @@ impl PositionSolver {
         // Rationale + revert condition in `wls_solve`'s doc.
         if !std::env::var("GNSS_SOLVER").is_ok_and(|v| v == "rtk") {
             let x0 = self.last_fix_ecef.map_or([0.0; 3], |p| [p[0], p[1], p[2]]);
-            if let Some(sol) = wls_solve(&wls_meas, &wls_svp, &wls_gal, x0) {
+            if let Some(sol) = wls_solve(&wls_meas, &wls_svp, &wls_gal, &wls_var, x0) {
                 let pos = Vector3::new(sol.pos[0], sol.pos[1], sol.pos[2]);
                 self.last_fix_ecef = Some(pos);
                 let (lat_rad, lon_rad, height_m) =

@@ -109,13 +109,21 @@ fn bits(m: &[u8], pos: usize, len: usize) -> u32 {
         .fold(0, |a, &b| (a << 1) | (b & 1) as u32)
 }
 
+/// DO-229 GIVEI 0-14 → variance bound (m²) on the residual *vertical* iono
+/// error at an IGP after applying its broadcast delay (15 = not monitored,
+/// handled as "clear the IGP").
+const GIVE_VAR_M2: [f64; 15] = [
+    0.0084, 0.0333, 0.0749, 0.1331, 0.2079, 0.2994, 0.4075, 0.5322, 0.6735, 0.8315, 1.1974, 1.8709,
+    3.326, 20.787, 187.0826,
+];
+
 /// The assembled ionospheric grid.
 #[derive(Default, Clone)]
 pub struct SbasIonoGrid {
     /// Monitored-IGP lists per band (from MT18), in mask order.
     masks: HashMap<u8, (u8, Vec<(i16, i16)>)>, // band -> (iodi, igps)
-    /// Vertical delays (m) per IGP (from MT26).
-    delays: HashMap<(i16, i16), f32>,
+    /// Per IGP (from MT26): vertical delay (m) and its GIVE variance (m²).
+    delays: HashMap<(i16, i16), (f32, f32)>,
     /// MT26 messages that arrived before their band's MT18 mask (MT26 repeats
     /// every few seconds, MT18 only every ~300 s — on a short capture the
     /// delays usually come first). Replayed when the mask lands.
@@ -191,7 +199,8 @@ impl SbasIonoGrid {
             let givei = bits(m, 22 + 13 * k + 9, 4);
             // 511 = don't use; GIVEI 15 = not monitored.
             if raw != 511 && givei != 15 {
-                self.delays.insert(igp, raw as f32 * 0.125);
+                let var = GIVE_VAR_M2[givei as usize] as f32;
+                self.delays.insert(igp, (raw as f32 * 0.125, var));
             } else {
                 self.delays.remove(&igp);
             }
@@ -207,6 +216,13 @@ impl SbasIonoGrid {
     /// implemented); zero-weight corners — the point sits exactly on the
     /// opposite cell edge — may be absent.
     pub fn vertical_delay_m(&self, lat: f64, lon: f64) -> Option<f64> {
+        self.vertical_delay_var_m(lat, lon).map(|(d, _)| d)
+    }
+
+    /// [`vertical_delay_m`](Self::vertical_delay_m) plus the GIVE variance
+    /// (m²), bilinearly interpolated over the same cell — the broadcast bound
+    /// on the *residual* vertical iono error after applying the delay.
+    pub fn vertical_delay_var_m(&self, lat: f64, lon: f64) -> Option<(f64, f64)> {
         if lat.abs() >= 75.0 {
             return None;
         }
@@ -223,9 +239,11 @@ impl SbasIonoGrid {
         };
         let x = (lon - lon0) / cell;
         let y = (lat - lat0) / cell;
-        let at = |la: f64, lo: f64| -> Option<f64> {
+        let at = |la: f64, lo: f64| -> Option<(f64, f64)> {
             let lo = if lo >= 180.0 { lo - 360.0 } else { lo };
-            self.delays.get(&(la as i16, lo as i16)).map(|&d| d as f64)
+            self.delays
+                .get(&(la as i16, lo as i16))
+                .map(|&(d, v)| (d as f64, v as f64))
         };
         let corners = [
             ((1.0 - x) * (1.0 - y), at(lat0, lon0)),
@@ -233,24 +251,34 @@ impl SbasIonoGrid {
             ((1.0 - x) * y, at(lat0 + cell, lon0)),
             (x * y, at(lat0 + cell, lon0 + cell)),
         ];
-        let mut sum = 0.0;
-        for (w, d) in corners {
-            match d {
-                Some(d) => sum += w * d,
+        let (mut delay, mut var) = (0.0, 0.0);
+        for (w, dv) in corners {
+            match dv {
+                Some((d, v)) => {
+                    delay += w * d;
+                    var += w * v;
+                }
                 None if w == 0.0 => {}
                 None => return None,
             }
         }
-        Some(sum)
+        Some((delay, var))
     }
 
     /// Slant ionospheric delay (m) for a satellite at `elev`/`azim` (radians)
     /// seen from `lat`/`lon` (radians): pierce point at 350 km, vertical delay
     /// interpolated from the grid, slant-mapped by the DO-229 obliquity.
     pub fn delay_m(&self, lat: f64, lon: f64, elev: f64, azim: f64) -> Option<f64> {
+        self.delay_var_m(lat, lon, elev, azim).map(|(d, _)| d)
+    }
+
+    /// [`delay_m`](Self::delay_m) plus the slant residual variance (m²): the
+    /// interpolated GIVE variance scaled by obliquity² (vertical → slant).
+    pub fn delay_var_m(&self, lat: f64, lon: f64, elev: f64, azim: f64) -> Option<(f64, f64)> {
         let (pp_lat, pp_lon) = pierce_point(lat, lon, elev, azim);
-        let vert = self.vertical_delay_m(pp_lat.to_degrees(), pp_lon.to_degrees())?;
-        Some(vert * obliquity(elev))
+        let (vert, var) = self.vertical_delay_var_m(pp_lat.to_degrees(), pp_lon.to_degrees())?;
+        let f = obliquity(elev);
+        Some((vert * f, var * f * f))
     }
 }
 

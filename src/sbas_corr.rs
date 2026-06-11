@@ -31,10 +31,19 @@ use std::collections::HashMap;
 /// from a decode gap, not a current correction.
 const FAST_CORR_MAX_AGE_SEC: f64 = 30.0;
 
+/// DO-229 UDREI 0-13 → variance bound (m²) on the residual range error after
+/// the fast + long-term corrections are applied (14/15 = not monitored /
+/// don't use, handled as "clear the slot").
+const UDRE_VAR_M2: [f64; 14] = [
+    0.052, 0.0924, 0.1444, 0.283, 0.4678, 0.8315, 1.2992, 1.8709, 2.5465, 3.326, 5.1968, 20.787,
+    230.9661, 2078.695,
+];
+
 /// One slot's fast correction.
 #[derive(Clone, Copy)]
 struct FastCorr {
     prc_m: f64,
+    var_m2: f64, // broadcast UDRE variance bound
     ts_sec: f64, // receiver stream time of receipt
 }
 
@@ -164,7 +173,15 @@ impl SbasCorrections {
             return;
         }
         let prc_m = prc_raw as f64 * 0.125;
-        self.fast.insert(mn, FastCorr { prc_m, ts_sec });
+        let var_m2 = UDRE_VAR_M2[udrei as usize];
+        self.fast.insert(
+            mn,
+            FastCorr {
+                prc_m,
+                var_m2,
+                ts_sec,
+            },
+        );
     }
 
     /// One 106-bit long-term half-message at bit `p` (MT25 carries two, MT24
@@ -239,11 +256,18 @@ impl SbasCorrections {
         }
     }
 
-    /// Current fast pseudorange correction (m) for `sv`, if fresh at stream
-    /// time `ts_sec`. Applied as `pr += prc` (DO-229 A.4.4.3).
-    pub fn fast_prc_m(&self, sv: SV, ts_sec: f64) -> Option<f64> {
+    /// Current fast pseudorange correction for `sv`, if fresh at stream time
+    /// `ts_sec`, as `(prc m, UDRE variance m²)`. The correction is applied as
+    /// `pr += prc` (DO-229 A.4.4.3); the variance is the broadcast bound on
+    /// what remains afterwards — a ready-made least-squares weight.
+    pub fn fast_prc_var_m(&self, sv: SV, ts_sec: f64) -> Option<(f64, f64)> {
         let fc = self.fast.get(&Self::mask_number(sv)?)?;
-        ((ts_sec - fc.ts_sec).abs() <= FAST_CORR_MAX_AGE_SEC).then_some(fc.prc_m)
+        ((ts_sec - fc.ts_sec).abs() <= FAST_CORR_MAX_AGE_SEC).then_some((fc.prc_m, fc.var_m2))
+    }
+
+    /// [`fast_prc_var_m`](Self::fast_prc_var_m) without the variance.
+    pub fn fast_prc_m(&self, sv: SV, ts_sec: f64) -> Option<f64> {
+        self.fast_prc_var_m(sv, ts_sec).map(|(prc, _)| prc)
     }
 
     /// Long-term correction for `sv` as `(δpos ECEF m, δclock s)`, evaluated
