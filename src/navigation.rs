@@ -95,7 +95,18 @@ impl Channel {
             self.nav.eph.ts_sec = self.ts_sec; // timestamp the first word in
         }
         let was_valid = self.nav.eph.is_valid();
+        let had_ggto = self.nav.eph.ggto_valid;
         decode_ephemeris_word(&mut self.nav.eph, &word);
+        if !had_ggto && self.nav.eph.ggto_valid {
+            log::warn!(
+                "{}: GGTO (GST-GPST) decoded: A0G={:+.2} ns A1G={:+.2e} s/s t0G={} WN0G={}",
+                self.sv,
+                self.nav.eph.a0g * 1e9,
+                self.nav.eph.a1g,
+                self.nav.eph.t0g,
+                self.nav.eph.wn0g
+            );
+        }
         log::warn!("{}: I/NAV word type {} (CRC ok)", self.sv, word.word_type);
         if !was_valid && self.nav.eph.is_valid() {
             log::warn!(

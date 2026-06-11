@@ -1668,6 +1668,25 @@ mod tests {
             sig(Constellation::GPS),
             sig(Constellation::Galileo)
         );
+        // The ISB decomposition: the broadcast GST-GPST offset (word-10 GGTO)
+        // is the system-time part of the measured inter-system bias; the
+        // remainder is the receiver's own inter-signal (BPSK vs BOC path)
+        // hardware delay. Under our t_tx convention (GST epochs mapped
+        // nominally), a positive GGTO makes Galileo pseudoranges short by
+        // c*GGTO, so hw = ISB + c*GGTO.
+        match gal.iter().find(|e| e.ggto_valid) {
+            Some(g) => {
+                let ggto = crate::galileo_inav::ggto_at(g, g.week, g.tow as f64).unwrap();
+                let isb_ns = wisb / crate::constants::SPEED_OF_LIGHT * 1e9;
+                eprintln!(
+                    "broadcast GGTO {:+.2} ns; measured ISB {isb_ns:+.2} ns -> receiver inter-signal delay {:+.2} ns",
+                    ggto * 1e9,
+                    isb_ns + ggto * 1e9
+                );
+            }
+            None => eprintln!("no word-10 GGTO decoded in this pass"),
+        }
+
         // Weighted + ISB, the combined solve must not be dragged below the
         // quality of its best constituent (the point of this experiment).
         let (wg_err, wc_err) = (

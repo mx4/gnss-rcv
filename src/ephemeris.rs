@@ -21,6 +21,16 @@ pub struct Ephemeris {
     pub toc_gpst: Epoch,
     pub tlm: u32,
 
+    /// Galileo GST-GPS time offset (GGTO), from I/NAV word type 10: the
+    /// broadcast GST − GPST offset model `A0G + A1G·Δt`, referenced to
+    /// `t0g` (s) in mod-64 GST week `wn0g`. ns-scale; used as a diagnostic
+    /// (apparent inter-system bias minus GGTO = receiver hardware delay).
+    pub a0g: f64,
+    pub a1g: f64,
+    pub t0g: u32,
+    pub wn0g: u32,
+    pub ggto_valid: bool,
+
     pub iode: u32,    // Issue of Data, Ephemeris
     pub iodc: u32,    // Issue of Data, Clock
     pub sva: u32,     // SV accuracy (URA index)

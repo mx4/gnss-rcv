@@ -22,10 +22,12 @@ pub const P2_31: f64 = p2(31);
 pub const P2_32: f64 = p2(32); // Galileo BGD
 pub const P2_33: f64 = p2(33);
 pub const P2_34: f64 = p2(34); // Galileo af0
+pub const P2_35: f64 = p2(35); // Galileo GGTO A0G
 pub const P2_38: f64 = p2(38);
 pub const P2_43: f64 = p2(43);
 pub const P2_46: f64 = p2(46); // Galileo af1
 pub const P2_50: f64 = p2(50);
+pub const P2_51: f64 = p2(51); // Galileo GGTO A1G
 pub const P2_55: f64 = p2(55);
 pub const P2_59: f64 = p2(59); // Galileo af2
 

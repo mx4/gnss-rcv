@@ -9,7 +9,7 @@
 //! assembly and ephemeris extraction ([`InavDecoder`] / [`decode_ephemeris_word`]).
 
 use crate::constants::{
-    P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_43, P2_46, P2_59, SC2RAD,
+    P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_35, P2_43, P2_46, P2_51, P2_59, SC2RAD,
 };
 use crate::ephemeris::Ephemeris;
 use crate::fec::{G1, G2, conv_encode, crc24q, parity};
@@ -312,8 +312,31 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
             eph.week = u(74, 12); // GST week number
             eph.tow = u(86, 20); // GST time of week [s]
         }
+        10 => {
+            // GST-GPS conversion parameters (GGTO), trailing the SVID3
+            // almanac half (offsets cross-checked vs gnss-sdr Galileo_INAV.h).
+            eph.a0g = s(87, 16) * P2_35;
+            eph.a1g = s(103, 12) * P2_51;
+            eph.t0g = u(115, 8) * 3600;
+            eph.wn0g = u(123, 6);
+            eph.ggto_valid = true;
+        }
         _ => {}
     }
+}
+
+/// The broadcast GST − GPST offset (seconds) at GST `week`/`tow`, from word-10
+/// parameters: `A0G + A1G·Δt`, Δt referenced to `t0g` in the mod-64 week
+/// `wn0g`. ns-scale (the two system times are mutually steered).
+pub fn ggto_at(eph: &Ephemeris, week: u32, tow: f64) -> Option<f64> {
+    if !eph.ggto_valid {
+        return None;
+    }
+    let dw = ((week % 64) as i64 - eph.wn0g as i64).rem_euclid(64);
+    // Nearest interpretation of the mod-64 week difference (±32 weeks).
+    let dw = if dw > 32 { dw - 64 } else { dw };
+    let dt = dw as f64 * 604_800.0 + (tow - eph.t0g as f64);
+    Some(eph.a0g + eph.a1g * dt)
 }
 
 // ---- I/NAV encoder (inverse of the decoder; used by the synthetic generator) ----
@@ -370,6 +393,12 @@ pub fn encode_ephemeris_word(eph: &Ephemeris, word_type: u8) -> InavWord {
             set_word_bits(&mut bits, 48, 10, r(eph.tgd / P2_32));
             set_word_bits(&mut bits, 74, 12, eph.week as i64);
             set_word_bits(&mut bits, 86, 20, eph.tow as i64);
+        }
+        10 => {
+            set_word_bits(&mut bits, 87, 16, r(eph.a0g / P2_35));
+            set_word_bits(&mut bits, 103, 12, r(eph.a1g / P2_51));
+            set_word_bits(&mut bits, 115, 8, (eph.t0g / 3600) as i64);
+            set_word_bits(&mut bits, 123, 6, eph.wn0g as i64);
         }
         _ => {}
     }
@@ -706,6 +735,37 @@ mod tests {
         assert!((got.omg_dot - eph.omg_dot).abs() < 5e-13); // > 1 LSB (P2_43·SC2RAD)
         assert!((got.crc - eph.crc).abs() < 0.1);
         assert!((got.f0 - eph.f0).abs() < 1e-9);
+    }
+
+    // Word-10 GGTO: every field round-trips within its broadcast LSB and the
+    // offset model evaluates with the mod-64 week handling. Offsets
+    // cross-checked against gnss-sdr's Galileo_INAV.h (A0G {87,16} 2^-35,
+    // A1G {103,12} 2^-51, t0G {115,8} x3600, WN0G {123,6}).
+    #[test]
+    fn ggto_word10_roundtrips_and_evaluates() {
+        use crate::constants::{P2_35, P2_51};
+        let mut e = sample_eph();
+        e.a0g = 3.2e-9; // ~3 ns: a typical real GGTO
+        e.a1g = 1.5e-15;
+        e.t0g = 12 * 3600;
+        e.wn0g = e.week % 64;
+
+        let mut q = Ephemeris::default();
+        decode_ephemeris_word(&mut q, &encode_ephemeris_word(&e, 10));
+        assert!(q.ggto_valid);
+        assert!((q.a0g - e.a0g).abs() <= P2_35, "a0g {:e}", q.a0g);
+        assert!((q.a1g - e.a1g).abs() <= P2_51, "a1g {:e}", q.a1g);
+        assert_eq!(q.t0g, e.t0g);
+        assert_eq!(q.wn0g, e.wn0g);
+
+        // Evaluation: one hour past t0g in the same week.
+        let g = ggto_at(&q, e.week, 13.0 * 3600.0).unwrap();
+        assert!((g - (q.a0g + q.a1g * 3600.0)).abs() < 1e-18);
+        // Mod-64 week wrap: 63 weeks later resolves to -1 week (nearest).
+        let g2 = ggto_at(&q, e.week + 63, 13.0 * 3600.0).unwrap();
+        assert!((g2 - (q.a0g + q.a1g * (3600.0 - 604_800.0))).abs() < 1e-15);
+        // No word 10 decoded -> None.
+        assert!(ggto_at(&Ephemeris::default(), 0, 0.0).is_none());
     }
 
     // The 40-bit OSNMA field (odd page Reserved 1) survives a page encode →
