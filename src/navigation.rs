@@ -67,14 +67,30 @@ impl Channel {
     }
 
     /// SBAS L1 (EGNOS/WAAS/MSAS…): feed prompt-I per 1 ms code period to the
-    /// streaming decoder; on a CRC-valid 250-bit message, log its type.
+    /// streaming decoder; each CRC-valid 250-bit message updates the shared
+    /// ionospheric grid (MT18 masks + MT26 delays) and the UI message counter.
     fn nav_decode_sbas(&mut self) {
         let Some(&c_p) = self.hist.corr_p.back() else {
             return;
         };
         if let Some(msg) = self.nav.sbas.push_period(c_p.re) {
             self.stats.subframes += 1;
-            log::warn!("{}: SBAS L1 message type {} (CRC ok)", self.sv, msg.mtype);
+            let n_igp = {
+                let mut st = self.pub_state.lock().unwrap();
+                let fed = st.sbas_iono.feed(&msg);
+                if let Some(cs) = st.channels.get_mut(&self.sv) {
+                    cs.sbas_msgs = self.stats.subframes;
+                }
+                fed.then(|| st.sbas_iono.len())
+            };
+            match n_igp {
+                Some(n) => log::warn!(
+                    "{}: SBAS L1 message type {} (CRC ok) — iono grid: {n} IGPs",
+                    self.sv,
+                    msg.mtype
+                ),
+                None => log::warn!("{}: SBAS L1 message type {} (CRC ok)", self.sv, msg.mtype),
+            }
         }
     }
 

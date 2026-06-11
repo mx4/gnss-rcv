@@ -451,9 +451,10 @@ impl PositionSolver {
         let latest_tx = *tx_gpst.iter().max().unwrap();
         let now_gpst = latest_tx + Duration::from_seconds(NOMINAL_TRAVEL_SEC);
 
-        let (iono_valid, iono_alpha, iono_beta) = {
+        let (iono_valid, iono_alpha, iono_beta, sbas_iono) = {
             let st = self.pub_state.lock().unwrap();
-            (st.ion_adj, st.iono_alpha, st.iono_beta)
+            let grid = (!st.sbas_iono.is_empty()).then(|| st.sbas_iono.clone());
+            (st.ion_adj, st.iono_alpha, st.iono_beta, grid)
         };
         let gps_sod = {
             let r = &ephs[0];
@@ -489,14 +490,34 @@ impl PositionSolver {
                 }
                 let (lat, lon, h_m) =
                     ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
-                // Klobuchar applies to every SV regardless of constellation
-                // (both are L1; RTKLIB does the same for Galileo). Coefficients
-                // come from GPS subframe 4 page 18, so mixed runs cover Galileo
-                // too; Galileo-only runs have no model yet (the broadcast
-                // NeQuick-G inputs are decoded — eph.ai0/1/2 — awaiting the
-                // NeQuick-G implementation, a large port).
-                let iono = if iono_valid && elev > 0.0 {
-                    klobuchar_l1_delay_m(&iono_alpha, &iono_beta, lat, lon, elev, azim, gps_sod)
+                // Ionosphere, best source first: the SBAS grid (measured, per
+                // pierce point, available within seconds of tracking a GEO),
+                // else Klobuchar (a climatological model whose coefficients
+                // need up to 12.5 min of GPS nav data). Either applies to every
+                // SV regardless of constellation — all signals here are L1
+                // (RTKLIB does the same for Galileo); Galileo's own NeQuick-G
+                // is still just decoded inputs (eph.ai0/1/2), awaiting the
+                // model port. The SBAS grid can be sparse: outside its
+                // populated cells we fall back per-SV.
+                let iono = if elev > 0.0 {
+                    sbas_iono
+                        .as_ref()
+                        .and_then(|g| g.delay_m(lat, lon, elev, azim))
+                        .unwrap_or_else(|| {
+                            if iono_valid {
+                                klobuchar_l1_delay_m(
+                                    &iono_alpha,
+                                    &iono_beta,
+                                    lat,
+                                    lon,
+                                    elev,
+                                    azim,
+                                    gps_sod,
+                                )
+                            } else {
+                                0.0
+                            }
+                        })
                 } else {
                     0.0
                 };

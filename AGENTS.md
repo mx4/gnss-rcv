@@ -219,7 +219,17 @@ guesses. Tackle roughly top-to-bottom.
   (2 C/A periods) → continuous K=7 Viterbi → 250-bit messages framed on the
   0x53/9A/C6 preamble → CRC-24Q. Shares the FEC code + CRC with Galileo via
   [`fec.rs`](src/fec.rs). On CTTC (Spain) EGNOS S120/S126 decode MT 0/1/2/3/4/24/25/26/27.
-  (Decode only — *applying* the corrections to the fix is still open, see roadmap.)
+- ~~**SBAS ionospheric grid (MT18 + MT26)**~~: [`sbas_iono.rs`](src/sbas_iono.rs) —
+  IGP band geometry (DO-229 Annex A, bands 0-8), MT18 masks + MT26 vertical
+  delays assembled into a live grid in `GnssState`; the solver prefers it over
+  Klobuchar (pierce point at 350 km → 4-point bilinear → obliquity). MT26s
+  arriving before their band's mask are buffered and replayed (the real-capture
+  order: MT26 every few s, MT18 only every ~300 s). **Not yet exercised on a real
+  fix**: CTTC's 100 s window contains no MT18 (and the decoder only yields
+  ~20-30% of broadcast messages — S120 21/100, S126 11/100 despite 100% tracking
+  at 41/40 dB-Hz), so the grid stays empty there. Needs a ≥5 min SBAS capture
+  and/or a decode-yield fix; bands 9-10 (|lat|>55°) and the 3-point interpolation
+  fallback are also open.
 - ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
   ([gps_lnav.rs](src/gps_lnav.rs)) feeds real captured LNAV subframes 1-3 through
   the `decode_lnav_subframe{1,2,3}` parsers and range-checks the result (a≈26 560

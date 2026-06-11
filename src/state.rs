@@ -1,6 +1,7 @@
 use crate::{
     almanac::Almanac,
     channel::{History, State},
+    sbas_iono::SbasIonoGrid,
 };
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
@@ -26,6 +27,10 @@ pub struct ChannelState {
     pub osnma_verified: bool,
     pub elevation_deg: f64,
     pub azimuth_deg: f64,
+    /// SBAS channels: CRC-valid 250-bit messages decoded so far (SBAS GEOs
+    /// broadcast corrections, not ephemerides, so this replaces `eph_pages`
+    /// as the decode-progress indicator in the UI).
+    pub sbas_msgs: u64,
 }
 impl Default for ChannelState {
     fn default() -> Self {
@@ -40,6 +45,7 @@ impl Default for ChannelState {
             osnma_verified: false,
             elevation_deg: 0.0,
             azimuth_deg: 0.0,
+            sbas_msgs: 0,
         }
     }
 }
@@ -61,6 +67,11 @@ pub struct GnssState {
     /// (I/NAV word 5), once decoded. Inputs for a future NeQuick-G model;
     /// mixed runs meanwhile apply the GPS Klobuchar to all SVs.
     pub gal_iono_az: Option<[f64; 3]>,
+    /// SBAS ionospheric grid (EGNOS/WAAS MT18 + MT26), assembled live by the
+    /// SBAS channels. When non-empty the solver prefers it over Klobuchar —
+    /// it is the only iono source that arrives within seconds (Klobuchar's
+    /// page 18 needs up to 12.5 min of GPS nav data).
+    pub sbas_iono: SbasIonoGrid,
     /// Galileo OSNMA DSM-KROOT assembly progress as `(blocks_received, total)`,
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
@@ -96,6 +107,7 @@ impl GnssState {
             longitude: 0.0,
             height: 0.0,
             gal_iono_az: None,
+            sbas_iono: SbasIonoGrid::default(),
             osnma_kroot: None,
             hdop: 0.0,
             vdop: 0.0,
