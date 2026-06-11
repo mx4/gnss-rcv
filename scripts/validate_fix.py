@@ -188,7 +188,10 @@ SBAS_CANDIDATES = [
     ("resources/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN/2013_04_04_GNSS_SIGNAL_at_CTTC_SPAIN.dat",
      ["-t", "2xi16", "--fs", "4000000"], 40000),  # EGNOS over Spain
 ]
-SBAS_MIN_MSGS = 5  # CRC-valid SBAS L1 messages across all GEOs
+# CRC-valid SBAS L1 messages across all GEOs. S120+S126 yield ~74 in this 40 s
+# window with the symbol grid surviving code-phase wraps; losing the wrap
+# bookkeeping drops it back to ~32, so the floor sits between the two.
+SBAS_MIN_MSGS = 50
 
 
 def validate_sbas_decode():

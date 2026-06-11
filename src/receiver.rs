@@ -231,70 +231,72 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// Build the channel list, tagging each PRN's constellation by its number:
 /// 193-202 are QZSS, 120-158 are SBAS, the rest GPS. All three share the L1 C/A
 /// Gold-code/LNAV machinery, so they acquire and decode through the same path;
-/// the tag drives the log/plot label (G/S/Q) and the solver. `sbas` appends the
-/// legacy SBAS L1 block (PRN 120-138) and `qzss` the QZSS block (PRN 193-202) on
-/// top of whatever was selected. (SBAS never completes a GPS ephemeris so the
-/// solver ignores it; QZSS does and `gnss-rtk` solves it.)
-/// Parse a comma-separated satellite list into `Vec<SV>`.
+/// the tag drives the log/plot label (G/S/Q) and the solver. (SBAS never
+/// completes a GPS ephemeris so the solver ignores it; QZSS does and `gnss-rtk`
+/// solves it.)
 ///
-/// Each token is either:
-///   - A prefixed SV identifier (`G3`, `E11`, `J193`, `S120`) — constellation
-///     explicit, works regardless of `--sig`.  Case-insensitive.
-///   - A bare PRN number (`3`, `11`) — constellation inferred from `sig` for
-///     backward compatibility (GPS numbers 1-32, QZSS 193-202, SBAS ≥120).
+/// The base selection comes from `--sats`:
+///   - Empty: the default block for `sig` (GPS 1-32, or Galileo 1-36 on E1).
+///   - A comma-separated list, each token either a prefixed SV identifier
+///     (`G3`, `E11`, `J193`, `S120`) — constellation explicit, works regardless
+///     of `--sig`, case-insensitive — or a bare PRN number (`3`, `11`) whose
+///     constellation is inferred from `sig` (GPS 1-32, QZSS 193-202, SBAS ≥120).
 ///
-/// An empty string produces the default block for `sig`, extended by `--sbas`
-/// and `--qzss` flags (only meaningful in the empty / default case).
+/// `--sbas` then appends the legacy SBAS L1 block (PRN 120-138) and `--qzss` the
+/// QZSS block (PRN 193-202) on top of whatever was selected — the explicit
+/// `--sats` list included, so `--sats 1 --sbas` searches PRN 1 plus the GEOs.
 fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
-    if sats.is_empty() {
+    let mut svs: Vec<SV> = if sats.is_empty() {
         let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) = match sig {
             Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
             _ => (Constellation::GPS, 1..=32),
         };
-        let mut svs: Vec<SV> = range.map(|prn| SV::new(base_cons, prn)).collect();
-        if sbas {
-            svs.extend((120..=138_u8).map(|prn| SV::new(Constellation::SBAS, prn)));
-        }
-        if qzss {
-            svs.extend((193..=202_u8).map(|prn| SV::new(Constellation::QZSS, prn)));
-        }
-        return svs;
-    }
-
-    // Constellation to fall back to when a bare PRN is given.
-    let fallback_cons = |prn: u8| match sig {
-        Signal::GalileoE1b | Signal::GalileoE1c => Constellation::Galileo,
-        _ => {
-            if (193..=202).contains(&prn) {
-                Constellation::QZSS
-            } else if prn >= 120 {
-                Constellation::SBAS
-            } else {
-                Constellation::GPS
+        range.map(|prn| SV::new(base_cons, prn)).collect()
+    } else {
+        // Constellation to fall back to when a bare PRN is given.
+        let fallback_cons = |prn: u8| match sig {
+            Signal::GalileoE1b | Signal::GalileoE1c => Constellation::Galileo,
+            _ => {
+                if (193..=202).contains(&prn) {
+                    Constellation::QZSS
+                } else if prn >= 120 {
+                    Constellation::SBAS
+                } else {
+                    Constellation::GPS
+                }
             }
-        }
+        };
+
+        sats.split(',')
+            .map(|token| {
+                let token = token.trim();
+                if token
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+                {
+                    // Prefixed: delegate to the gnss_rs parser ("G3", "E11", …).
+                    token
+                        .parse::<SV>()
+                        .unwrap_or_else(|_| panic!("invalid SV: {token}"))
+                } else {
+                    let prn = token
+                        .parse::<u8>()
+                        .unwrap_or_else(|_| panic!("invalid PRN: {token}"));
+                    SV::new(fallback_cons(prn), prn)
+                }
+            })
+            .collect()
     };
 
-    sats.split(',')
-        .map(|token| {
-            let token = token.trim();
-            if token
-                .chars()
-                .next()
-                .is_some_and(|c| c.is_ascii_alphabetic())
-            {
-                // Prefixed: delegate to the gnss_rs parser ("G3", "E11", …).
-                token
-                    .parse::<SV>()
-                    .unwrap_or_else(|_| panic!("invalid SV: {token}"))
-            } else {
-                let prn = token
-                    .parse::<u8>()
-                    .unwrap_or_else(|_| panic!("invalid PRN: {token}"));
-                SV::new(fallback_cons(prn), prn)
-            }
-        })
-        .collect()
+    // --sbas / --qzss append their blocks on top of whatever was selected.
+    if sbas {
+        svs.extend((120..=138_u8).map(|prn| SV::new(Constellation::SBAS, prn)));
+    }
+    if qzss {
+        svs.extend((193..=202_u8).map(|prn| SV::new(Constellation::QZSS, prn)));
+    }
+    svs
 }
 
 /// Reject cross-correlation false locks.
@@ -1796,6 +1798,25 @@ mod tests {
         // --qzss appends the 193-202 block (10 PRNs).
         let l = get_sat_list("", Signal::L1ca, false, true);
         assert_eq!(l.len(), 32 + 10);
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::QZSS)
+                .count(),
+            10
+        );
+
+        // --sbas / --qzss append on top of an *explicit* --sats list too: this is
+        // how validate_fix.py searches the GEOs (`--sats 1 --sbas`). The block
+        // must follow the selection, not get dropped when --sats is non-empty.
+        let l = get_sat_list("1", Signal::L1ca, true, true);
+        assert_eq!(l.len(), 1 + 19 + 10);
+        assert_eq!(l[0], SV::new(Constellation::GPS, 1));
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::SBAS)
+                .count(),
+            19
+        );
         assert_eq!(
             l.iter()
                 .filter(|s| s.constellation == Constellation::QZSS)
