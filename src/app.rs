@@ -270,7 +270,9 @@ impl GnssRcvApp {
                 ui.label("fs");
                 ui.add_sized(
                     [FIELD_W, h],
-                    egui::DragValue::new(&mut self.fs).speed(1000.0).suffix(" Hz"),
+                    egui::DragValue::new(&mut self.fs)
+                        .speed(1000.0)
+                        .suffix(" Hz"),
                 );
                 ui.end_row();
 
@@ -279,7 +281,9 @@ impl GnssRcvApp {
                 ui.label("fi");
                 ui.add_sized(
                     [FIELD_W, h],
-                    egui::DragValue::new(&mut self.fi).speed(1000.0).suffix(" Hz"),
+                    egui::DragValue::new(&mut self.fi)
+                        .speed(1000.0)
+                        .suffix(" Hz"),
                 );
                 ui.end_row();
             });
@@ -296,7 +300,11 @@ impl GnssRcvApp {
             // (paused). It takes the full row when idle, and shares it with the
             // red stop button while running.
             let stop_w = if active { 90.0 } else { 0.0 };
-            let gap = if active { ui.spacing().item_spacing.x } else { 0.0 };
+            let gap = if active {
+                ui.spacing().item_spacing.x
+            } else {
+                0.0
+            };
             let main_w = (ui.available_width() - stop_w - gap).max(60.0);
             let label = if !active {
                 "start"
@@ -327,7 +335,7 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, almanac_n, has_ion, has_utc, pos_text, pos_url) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64)> = st
                 .channels
@@ -337,7 +345,6 @@ impl GnssRcvApp {
                 .collect();
             sv_elaz.sort_by_key(|t| t.0);
             let tow_text = format!("{:?}", st.tow_gpst);
-            let almanac_n = st.almanac.iter().filter(|a| a.sat != 0).count();
             let (pos_text, pos_url) = if st.longitude != 0.0 {
                 (
                     format!(
@@ -353,7 +360,7 @@ impl GnssRcvApp {
                 ("no position fix".to_string(), None)
             };
             (
-                sv_elaz, tow_text, almanac_n, st.ion_adj, st.utc_adj, pos_text, pos_url,
+                sv_elaz, tow_text, st.ion_adj, st.utc_adj, pos_text, pos_url,
             )
         };
 
@@ -381,8 +388,6 @@ impl GnssRcvApp {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 ui.monospace(&tow_text);
-                                ui.separator();
-                                ui.monospace(format!("almanac: {almanac_n}"));
                                 if has_ion {
                                     ui.separator();
                                     ui.monospace("ion: 1");
