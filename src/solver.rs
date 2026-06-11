@@ -332,10 +332,10 @@ fn make_config() -> Config {
     let mut cfg = Config::default().with_navigation_method(Method::SPP);
     cfg.min_sv_elev = Some(0.0);
     // gnss-rtk's default max_gdop (5.0) targets ultra-precise use and rejects
-    // perfectly valid marginal-geometry fixes -- e.g. the CTTC capture, which
-    // gnss-sdr itself solves at HDOP 4.4 (GDOP ~7-9). Relax it so a usable fix
-    // from a sparse/clustered SV set isn't thrown away. Good-geometry recordings
-    // (gpssim, nov3) sit well under this and are unaffected.
+    // perfectly valid marginal-geometry fixes -- e.g. the CTTC capture, whose
+    // sparse SV set solves around HDOP 4.4 (GDOP ~7-9). Relax it so a usable
+    // fix from a sparse/clustered SV set isn't thrown away. Good-geometry
+    // recordings (gpssim, nov3) sit well under this and are unaffected.
     cfg.solver.max_gdop = 30.0;
     // Our pseudorange t_tx is anchored to the nav-message TOW, which is the
     // satellite's OWN clock reading. So pr_m = geom + c*dT_rx - c*clock_corr,
@@ -497,7 +497,7 @@ impl PositionSolver {
                 // else Klobuchar (a climatological model whose coefficients
                 // need up to 12.5 min of GPS nav data). Either applies to every
                 // SV regardless of constellation — all signals here are L1
-                // (RTKLIB does the same for Galileo); Galileo's own NeQuick-G
+                // (standard practice for Galileo); Galileo's own NeQuick-G
                 // is still just decoded inputs (eph.ai0/1/2), awaiting the
                 // model port. The SBAS grid can be sparse: outside its
                 // populated cells we fall back per-SV.

@@ -17,8 +17,8 @@
 //! per DO-229 A.4.4.3 (PR_corrected = PR_measured + PRC) — the LOS projection
 //! of δpos stands in for moving the modelled SV, exact to ~|δpos|²/range.
 //! Unlike the iono grid these are differential (per-SV), so the receiver
-//! clock state cannot absorb them. Bit layouts cross-checked against RTKLIB's
-//! sbas.c. EGNOS GEOs in test mode broadcast their MT2 content as MT0
+//! clock state cannot absorb them. EGNOS GEOs in test mode broadcast their
+//! MT2 content as MT0
 //! ("don't use" for safety-of-life — we are not, so it is parsed as MT2).
 
 use crate::sbas_l1::SbasMessage;
@@ -168,7 +168,7 @@ impl SbasCorrections {
     }
 
     /// One 106-bit long-term half-message at bit `p` (MT25 carries two, MT24
-    /// one): velocity code (1 bit), then per DO-229 / RTKLIB decode_longcorrh:
+    /// one): velocity code (1 bit), then per DO-229:
     /// v=0 → two corrections {mask# 6, IODE 8, δxyz 3×9 ×0.125 m, δaf0 10
     /// ×2⁻³¹}, IODP at p+103; v=1 → one correction {mask# 6, IODE 8, δxyz
     /// 3×11 ×0.125 m, δaf0 11 ×2⁻³¹, δvxyz 3×8 ×2⁻¹¹ m/s, δaf1 8 ×2⁻³⁹,
@@ -283,7 +283,7 @@ impl SbasCorrections {
 /// drifts metres per minute against a 36 000 km range — but NOT for ranging:
 /// EGNOS marks its GEOs do-not-use-for-ranging, and without the reference
 /// time the quadratic extrapolation is anchored at "now" anyway. Offsets per
-/// DO-229 / RTKLIB decode_sbstype9.
+/// DO-229.
 pub fn mt9_geo_position_ecef(m: &[u8; 250]) -> [f64; 3] {
     [
         sbits(m, 39, 30) as f64 * 0.08,

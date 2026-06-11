@@ -12,11 +12,11 @@
 //! 12.5 min GPS master frame), EGNOS cycles the active bands within tens of
 //! seconds, so even a 40 s capture yields a usable regional grid.
 //!
-//! The IGP band geometry (which mask bit is which lat/lon) is transcribed
-//! from RTKLIB's `igpband1`/`igpband2` tables (= DO-229 Annex A). Cells are
-//! 5°×5° below |lat| 55° and 10°×10° between 55° and 75° (needed as far
-//! south as Tampere — high-latitude pierce points land there); polewards of
-//! 75° `delay_m` returns `None` and the caller falls back to Klobuchar/none.
+//! The IGP band geometry (which mask bit is which lat/lon) follows DO-229
+//! Annex A. Cells are 5°×5° below |lat| 55° and 10°×10° between 55° and 75°
+//! (needed as far south as Tampere — high-latitude pierce points land there);
+//! polewards of 75° `delay_m` returns `None` and the caller falls back to
+//! Klobuchar/none.
 
 use crate::sbas_l1::SbasMessage;
 use std::collections::HashMap;
@@ -48,7 +48,7 @@ const X4: [i16; 28] = [
 /// north.
 type Column = (i16, &'static [i16], usize);
 
-/// Bands 0-8 (the vertical bands): 8 columns each, from RTKLIB / DO-229.
+/// Bands 0-8 (the vertical bands): 8 columns each (DO-229 Annex A).
 #[rustfmt::skip]
 fn band_columns(band: u8) -> &'static [Column] {
     match band {
@@ -75,7 +75,7 @@ fn band_columns(band: u8) -> &'static [Column] {
 }
 
 /// Bands 9-10 (the horizontal, high-latitude bands): rows of fixed latitude,
-/// `(lat, lon_start, lon_step, count, first_mask_bit)`, from RTKLIB / DO-229.
+/// `(lat, lon_start, lon_step, count, first_mask_bit)` (DO-229 Annex A).
 #[rustfmt::skip]
 fn band_rows(band: u8) -> &'static [(i16, i16, i16, usize, usize)] {
     match band {
@@ -201,8 +201,8 @@ impl SbasIonoGrid {
     /// Vertical delay (m) at geographic `(lat, lon)` degrees, by 4-point
     /// bilinear interpolation over the surrounding grid cell (DO-229
     /// A.4.4.10.3): a 5°×5° cell below |lat| 55°, a 10°×10° cell anchored on
-    /// the 55°/65°/75° rows between 55° and 75° (RTKLIB's `searchigp`
-    /// convention). `None` polewards of 75°, or when a cell corner with
+    /// the 55°/65°/75° rows between 55° and 75°. `None` polewards of 75°,
+    /// or when a cell corner with
     /// non-zero weight lacks a delay (the 3-point fallback is not
     /// implemented); zero-weight corners — the point sits exactly on the
     /// opposite cell edge — may be absent.

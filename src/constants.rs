@@ -39,9 +39,8 @@ pub const P2_59: f64 = p2(59); // Galileo af2
 /// *truncated* π mandated by IS-GPS-200 (and the Galileo OS SIS ICD) — NOT
 /// `std::f64::consts::PI`. The ground segment fits the ephemeris using exactly
 /// this value, so the receiver must use it too, or it diverges from the broadcast
-/// convention (~7e-15 rad). Shared by GPS and Galileo (= gnss-sdr `GNSS_PI`,
-/// RTKLIB `SC2RAD`). Do not "increase its precision". The true π is still used
-/// for carrier/FFT DSP elsewhere.
+/// convention (~7e-15 rad). Shared by GPS and Galileo. Do not "increase its
+/// precision". The true π is still used for carrier/FFT DSP elsewhere.
 #[allow(clippy::approx_constant)] // intentional ICD value, not an approximation of PI
 pub const SC2RAD: f64 = 3.141_592_653_589_8;
 

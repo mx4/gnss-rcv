@@ -266,8 +266,8 @@ fn sbits(bits: &[u8], pos: usize, len: usize) -> i32 {
 /// carry spare / UTC / almanac / reduced-CED data and are skipped here. Once
 /// types 1-5 have all landed, `eph.is_valid()` holds and the solver can use it.
 ///
-/// Field offsets and scales follow the Galileo OS SIS ICD (cross-checked against
-/// gnss-sdr's `Galileo_INAV.h`); positions there are 1-indexed in the 128-bit word.
+/// Field offsets and scales follow the Galileo OS SIS ICD; positions there are
+/// 1-indexed in the 128-bit word.
 pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
     let b = &word.bits[..];
     let u = |start: usize, len: usize| ubits(b, start - 1, len);
@@ -310,7 +310,7 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
         }
         5 => {
             // NeQuick-G effective-ionisation coefficients + regional storm
-            // flags (offsets cross-checked vs gnss-sdr Galileo_INAV.h).
+            // flags.
             eph.ai0 = u(7, 11) as f64 * P2_2;
             eph.ai1 = s(18, 11) * P2_8;
             eph.ai2 = s(29, 14) * P2_15;
@@ -322,7 +322,7 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
         }
         10 => {
             // GST-GPS conversion parameters (GGTO), trailing the SVID3
-            // almanac half (offsets cross-checked vs gnss-sdr Galileo_INAV.h).
+            // almanac half.
             eph.a0g = s(87, 16) * P2_35;
             eph.a1g = s(103, 12) * P2_51;
             eph.t0g = u(115, 8) * 3600;
@@ -765,8 +765,7 @@ mod tests {
     }
 
     // Word-10 GGTO: every field round-trips within its broadcast LSB and the
-    // offset model evaluates with the mod-64 week handling. Offsets
-    // cross-checked against gnss-sdr's Galileo_INAV.h (A0G {87,16} 2^-35,
+    // offset model evaluates with the mod-64 week handling (A0G {87,16} 2^-35,
     // A1G {103,12} 2^-51, t0G {115,8} x3600, WN0G {123,6}).
     #[test]
     fn ggto_word10_roundtrips_and_evaluates() {
