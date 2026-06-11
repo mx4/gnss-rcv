@@ -612,9 +612,8 @@ impl Channel {
         self.num_idl_samples = 0;
         self.num_tx_codes = 0.0;
         self.subfr_at_lock = self.stats.subframes;
-        self.nav.eph.tx_anchored = false;
+        self.nav.meas = crate::ephemeris::Measurement::default();
         self.publish(|cs| cs.tx_anchored = false);
-        self.nav.eph.tow_trk_phase = 0.0;
         self.nav.init();
     }
 
@@ -1114,7 +1113,7 @@ impl Channel {
         // The earlier num_tx_codes*code_sec + code_off form had the opposite wrap
         // sign and +code_off, yielding 1 - doppler/fc (Doppler with the wrong sign,
         // so pseudoranges moved opposite to the true range).
-        self.nav.eph.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+        self.nav.meas.trk_phase = self.num_trk_samples as f64 * self.code_sec;
         // Snapshot the fractional code phase paired with trk_phase from the same
         // period. The solver forms the transmit phase as trk_phase - code_off; the
         // absolute code_off (common cross-SV reference from acquisition) carries the
@@ -1125,7 +1124,7 @@ impl Channel {
         // this is a per-SV transmit-time bias ∝ Doppler (gpssim residual slope
         // ~-0.03 m/Hz, ~170 m; far larger for E1's BOC). Add it back.
         let dll_lag = self.trk.doppler_hz / self.fc * self.tau_dll;
-        self.nav.eph.code_off_sec = self.trk.code_off_sec + dll_lag;
+        self.nav.meas.code_off_sec = self.trk.code_off_sec + dll_lag;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();
@@ -1146,7 +1145,7 @@ impl Channel {
         self.update_all_plots(false);
         self.monitor_code_carrier_consistency();
         self.log_periodically();
-        self.nav.eph.cn0 = self.trk.cn0;
+        self.nav.meas.cn0 = self.trk.cn0;
 
         if self.trk.cn0 < CN0_THRESHOLD_LOST {
             self.idle_start();

@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
-    ephemeris::Ephemeris as RxEphemeris,
+    ephemeris::{Ephemeris as RxEphemeris, Measurement},
     models::{
         compute_sv_position_ecef, elevation_azimuth, get_sv_clock_correction, klobuchar_l1_delay_m,
         saastamoinen_tropo_m,
@@ -224,26 +224,26 @@ impl PositionSolver {
     }
 
     /// Returns true if a position was resolved this call.
-    pub fn compute_position(&mut self, ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
+    pub fn compute_position(&mut self, ts_sec: f64, snaps: &[(Measurement, RxEphemeris)]) -> bool {
         // Refresh this solver's epoch store; the gnss-rtk callback objects
         // read it if the fallback path runs.
-        *self.ephs.lock().unwrap() = ephs.to_vec();
+        *self.ephs.lock().unwrap() = snaps.iter().map(|(_, e)| *e).collect();
 
-        let mut meas: Vec<SvMeasurement> = Vec::with_capacity(ephs.len());
+        let mut meas: Vec<SvMeasurement> = Vec::with_capacity(snaps.len());
 
-        let tx_gpst: Vec<Epoch> = ephs
+        let tx_gpst: Vec<Epoch> = snaps
             .iter()
-            .map(|eph| {
+            .map(|(mm, eph)| {
                 // Transmit phase = trk_phase - code_off (see channel.rs: code_off is
                 // the replica offset, opposite in sign to the received code phase).
-                let phase = eph.trk_phase - eph.code_off_sec;
-                let elapsed = if eph.tx_anchored {
-                    phase - eph.tow_trk_phase
+                let phase = mm.trk_phase - mm.code_off_sec;
+                let elapsed = if mm.tx_anchored {
+                    phase - mm.tow_trk_phase
                 } else {
-                    (eph.trk_phase - eph.tow_trk_phase) - eph.code_off_sec
+                    (mm.trk_phase - mm.tow_trk_phase) - mm.code_off_sec
                 };
-                let tow = if eph.tx_anchored {
-                    eph.tx_tow_gpst
+                let tow = if mm.tx_anchored {
+                    mm.tx_tow_gpst
                 } else {
                     eph.tow_gpst
                 };
@@ -273,7 +273,7 @@ impl PositionSolver {
             (st.ion_adj, st.iono_alpha, st.iono_beta, grid, corr)
         };
         let gps_sod = {
-            let r = &ephs[0];
+            let r = &snaps[0].1;
             (r.tow as f64 + (now_gpst - r.tow_gpst).to_seconds()).rem_euclid(86400.0)
         };
 
@@ -286,7 +286,7 @@ impl PositionSolver {
         let params = UserParameters::new(UserProfile::Static, ClockProfile::Quartz);
 
         log::warn!("----- now_gpst={now_gpst:?}");
-        for (eph, t_tx) in ephs.iter().zip(tx_gpst.iter()) {
+        for ((mm, eph), t_tx) in snaps.iter().zip(tx_gpst.iter()) {
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
 
@@ -353,7 +353,7 @@ impl PositionSolver {
             log::warn!(
                 "{} - t_tx={t_tx:?} code_off_sec={:.7}",
                 eph.sv,
-                eph.code_off_sec
+                mm.code_off_sec
             );
             // SBAS differential corrections (DO-229 A.4.4.3), folded into the
             // pseudorange: PR_corrected = PR + PRC (fast, clock-error
@@ -402,7 +402,7 @@ impl PositionSolver {
             let s = compute_sv_position_ecef(eph, *t_tx);
             let m = SvMeasurement {
                 sv: eph.sv,
-                cn0: eph.cn0,
+                cn0: mm.cn0,
                 pr_m,
                 clk_m: clock_corr * SPEED_OF_LIGHT,
                 svp: [cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2],

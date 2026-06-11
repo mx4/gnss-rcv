@@ -1,21 +1,32 @@
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 
+/// Per-epoch tracking-measurement snapshot — everything the solver needs
+/// about *this channel's signal right now*, as opposed to the broadcast
+/// [`Ephemeris`] (which changes per ~2 h issue, not per code period). Kept
+/// separate so multi-signal channels can snapshot at their own cadence and
+/// the solve consumes `(Measurement, Ephemeris)` pairs.
 #[derive(Default, Clone, Copy)]
-pub struct Ephemeris {
-    pub sv: SV,
-    pub tow: u32,
+pub struct Measurement {
     pub cn0: f64,
+    /// Fractional code phase (s) paired with `trk_phase` (includes the DLL
+    /// group-delay compensation; see channel.rs).
     pub code_off_sec: f64,
-    pub ts_sec: f64, // receiver time for 1st subframe
     // Integer transmit-time in seconds since tracking start: num_trk_samples *
     // code_sec. Because num_trk_samples counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver
     // wall clock ts_sec. The absolute sub-ms code phase is kept in code_off_sec.
     pub trk_phase: f64,     // current integer transmit-time
     pub tow_trk_phase: f64, // integer-ms phase at tx_tow_gpst (set once)
-    pub tx_tow_gpst: Epoch, // GPS time pinned at first ephemeris lock
+    pub tx_tow_gpst: Epoch, // GPS time pinned once the transmit anchor pins
     pub tx_anchored: bool,
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct Ephemeris {
+    pub sv: SV,
+    pub tow: u32,
+    pub ts_sec: f64, // receiver time for 1st subframe
     pub tow_gpst: Epoch,
     pub toe_gpst: Epoch, // cf toe
     pub toc_gpst: Epoch,

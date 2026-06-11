@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::channel::Channel;
 use crate::code::Signal;
 use crate::device::RtlSdrDevice;
-use crate::ephemeris::Ephemeris as RxEphemeris;
+use crate::ephemeris::{Ephemeris as RxEphemeris, Measurement};
 use crate::network::RtlSdrTcp;
 use crate::osnma::OsnmaVerifier;
 use crate::recording::IQFileType;
@@ -322,23 +322,25 @@ fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
 /// biased duplicate. Distinct GPS satellites never broadcast identical
 /// orbital+clock parameters, so when two channels report the same ephemeris we
 /// keep only the highest-C/N0 (true) one and drop the cross-correlation(s).
-fn reject_cross_correlations(mut ephs: Vec<RxEphemeris>) -> Vec<RxEphemeris> {
-    ephs.sort_by(|a, b| b.cn0.total_cmp(&a.cn0));
-    let mut kept: Vec<RxEphemeris> = Vec::with_capacity(ephs.len());
-    for e in ephs {
-        if let Some(dup) = kept
+fn reject_cross_correlations(
+    mut snaps: Vec<(Measurement, RxEphemeris)>,
+) -> Vec<(Measurement, RxEphemeris)> {
+    snaps.sort_by(|a, b| b.0.cn0.total_cmp(&a.0.cn0));
+    let mut kept: Vec<(Measurement, RxEphemeris)> = Vec::with_capacity(snaps.len());
+    for (m, e) in snaps {
+        if let Some((dm, dup)) = kept
             .iter()
-            .find(|k| k.m0 == e.m0 && k.omg0 == e.omg0 && k.f0 == e.f0)
+            .find(|(_, k)| k.m0 == e.m0 && k.omg0 == e.omg0 && k.f0 == e.f0)
         {
             log::warn!(
                 "{}: dropping cross-correlation lock (duplicate ephemeris of {}, cn0 {:.1} < {:.1})",
                 e.sv,
                 dup.sv,
-                e.cn0,
-                dup.cn0,
+                m.cn0,
+                dm.cn0,
             );
         } else {
-            kept.push(e);
+            kept.push((m, e));
         }
     }
     kept
@@ -487,8 +489,8 @@ impl Receiver {
             // tx_anchored alone suffices: the anchor pins only once the
             // ephemeris completes (>= 3 clean subframes, ~30 s of continuous
             // tracking), so the tracking loops are long settled by then.
-            .filter(|&ch| ch.nav.eph.tx_anchored)
-            .map(|ch| ch.nav.eph)
+            .filter(|&ch| ch.nav.meas.tx_anchored)
+            .map(|ch| (ch.nav.meas, ch.nav.eph))
             .collect();
 
         let n_raw = ephs.len();
@@ -507,7 +509,7 @@ impl Receiver {
         self.stats.fix_attempts += 1;
         if self.solver.compute_position(ts_sec, &ephs) {
             self.stats.fix_ok += 1;
-            for eph in &ephs {
+            for (_, eph) in &ephs {
                 if let Some(ch) = self.channels.get_mut(&eph.sv) {
                     ch.stats.used_in_fix = true;
                 }

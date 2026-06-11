@@ -5,6 +5,9 @@
 //! still `receiver::tests`, with crate-internal visibility.
 
 use super::*;
+
+/// A channel snapshot pair, as the solve consumes it.
+type Snap = (Measurement, RxEphemeris);
 use crate::synth::{
     GeoFeed, SynthE1Sv, SynthSv, pick_geo_constellation, pick_geo_constellation_gal, synth_e1,
     synth_l1ca,
@@ -445,11 +448,11 @@ fn anchor_deltas(
     let mut out: Vec<(SV, f64)> = rx
         .channels
         .values()
-        .filter(|ch| ch.is_state_tracking() && ch.nav.eph.tx_anchored)
+        .filter(|ch| ch.is_state_tracking() && ch.nav.meas.tx_anchored)
         .map(|ch| {
-            let e = &ch.nav.eph;
-            let rx_tx = e.tx_tow_gpst
-                + Duration::from_seconds((e.trk_phase - e.code_off_sec) - e.tow_trk_phase);
+            let m = &ch.nav.meas;
+            let rx_tx = m.tx_tow_gpst
+                + Duration::from_seconds((m.trk_phase - m.code_off_sec) - m.tow_trk_phase);
             // The snapshot phase corresponds to the end of the channel's
             // last prompt window, at ts + code_off (sub-ms past ts).
             let t_snap = ch.ts_sec;
@@ -552,12 +555,12 @@ fn epoch_sensitivity_probe() {
         Arc::new(Mutex::new(GnssState::new())),
     );
     rx.run_loop(0);
-    let ephs: Vec<RxEphemeris> = rx
+    let ephs: Vec<Snap> = rx
         .channels
         .values()
         .filter(|ch| ch.is_state_tracking() && ch.is_ephemeris_complete())
-        .filter(|ch| ch.nav.eph.tx_anchored)
-        .map(|ch| ch.nav.eph)
+        .filter(|ch| ch.nav.meas.tx_anchored)
+        .map(|ch| (ch.nav.meas, ch.nav.eph))
         .collect();
     assert!(ephs.len() >= 5);
 
@@ -569,8 +572,8 @@ fn epoch_sensitivity_probe() {
     let mut results: Vec<(f64, f64, Option<f64>)> = Vec::new();
     for shift in [-0.16, 0.0, 0.08, 0.16, 0.24, 0.32] {
         let mut e2 = ephs.clone();
-        for e in &mut e2 {
-            e.tx_tow_gpst += Duration::from_seconds(shift);
+        for (m, _) in &mut e2 {
+            m.tx_tow_gpst += Duration::from_seconds(shift);
         }
         let (wx, _, _, _) = wls_fix(&e2, truth);
         let mut solver = PositionSolver::new(Arc::new(Mutex::new(GnssState::new())));
@@ -617,7 +620,7 @@ fn epoch_sensitivity_probe() {
 /// filter). Both signals' passes end at the same file time, so their
 /// transmit-time snapshots share one receiver timeline and can be solved
 /// jointly.
-fn limesdr_pass(sig: Signal, sats: &str, steps: usize) -> Vec<RxEphemeris> {
+fn limesdr_pass(sig: Signal, sats: &str, steps: usize) -> Vec<Snap> {
     let cfg = ReceiverConfig {
         file: PathBuf::from("resources/ION_LimeSDR_Bands-L1.2xi16"),
         iq_file_type: IQFileType::TypePairInt16,
@@ -638,13 +641,13 @@ fn limesdr_pass(sig: Signal, sats: &str, steps: usize) -> Vec<RxEphemeris> {
         .values()
         .filter(|ch| ch.is_state_tracking())
         .filter(|ch| ch.is_ephemeris_complete())
-        .filter(|ch| ch.nav.eph.tx_anchored)
-        .map(|ch| ch.nav.eph)
+        .filter(|ch| ch.nav.meas.tx_anchored)
+        .map(|ch| (ch.nav.meas, ch.nav.eph))
         .collect()
 }
 
 /// Solve a fix from `ephs` with a fresh solver; return (lat°, lon°, ECEF).
-fn solve(ephs: &[RxEphemeris]) -> (f64, f64, [f64; 3]) {
+fn solve(ephs: &[Snap]) -> (f64, f64, [f64; 3]) {
     let mut solver = PositionSolver::new(Arc::new(Mutex::new(GnssState::new())));
     assert!(
         solver.compute_position(60.0, ephs),
@@ -675,10 +678,7 @@ fn ion_site_error_m(lat: f64, lon: f64) -> f64 {
 /// are self-calibrated: solve once equal-weighted, set each
 /// constellation's sigma to its residual RMS, solve again — no hand-tuned
 /// constants. Returns (fix_ecef, c·dt m, c·ISB m, per-constellation σ m).
-fn wls_fix(
-    ephs: &[RxEphemeris],
-    x0: [f64; 3],
-) -> ([f64; 3], f64, f64, HashMap<Constellation, f64>) {
+fn wls_fix(ephs: &[Snap], x0: [f64; 3]) -> ([f64; 3], f64, f64, HashMap<Constellation, f64>) {
     use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
     use gnss_rtk::prelude::Duration;
 
@@ -687,14 +687,14 @@ fn wls_fix(
     // only, independent of the position iterate).
     let tx: Vec<_> = ephs
         .iter()
-        .map(|e| {
-            let elapsed = (e.trk_phase - e.code_off_sec) - e.tow_trk_phase;
-            e.tx_tow_gpst + Duration::from_seconds(elapsed)
+        .map(|(m, _)| {
+            let elapsed = (m.trk_phase - m.code_off_sec) - m.tow_trk_phase;
+            m.tx_tow_gpst + Duration::from_seconds(elapsed)
         })
         .collect();
     let now = *tx.iter().max().unwrap() + Duration::from_seconds(0.070);
     let (mut meas, mut svp, mut gal) = (Vec::new(), Vec::new(), Vec::new());
-    for (e, t_tx) in ephs.iter().zip(&tx) {
+    for ((_, e), t_tx) in ephs.iter().zip(&tx) {
         let pr_sec = (now - *t_tx).to_seconds();
         let clk = crate::models::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
         let s = crate::models::compute_sv_position_ecef(e, *t_tx);
@@ -718,20 +718,20 @@ fn wls_fix(
 /// compute_position's RESID diagnostic. Within one constellation the
 /// residual is ~constant (the common rx clock bias); spread = geometry
 /// error, constellation-mean difference = apparent inter-system bias.
-fn residuals(ephs: &[RxEphemeris], rx: [f64; 3]) -> Vec<(SV, f64)> {
+fn residuals(ephs: &[Snap], rx: [f64; 3]) -> Vec<(SV, f64)> {
     use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
     use gnss_rtk::prelude::Duration;
     let tx: Vec<_> = ephs
         .iter()
-        .map(|e| {
-            let elapsed = (e.trk_phase - e.code_off_sec) - e.tow_trk_phase;
-            e.tx_tow_gpst + Duration::from_seconds(elapsed)
+        .map(|(m, _)| {
+            let elapsed = (m.trk_phase - m.code_off_sec) - m.tow_trk_phase;
+            m.tx_tow_gpst + Duration::from_seconds(elapsed)
         })
         .collect();
     let now = *tx.iter().max().unwrap() + Duration::from_seconds(0.070);
     ephs.iter()
         .zip(&tx)
-        .map(|(e, t_tx)| {
+        .map(|((_, e), t_tx)| {
             let pr_sec = (now - *t_tx).to_seconds();
             let pr = pr_sec * SPEED_OF_LIGHT;
             let clk = crate::models::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
@@ -799,16 +799,16 @@ fn combined_gps_galileo_fix_from_two_passes() {
     // onto the Galileo timeline (GST week w == continuous GPS week
     // w + 1024).
     use gnss_rtk::prelude::Duration;
-    let dw = gps[0].week as i64 - (gal[0].week as i64 + 1024);
+    let dw = gps[0].1.week as i64 - (gal[0].1.week as i64 + 1024);
     if dw != 0 {
         eprintln!("rebasing GPS week by {dw} weeks (LNAV 10-bit week rollover)");
         let shift = Duration::from_seconds(dw as f64 * 604_800.0);
-        for e in &mut gps {
+        for (m, e) in &mut gps {
             e.week = (e.week as i64 - dw) as u32;
             e.tow_gpst -= shift;
             e.toe_gpst -= shift;
             e.toc_gpst -= shift;
-            e.tx_tow_gpst -= shift;
+            m.tx_tow_gpst -= shift;
         }
     }
 
@@ -921,8 +921,8 @@ fn combined_gps_galileo_fix_from_two_passes() {
     // hardware delay. Under our t_tx convention (GST epochs mapped
     // nominally), a positive GGTO makes Galileo pseudoranges short by
     // c*GGTO, so hw = ISB + c*GGTO.
-    match gal.iter().find(|e| e.ggto_valid) {
-        Some(g) => {
+    match gal.iter().find(|(_, e)| e.ggto_valid) {
+        Some((_, g)) => {
             let ggto = crate::galileo_inav::ggto_at(g, g.week, g.tow as f64).unwrap();
             let isb_ns = wisb / crate::constants::SPEED_OF_LIGHT * 1e9;
             eprintln!(
@@ -965,13 +965,18 @@ fn combined_gps_galileo_fix_from_two_passes() {
     );
 }
 
-fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
+fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> Snap {
     let mut e = RxEphemeris::new(SV::new(Constellation::GPS, prn));
     e.m0 = m0;
     e.omg0 = omg0;
     e.f0 = f0;
-    e.cn0 = cn0;
-    e
+    (
+        Measurement {
+            cn0,
+            ..Default::default()
+        },
+        e,
+    )
 }
 
 #[test]
@@ -990,15 +995,15 @@ fn cross_correlation_dropped_keeps_strongest() {
         "the cross-correlation duplicate must be dropped"
     );
     assert!(
-        kept.iter().any(|e| e.sv.prn == 15),
+        kept.iter().any(|(_, e)| e.sv.prn == 15),
         "the strong (true) SV is kept"
     );
     assert!(
-        kept.iter().any(|e| e.sv.prn == 24),
+        kept.iter().any(|(_, e)| e.sv.prn == 24),
         "the distinct SV is kept"
     );
     assert!(
-        !kept.iter().any(|e| e.sv.prn == 16),
+        !kept.iter().any(|(_, e)| e.sv.prn == 16),
         "the weaker cross-correlation lock is dropped"
     );
 }

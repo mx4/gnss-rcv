@@ -10,7 +10,7 @@
 //! solver consumes); each signal keeps its own decoder state next to it.
 
 use crate::channel::Channel;
-use crate::ephemeris::Ephemeris;
+use crate::ephemeris::{Ephemeris, Measurement};
 use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
 use crate::osnma::OsnmaPage;
@@ -23,6 +23,9 @@ use gnss_rtk::prelude::{Duration, Epoch, TimeScale, Vector3};
 /// solver) plus the per-signal decoder state.
 pub struct Navigation {
     pub eph: Ephemeris,
+    /// The per-epoch tracking measurement, snapshotted by the channel each
+    /// code period; paired with `eph` for the solve.
+    pub meas: Measurement,
     pub(crate) lnav: LnavState,     // GPS / QZSS L1 C/A
     pub(crate) inav: InavDecoder,   // Galileo E1-B
     pub(crate) sbas: SbasL1Channel, // SBAS L1
@@ -43,6 +46,7 @@ impl Navigation {
     pub fn new(sv: SV) -> Self {
         Self {
             eph: Ephemeris::new(sv),
+            meas: Measurement::default(),
             lnav: LnavState::new(sv),
             inav: InavDecoder::new(),
             sbas: SbasL1Channel::new(),
@@ -258,7 +262,7 @@ impl Channel {
         // from it at any later moment of the same continuous track.
         self.nav.tow_pair = Some((
             self.nav.eph.tow_gpst + Duration::from_seconds(decode_latency_sec),
-            self.nav.eph.trk_phase,
+            self.nav.meas.trk_phase,
         ));
         self.try_anchor_tx();
         self.update_gpst_time(self.nav.eph.tow_gpst);
@@ -279,23 +283,23 @@ impl Channel {
             let cs = st.channels.get_mut(&self.sv).unwrap();
             cs.has_eph = true;
         }
-        if self.nav.eph.tx_anchored {
+        if self.nav.meas.tx_anchored {
             return;
         }
         let Some((tow_gpst, phase)) = self.nav.tow_pair else {
             return;
         };
-        self.nav.eph.tow_trk_phase = phase;
-        self.nav.eph.tx_tow_gpst = tow_gpst;
-        self.nav.eph.tx_anchored = true;
+        self.nav.meas.tow_trk_phase = phase;
+        self.nav.meas.tx_tow_gpst = tow_gpst;
+        self.nav.meas.tx_anchored = true;
         if let Some(cs) = self.pub_state.lock().unwrap().channels.get_mut(&self.sv) {
             cs.tx_anchored = true;
         }
         log::warn!(
             "{}: tx anchored tow={:?} phase={:.6}",
             self.sv,
-            self.nav.eph.tx_tow_gpst,
-            self.nav.eph.tow_trk_phase
+            self.nav.meas.tx_tow_gpst,
+            self.nav.meas.tow_trk_phase
         );
     }
 
