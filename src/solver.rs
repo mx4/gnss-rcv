@@ -518,6 +518,24 @@ type SolverInstance = Solver<
     ReceiverTime,
 >;
 
+/// One satellite's fully corrected measurement for a solve epoch — the
+/// signal-agnostic solver input (a multi-signal session feeds one flat list
+/// regardless of which code period produced each entry).
+pub(crate) struct SvMeasurement {
+    pub sv: SV,
+    pub cn0: f64,
+    /// Corrected pseudorange (m): raw − iono − tropo + SBAS corrections.
+    pub pr_m: f64,
+    /// SV clock correction × c (m).
+    pub clk_m: f64,
+    /// SV ECEF position at transmit time, rotated into the reception-instant
+    /// frame (Sagnac).
+    pub svp: [f64; 3],
+    pub galileo: bool,
+    /// Broadcast residual-error variance prior (SBAS UDRE + slant GIVE), m².
+    pub var_m2: f64,
+}
+
 pub struct PositionSolver {
     solver: SolverInstance,
     /// This solver's epoch store, shared with its callback objects (see
@@ -612,15 +630,11 @@ impl PositionSolver {
 
     /// Returns true if a position was resolved this call.
     pub fn compute_position(&mut self, ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
-        // Refresh this solver's epoch store; the callback objects read it
-        // during solver.ppp() below.
+        // Refresh this solver's epoch store; the gnss-rtk callback objects
+        // read it if the fallback path runs.
         *self.ephs.lock().unwrap() = ephs.to_vec();
 
-        let mut pool = vec![];
-        // Inputs for the live WLS solver, built alongside the gnss-rtk pool
-        // from the same corrected pseudoranges.
-        let (mut wls_meas, mut wls_svp, mut wls_gal, mut wls_var) =
-            (vec![], vec![], vec![], vec![]);
+        let mut meas: Vec<SvMeasurement> = Vec::with_capacity(ephs.len());
 
         let tx_gpst: Vec<Epoch> = ephs
             .iter()
@@ -786,28 +800,26 @@ impl PositionSolver {
                 continue;
             }
 
-            // The same corrected measurement, prepared for the WLS solver:
-            // meas = pr + c·sv_clock, SV at transmit time rotated into the
+            // The finished measurement: SV at transmit time rotated into the
             // reception ECEF frame (Earth turns ωe·τ while the signal travels).
-            {
-                let we = EARTH_ROTATION_RATE * pseudo_range_sec;
-                let (cw, sw) = (we.cos(), we.sin());
-                let s = compute_sv_position_ecef(eph, *t_tx);
-                wls_meas.push(pr_m + clock_corr * SPEED_OF_LIGHT);
-                wls_svp.push([cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2]);
-                wls_gal.push(eph.sv.constellation == Constellation::Galileo);
-                wls_var.push(sv_var_m2);
-            }
+            let we = EARTH_ROTATION_RATE * pseudo_range_sec;
+            let (cw, sw) = (we.cos(), we.sin());
+            let s = compute_sv_position_ecef(eph, *t_tx);
+            let m = SvMeasurement {
+                sv: eph.sv,
+                cn0: eph.cn0,
+                pr_m,
+                clk_m: clock_corr * SPEED_OF_LIGHT,
+                svp: [cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2],
+                galileo: eph.sv.constellation == Constellation::Galileo,
+                var_m2: sv_var_m2,
+            };
 
             if let Some(truth) = truth_ecef {
-                let we = EARTH_ROTATION_RATE * pseudo_range_sec;
-                let (cw, sw) = (we.cos(), we.sin());
-                let s = compute_sv_position_ecef(eph, *t_tx);
-                let (sx, sy, sz) = (cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2);
-                let geom =
-                    ((sx - truth[0]).powi(2) + (sy - truth[1]).powi(2) + (sz - truth[2]).powi(2))
-                        .sqrt();
-                let clk_m = clock_corr * SPEED_OF_LIGHT;
+                let geom = ((m.svp[0] - truth[0]).powi(2)
+                    + (m.svp[1] - truth[1]).powi(2)
+                    + (m.svp[2] - truth[2]).powi(2))
+                .sqrt();
                 // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.
                 // residual = pr_m + clk_m - geom = c*dT_rx (common-mode rx clock).
                 log::warn!(
@@ -815,15 +827,11 @@ impl PositionSolver {
                     eph.sv,
                     pr_m / 1000.0,
                     geom / 1000.0,
-                    clk_m / 1000.0,
-                    (pr_m + clk_m - geom) / 1000.0
+                    m.clk_m / 1000.0,
+                    (pr_m + m.clk_m - geom) / 1000.0
                 );
             }
-            pool.push(Candidate::new(
-                eph.sv,
-                now_gpst,
-                vec![Observation::pseudo_range(Carrier::L1, pr_m, Some(eph.cn0))],
-            ));
+            meas.push(m);
         }
 
         // The weighted+ISB WLS is the live solver (GNSS_SOLVER=rtk selects
@@ -831,7 +839,11 @@ impl PositionSolver {
         // Rationale + revert condition in `wls_solve`'s doc.
         if !std::env::var("GNSS_SOLVER").is_ok_and(|v| v == "rtk") {
             let x0 = self.last_fix_ecef.map_or([0.0; 3], |p| [p[0], p[1], p[2]]);
-            if let Some(sol) = wls_solve(&wls_meas, &wls_svp, &wls_gal, &wls_var, x0) {
+            let m: Vec<f64> = meas.iter().map(|m| m.pr_m + m.clk_m).collect();
+            let svp: Vec<[f64; 3]> = meas.iter().map(|m| m.svp).collect();
+            let gal: Vec<bool> = meas.iter().map(|m| m.galileo).collect();
+            let var: Vec<f64> = meas.iter().map(|m| m.var_m2).collect();
+            if let Some(sol) = wls_solve(&m, &svp, &gal, &var, x0) {
                 let pos = Vector3::new(sol.pos[0], sol.pos[1], sol.pos[2]);
                 self.last_fix_ecef = Some(pos);
                 let (lat_rad, lon_rad, height_m) =
@@ -844,7 +856,7 @@ impl PositionSolver {
                     st.height = height_m;
                     st.hdop = sol.hdop;
                     st.vdop = sol.vdop;
-                    st.fix_sv_count = wls_meas.len();
+                    st.fix_sv_count = meas.len();
                 }
                 let mut sig: Vec<String> = sol
                     .sigma
@@ -870,7 +882,7 @@ impl PositionSolver {
                         "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
                         sol.hdop,
                         sol.vdop,
-                        wls_meas.len(),
+                        meas.len(),
                         sol.cdt_m / SPEED_OF_LIGHT * 1e3
                     )
                     .green()
@@ -880,6 +892,18 @@ impl PositionSolver {
             log::warn!("WLS solve failed (underdetermined/singular); trying gnss-rtk");
         }
 
+        // gnss-rtk fallback/cross-check: its pool is built only here, from
+        // the same finished measurements.
+        let pool: Vec<Candidate> = meas
+            .iter()
+            .map(|m| {
+                Candidate::new(
+                    m.sv,
+                    now_gpst,
+                    vec![Observation::pseudo_range(Carrier::L1, m.pr_m, Some(m.cn0))],
+                )
+            })
+            .collect();
         let res = self.solver.ppp(now_gpst, params, &pool);
 
         match res {
