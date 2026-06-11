@@ -18,6 +18,9 @@ use crate::receiver::IQReader;
 pub enum IQFileType {
     TypePairFloat32,
     TypePairInt16,
+    // interleaved signed int16 I/Q, *big-endian* (most SDRs are little-endian;
+    // some instruments aren't, e.g. the Tampere TUNI Galileo E1 capture).
+    TypePairInt16Be,
     // interleaved signed int8 I/Q (complex), e.g. HackRF / many SDRs.
     TypePairInt8,
     TypeRtlSdrFile,
@@ -36,6 +39,7 @@ impl FromStr for IQFileType {
         match input {
             "2xf32" => Ok(IQFileType::TypePairFloat32),
             "2xi16" => Ok(IQFileType::TypePairInt16),
+            "2xi16-be" => Ok(IQFileType::TypePairInt16Be),
             "2xi8" => Ok(IQFileType::TypePairInt8),
             "rtlsdr-file" => Ok(IQFileType::TypeRtlSdrFile),
             "i8" => Ok(IQFileType::TypeOneInt8),
@@ -51,6 +55,7 @@ impl fmt::Display for IQFileType {
         match *self {
             IQFileType::TypePairFloat32 => write!(f, "2xf32"),
             IQFileType::TypePairInt16 => write!(f, "2xi16"),
+            IQFileType::TypePairInt16Be => write!(f, "2xi16-be"),
             IQFileType::TypePairInt8 => write!(f, "2xi8"),
             IQFileType::TypeRtlSdrFile => write!(f, "rtlsdr-file"),
             IQFileType::TypeOneInt8 => write!(f, "i8"),
@@ -148,6 +153,16 @@ impl IQReader for IQRecording {
                     });
                 }
             }
+            IQFileType::TypePairInt16Be => {
+                for off in (0..bytes.len()).step_by(sample_size) {
+                    let i = i16::from_be_bytes([bytes[off], bytes[off + 1]]);
+                    let q = i16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
+                    iq_vec.push(Complex64 {
+                        re: i as f64 / i16::MAX as f64,
+                        im: q as f64 / i16::MAX as f64,
+                    });
+                }
+            }
             IQFileType::TypePairFloat32 => {
                 for off in (0..bytes.len()).step_by(sample_size) {
                     let i = f32::from_le_bytes([
@@ -212,7 +227,7 @@ impl IQRecording {
             IQFileType::TypeRtlSdrFile => 2,
             IQFileType::TypeOneInt8 => 1,
             IQFileType::TypePairInt8 => 2,
-            IQFileType::TypePairInt16 => 2 * 2,
+            IQFileType::TypePairInt16 | IQFileType::TypePairInt16Be => 2 * 2,
             IQFileType::TypePairFloat32 => 2 * 4,
             // Sub-byte; not expressible here -- handled on their own read paths.
             IQFileType::TypeOneBit => unreachable!("1-bit uses get_iq_data_1bit"),
