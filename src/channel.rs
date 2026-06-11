@@ -174,7 +174,13 @@ impl History {
 #[derive(Default)]
 pub struct Acquisition {
     prn_code_fft: Vec<Complex32>,
-    sum_p: Vec<Vec<f64>>,
+    // Integration grid for the *current* attempt only: one row per searched
+    // Doppler bin (row k = absolute bin `bin_range.0 + k`), freed on lock and
+    // on idle. Held permanently and full-width it was 30 MB/channel at
+    // 50 Msps — 1.5 GB across a default channel set, mostly for channels that
+    // were long since tracking. f32: each cell accumulates only ~10 values
+    // (T_ACQ / code_sec), so there is no long-sum precision concern.
+    sum_p: Vec<Vec<f32>>,
     // Pre-computed carrier replica for each Doppler bin. The bins are fixed and
     // PRN-independent (they depend only on fs/fi/code_sp), so the whole set is
     // built once by the receiver ([`Channel::build_carriers`]) and *shared* across
@@ -460,7 +466,7 @@ impl Channel {
             },
             acq: Acquisition {
                 prn_code_fft,
-                sum_p: vec![vec![0.0; code_sp]; DOPPLER_SPREAD_BINS],
+                sum_p: Vec::new(),
                 carriers,
                 bin_range: (0, DOPPLER_SPREAD_BINS),
                 buf: Vec::new(),
@@ -469,6 +475,9 @@ impl Channel {
     }
 
     fn idle_start(&mut self) {
+        // Idle (and tracking) channels hold no search state.
+        self.acq.sum_p = Vec::new();
+        self.acq.buf = Vec::new();
         if self.state == State::Tracking {
             self.stats.lock_losses += 1;
             log::warn!(
@@ -563,11 +572,15 @@ impl Channel {
             };
             self.acq.bin_range = doppler_bin_range(lo_offset, spread);
         }
-        // Zero (only) the rows this attempt integrates — replacing the old
-        // full reallocation, which at 50 Msps was a 60 MB alloc per attempt.
-        let (lo, hi) = self.acq.bin_range;
-        for row in &mut self.acq.sum_p[lo..hi] {
+        // Size the grid to this attempt's searched range, reusing rows from
+        // the previous attempt where possible.
+        let rows = self.acq.bin_range.1 - self.acq.bin_range.0;
+        self.acq.sum_p.truncate(rows);
+        for row in &mut self.acq.sum_p {
             row.fill(0.0);
+        }
+        while self.acq.sum_p.len() < rows {
+            self.acq.sum_p.push(vec![0.0; self.code_sp]);
         }
     }
 
@@ -577,6 +590,10 @@ impl Channel {
     }
 
     fn tracking_init(&mut self) {
+        // A locked channel holds no search state (sum_p was 30 MB/channel
+        // full-width at 50 Msps).
+        self.acq.sum_p = Vec::new();
+        self.acq.buf = Vec::new();
         self.trk.doppler_hz = 0.0;
         self.trk.cn0 = 0.0;
         self.trk.adr = 0.0;
@@ -647,6 +664,12 @@ impl Channel {
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex32]) {
+        // Channels are *born* in Acquisition without passing through
+        // acquisition_start (which sizes the grid for the attempt) — set up
+        // here on the first pass.
+        if self.acq.sum_p.len() != self.acq.bin_range.1 - self.acq.bin_range.0 {
+            self.acquisition_init();
+        }
         // The feed hands us two code periods; correlate over the most recent one.
         let iq_vec_slice = &iq_vec[self.code_sp..];
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
@@ -663,8 +686,8 @@ impl Channel {
                 *s *= *c;
             }
             calc_correlation_inplace(&mut self.fft_planner, &mut acq.buf, &acq.prn_code_fft);
-            for (p, v) in acq.sum_p[i].iter_mut().zip(acq.buf.iter()) {
-                *p += v.norm_sqr() as f64;
+            for (p, v) in acq.sum_p[i - bin_lo].iter_mut().zip(acq.buf.iter()) {
+                *p += v.norm_sqr();
             }
         }
 
@@ -684,13 +707,14 @@ impl Channel {
             // the CTTC capture) that steers acquisition to an interference bin
             // near 0 Hz and misses the real auto-correlation peak.
             for i in bin_lo..bin_hi {
-                let (j_peak, v_peak) = get_max_with_idx(&self.acq.sum_p[i]);
+                let row = &self.acq.sum_p[i - bin_lo];
+                let (j_peak, v_peak) = get_max_with_idx(row);
                 if v_peak > p_peak {
                     idx = i;
                     p_peak = v_peak;
                     code_offset_idx = j_peak;
                 }
-                p_total += self.acq.sum_p[i].iter().sum::<f64>();
+                p_total += row.iter().map(|&v| v as f64).sum::<f64>();
             }
 
             // Report the carrier frequency of the winning bin (the replicas are
@@ -704,8 +728,8 @@ impl Channel {
             // power per cell; (peak − mean)/mean is the SNR in the coherent
             // bandwidth 1/T, and dividing by T = code_sec converts to the
             // 1 Hz reference: C/N0 = 10·log10(SNR / T) dB-Hz.
-            let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / (bin_hi - bin_lo) as f64;
-            let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();
+            let p_avg = p_total / self.code_sp as f64 / (bin_hi - bin_lo) as f64;
+            let cn0 = 10.0 * ((p_peak as f64 - p_avg) / p_avg / self.code_sec).log10();
             self.acq_cn0 = cn0;
             self.stats.acq_attempts += 1;
 

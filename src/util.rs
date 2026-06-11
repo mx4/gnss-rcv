@@ -15,8 +15,8 @@ pub fn norm(v: &[Complex32]) -> f64 {
     norm_square(v).sqrt()
 }
 
-pub fn get_max_with_idx(vec: &[f64]) -> (usize, f64) {
-    let mut max = 0.0f64;
+pub fn get_max_with_idx(vec: &[f32]) -> (usize, f32) {
+    let mut max = 0.0f32;
     let mut idx = 0;
     for (i, v) in vec.iter().enumerate() {
         if *v > max {
