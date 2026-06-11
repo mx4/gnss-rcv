@@ -31,6 +31,17 @@ pub struct Ephemeris {
     pub wn0g: u32,
     pub ggto_valid: bool,
 
+    /// Galileo NeQuick-G ionosphere inputs, from I/NAV word type 5: the
+    /// effective-ionisation coefficients Az(µ) = ai0 + ai1·µ + ai2·µ²
+    /// (µ = MODIP, units sfu) plus the 5 regional storm flags (bit 0 =
+    /// Region 1). Decoded and surfaced; the NeQuick-G model itself is not
+    /// implemented (mixed runs use the GPS Klobuchar for all SVs).
+    pub ai0: f64,
+    pub ai1: f64,
+    pub ai2: f64,
+    pub iono_storm: u8,
+    pub gal_iono_valid: bool,
+
     pub iode: u32,    // Issue of Data, Ephemeris
     pub iodc: u32,    // Issue of Data, Clock
     pub sva: u32,     // SV accuracy (URA index)

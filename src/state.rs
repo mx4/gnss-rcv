@@ -57,6 +57,10 @@ pub struct GnssState {
     pub longitude: f64,
     /// Fix altitude above the WGS-84 ellipsoid, in metres.
     pub height: f64,
+    /// Galileo NeQuick-G effective-ionisation coefficients [ai0, ai1, ai2]
+    /// (I/NAV word 5), once decoded. Inputs for a future NeQuick-G model;
+    /// mixed runs meanwhile apply the GPS Klobuchar to all SVs.
+    pub gal_iono_az: Option<[f64; 3]>,
     /// Galileo OSNMA DSM-KROOT assembly progress as `(blocks_received, total)`,
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
@@ -91,6 +95,7 @@ impl GnssState {
             latitude: 0.0,
             longitude: 0.0,
             height: 0.0,
+            gal_iono_az: None,
             osnma_kroot: None,
             hdop: 0.0,
             vdop: 0.0,

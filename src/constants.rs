@@ -8,8 +8,11 @@ const fn p2(n: u32) -> f64 {
     1.0 / (1u64 << n) as f64
 }
 
+pub const P2_2: f64 = p2(2); // Galileo iono ai0
 pub const P2_5: f64 = p2(5);
+pub const P2_8: f64 = p2(8); // Galileo iono ai1
 pub const P2_11: f64 = p2(11);
+pub const P2_15: f64 = p2(15); // Galileo iono ai2
 pub const P2_19: f64 = p2(19);
 pub const P2_20: f64 = p2(20);
 pub const P2_21: f64 = p2(21);

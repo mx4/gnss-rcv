@@ -9,7 +9,8 @@
 //! assembly and ephemeris extraction ([`InavDecoder`] / [`decode_ephemeris_word`]).
 
 use crate::constants::{
-    P2_5, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_35, P2_43, P2_46, P2_51, P2_59, SC2RAD,
+    P2_2, P2_5, P2_8, P2_15, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_35, P2_43, P2_46, P2_51,
+    P2_59, SC2RAD,
 };
 use crate::ephemeris::Ephemeris;
 use crate::fec::{G1, G2, conv_encode, crc24q, parity};
@@ -308,6 +309,13 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
             eph.f2 = s(121, 6) * P2_59;
         }
         5 => {
+            // NeQuick-G effective-ionisation coefficients + regional storm
+            // flags (offsets cross-checked vs gnss-sdr Galileo_INAV.h).
+            eph.ai0 = u(7, 11) as f64 * P2_2;
+            eph.ai1 = s(18, 11) * P2_8;
+            eph.ai2 = s(29, 14) * P2_15;
+            eph.iono_storm = (u(43, 5) as u8).reverse_bits() >> 3; // bit 0 = Region 1
+            eph.gal_iono_valid = true;
             eph.tgd = s(48, 10) * P2_32; // BGD(E1,E5a): the E1 group delay
             eph.week = u(74, 12); // GST week number
             eph.tow = u(86, 20); // GST time of week [s]
@@ -390,6 +398,15 @@ pub fn encode_ephemeris_word(eph: &Ephemeris, word_type: u8) -> InavWord {
             set_word_bits(&mut bits, 121, 6, r(eph.f2 / P2_59));
         }
         5 => {
+            set_word_bits(&mut bits, 7, 11, r(eph.ai0 / P2_2));
+            set_word_bits(&mut bits, 18, 11, r(eph.ai1 / P2_8));
+            set_word_bits(&mut bits, 29, 14, r(eph.ai2 / P2_15));
+            set_word_bits(
+                &mut bits,
+                43,
+                5,
+                ((eph.iono_storm << 3).reverse_bits()) as i64,
+            );
             set_word_bits(&mut bits, 48, 10, r(eph.tgd / P2_32));
             set_word_bits(&mut bits, 74, 12, eph.week as i64);
             set_word_bits(&mut bits, 86, 20, eph.tow as i64);
@@ -702,6 +719,10 @@ mod tests {
         e.f1 = 1.0e-12;
         e.f2 = 0.0;
         e.tgd = 5.0e-9;
+        e.ai0 = 80.25; // effective ionisation, sfu (solar-medium activity)
+        e.ai1 = -0.34;
+        e.ai2 = 0.005;
+        e.iono_storm = 0b00101; // Regions 1 and 3 disturbed
         e
     }
 
@@ -735,6 +756,12 @@ mod tests {
         assert!((got.omg_dot - eph.omg_dot).abs() < 5e-13); // > 1 LSB (P2_43·SC2RAD)
         assert!((got.crc - eph.crc).abs() < 0.1);
         assert!((got.f0 - eph.f0).abs() < 1e-9);
+        // Word-5 NeQuick-G iono inputs round-trip within their LSBs.
+        assert!(got.gal_iono_valid);
+        assert!((got.ai0 - eph.ai0).abs() <= crate::constants::P2_2);
+        assert!((got.ai1 - eph.ai1).abs() <= crate::constants::P2_8);
+        assert!((got.ai2 - eph.ai2).abs() <= crate::constants::P2_15);
+        assert_eq!(got.iono_storm, eph.iono_storm);
     }
 
     // Word-10 GGTO: every field round-trips within its broadcast LSB and the

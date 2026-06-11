@@ -96,7 +96,20 @@ impl Channel {
         }
         let was_valid = self.nav.eph.is_valid();
         let had_ggto = self.nav.eph.ggto_valid;
+        let had_iono = self.nav.eph.gal_iono_valid;
         decode_ephemeris_word(&mut self.nav.eph, &word);
+        if !had_iono && self.nav.eph.gal_iono_valid {
+            log::warn!(
+                "{}: NeQuick-G iono (word 5): ai0={:.2} sfu ai1={:+.3} ai2={:+.4} storm=0b{:05b}",
+                self.sv,
+                self.nav.eph.ai0,
+                self.nav.eph.ai1,
+                self.nav.eph.ai2,
+                self.nav.eph.iono_storm
+            );
+            self.pub_state.lock().unwrap().gal_iono_az =
+                Some([self.nav.eph.ai0, self.nav.eph.ai1, self.nav.eph.ai2]);
+        }
         if !had_ggto && self.nav.eph.ggto_valid {
             log::warn!(
                 "{}: GGTO (GST-GPST) decoded: A0G={:+.2} ns A1G={:+.2e} s/s t0G={} WN0G={}",

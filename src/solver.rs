@@ -489,6 +489,12 @@ impl PositionSolver {
                 }
                 let (lat, lon, h_m) =
                     ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
+                // Klobuchar applies to every SV regardless of constellation
+                // (both are L1; RTKLIB does the same for Galileo). Coefficients
+                // come from GPS subframe 4 page 18, so mixed runs cover Galileo
+                // too; Galileo-only runs have no model yet (the broadcast
+                // NeQuick-G inputs are decoded — eph.ai0/1/2 — awaiting the
+                // NeQuick-G implementation, a large port).
                 let iono = if iono_valid && elev > 0.0 {
                     klobuchar_l1_delay_m(&iono_alpha, &iono_beta, lat, lon, elev, azim, gps_sod)
                 } else {
