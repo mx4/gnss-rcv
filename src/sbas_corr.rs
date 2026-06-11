@@ -276,24 +276,26 @@ impl SbasCorrections {
     }
 }
 
+/// Synthetic MT1/MT2 builders, shared with the receiver-level end-to-end
+/// test (which broadcasts known SIS errors and corrects them with these).
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_msgs {
+    use crate::sbas_l1::SbasMessage;
 
-    fn put(m: &mut [u8], pos: usize, len: usize, val: u32) {
+    pub(crate) fn put(m: &mut [u8], pos: usize, len: usize, val: u32) {
         for i in 0..len {
             m[pos + i] = ((val >> (len - 1 - i)) & 1) as u8;
         }
     }
 
-    fn puts(m: &mut [u8], pos: usize, len: usize, val: i32) {
+    pub(crate) fn puts(m: &mut [u8], pos: usize, len: usize, val: i32) {
         put(m, pos, len, (val as u32) & ((1 << len) - 1));
     }
 
-    const IODP: u32 = 2;
+    pub(crate) const IODP: u32 = 2;
 
     /// MT1 with the given mask numbers set.
-    fn mt1(mask_numbers: &[u16]) -> SbasMessage {
+    pub(crate) fn mt1(mask_numbers: &[u16]) -> SbasMessage {
         let mut m = [0u8; 250];
         put(&mut m, 8, 6, 1);
         for &n in mask_numbers {
@@ -304,7 +306,7 @@ mod tests {
     }
 
     /// MT2-5 with PRCs (m) for the message's first slots.
-    fn mt_fast(mtype: u8, prcs_m: &[f64]) -> SbasMessage {
+    pub(crate) fn mt_fast(mtype: u8, prcs_m: &[f64]) -> SbasMessage {
         let mut m = [0u8; 250];
         put(&mut m, 8, 6, mtype as u32);
         put(&mut m, 16, 2, IODP);
@@ -319,6 +321,12 @@ mod tests {
         }
         SbasMessage { mtype, bits: m }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_msgs::{IODP, mt_fast, mt1, put, puts};
+    use super::*;
 
     /// MT25 first half, velocity code 0, one correction (second slot empty).
     fn mt25_v0(mask_no: u16, iode: u8, dpos: [f64; 3], daf0: f64) -> SbasMessage {

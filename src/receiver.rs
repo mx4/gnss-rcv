@@ -1009,6 +1009,97 @@ mod tests {
         assert!(err < 15.0, "fix error {err:.1} m vs truth");
     }
 
+    // The SBAS corrections regression, on the only judge with exact truth:
+    // the synthetic scene broadcasts per-SV clock errors the signal itself
+    // does not have (GeoFeed::new_diverged — the real signal-in-space error
+    // situation SBAS measures), which corrupts the fix; feeding MT1+MT2 with
+    // PRC = −c·ε through the production path (GnssState → solver pr += PRC)
+    // must recover clean-scene accuracy. Locks the application sign: flipping
+    // it doubles the damage instead.
+    #[test]
+    #[ignore] // ~10 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn sbas_fast_corrections_recover_broadcast_clock_errors() {
+        use crate::constants::SPEED_OF_LIGHT;
+        use crate::sbas_corr::test_msgs;
+
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
+        let ephs = pick_geo_constellation(truth, 2348, 36_000, 6);
+        assert!(ephs.len() >= 5);
+
+        // Broadcast clock errors ±~10 m, differential across the SVs (a
+        // common part would just fold into the receiver clock).
+        let eps_ns: [f64; 6] = [30.0, -42.0, 18.0, -24.0, 36.0, -12.0];
+        let mut bcast = ephs.clone();
+        for (b, eps) in bcast.iter_mut().zip(eps_ns) {
+            b.f0 += eps * 1e-9;
+        }
+
+        let run = |with_corrections: bool| -> f64 {
+            let feed = GeoFeed::new_diverged(&ephs, &bcast, truth, fs, fi, 30_000, 45.0, None);
+            let state = Arc::new(Mutex::new(GnssState::new()));
+            if with_corrections {
+                // MT1 mask slots are in ascending PRN order; PRC = −c·ε.
+                let mut by_prn: Vec<(u16, f64)> = ephs
+                    .iter()
+                    .zip(eps_ns)
+                    .map(|(e, eps)| (e.sv.prn as u16, -eps * 1e-9 * SPEED_OF_LIGHT))
+                    .collect();
+                by_prn.sort_unstable_by_key(|(prn, _)| *prn);
+                let mask: Vec<u16> = by_prn.iter().map(|(p, _)| *p).collect();
+                let prcs: Vec<f64> = by_prn.iter().map(|(_, c)| *c).collect();
+                let mut st = state.lock().unwrap();
+                st.sbas_corr.feed(&test_msgs::mt1(&mask), 0.0);
+                // Receipt time mid-scene: fresh (±30 s) for the whole run.
+                st.sbas_corr.feed(&test_msgs::mt_fast(2, &prcs), 15.0);
+            }
+            let sats = ephs
+                .iter()
+                .map(|e| e.sv.prn.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let cfg = ReceiverConfig {
+                sats,
+                fs,
+                fi,
+                exit_on_fix: true,
+                ..Default::default()
+            };
+            let mut rx = Receiver::with_feed(
+                Box::new(feed),
+                &cfg,
+                Arc::new(AtomicBool::new(false)),
+                state.clone(),
+            );
+            rx.run_loop(0);
+
+            let st = state.lock().unwrap();
+            assert!(st.longitude != 0.0, "no fix from the diverged scene");
+            let (x, y, z) = map_3d::geodetic2ecef(
+                st.latitude.to_radians(),
+                st.longitude.to_radians(),
+                st.height,
+                map_3d::Ellipsoid::WGS84,
+            );
+            ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt()
+        };
+
+        let uncorrected = run(false);
+        let corrected = run(true);
+        eprintln!(
+            "broadcast clock errors ±10 m: fix error {uncorrected:.2} m uncorrected, \
+             {corrected:.2} m with SBAS fast corrections"
+        );
+        assert!(
+            uncorrected > 6.0,
+            "injected SIS errors should corrupt the fix (got {uncorrected:.2} m)"
+        );
+        assert!(
+            corrected < 3.5,
+            "SBAS corrections should recover clean accuracy (got {corrected:.2} m)"
+        );
+    }
+
     // The Galileo twin of the hermetic positioning regression: a
     // geometry-consistent E1-B scene (BOC(1,1) codes, full I/NAV pages with
     // ICD-convention word-5 TOWs) must drive the real pipeline — including the

@@ -314,7 +314,27 @@ impl GeoFeed {
         cn0_dbhz: f64,
         seed: Option<u64>,
     ) -> Self {
+        Self::new_diverged(ephs, ephs, rx_ecef, fs, fi, num_msec, cn0_dbhz, seed)
+    }
+
+    /// [`new`](Self::new), but the LNAV bits broadcast `bcast` while the
+    /// signal timing flies `ephs` — the real-world signal-in-space error
+    /// situation (the broadcast ephemeris/clock is only a fit to the truth),
+    /// which is exactly what SBAS measures and corrects. `bcast[i]` must be
+    /// `ephs[i]`'s satellite.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_diverged(
+        ephs: &[Ephemeris],
+        bcast: &[Ephemeris],
+        rx_ecef: [f64; 3],
+        fs: f64,
+        fi: f64,
+        num_msec: usize,
+        cn0_dbhz: f64,
+        seed: Option<u64>,
+    ) -> Self {
         assert!(!ephs.is_empty());
+        assert!(ephs.len() == bcast.len());
         let week = ephs[0].week;
         assert!(
             ephs.iter().all(|e| e.week == week),
@@ -332,18 +352,22 @@ impl GeoFeed {
         };
         let svs = ephs
             .iter()
-            .map(|e| {
+            .zip(bcast.iter())
+            .map(|(e, b)| {
+                assert!(e.sv == b.sv, "flown/broadcast SV mismatch");
                 let mut q = quantize_via_lnav(e);
                 let wsec = q.week as f64 * SECS_PER_WEEK;
                 q.toe_gpst = Epoch::from_gpst_seconds(wsec + q.toe as f64);
                 q.toc_gpst = q.toe_gpst;
-                // The bit stream: subframes 1,2,3 cycling, subframe j spanning
-                // GPST [tow0 + 6j, tow0 + 6j + 6), HOW = next subframe start / 6.
+                // The bit stream — encoding the *broadcast* ephemeris:
+                // subframes 1,2,3 cycling, subframe j spanning GPST
+                // [tow0 + 6j, tow0 + 6j + 6), HOW = next subframe start / 6.
+                let qb = quantize_via_lnav(b);
                 let mut bits = Vec::with_capacity(n_subframes * 300);
                 for j in 0..n_subframes {
                     let id = (j % 3) as u8 + 1;
                     let how = (tow0 as u32) / 6 + j as u32 + 1;
-                    let src = encode_lnav_subframe_source(&q, id, how);
+                    let src = encode_lnav_subframe_source(&qb, id, how);
                     bits.extend(
                         encode_subframe(&src)
                             .iter()
