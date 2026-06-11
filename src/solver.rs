@@ -565,14 +565,25 @@ impl PositionSolver {
                 let lon = (pvt.lat_long_alt_deg_deg_m.1 + 180.0).rem_euclid(360.0) - 180.0;
                 let height_m = pvt.lat_long_alt_deg_deg_m.2;
 
-                self.pub_state.lock().unwrap().latitude = lat;
-                self.pub_state.lock().unwrap().longitude = lon;
-                self.pub_state.lock().unwrap().height = height_m;
+                {
+                    let mut st = self.pub_state.lock().unwrap();
+                    st.latitude = lat;
+                    st.longitude = lon;
+                    st.height = height_m;
+                    // Fix precision: dilution-of-precision geometry factors and
+                    // the count of satellites that contributed to this solve.
+                    st.hdop = pvt.hdop;
+                    st.vdop = pvt.vdop;
+                    st.fix_sv_count = pvt.sv.len();
+                }
 
                 log::warn!(
                     "{}",
                     format!(
-                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  https://maps.google.com/?ll={lat},{lon}"
+                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv  https://maps.google.com/?ll={lat},{lon}",
+                        pvt.hdop,
+                        pvt.vdop,
+                        pvt.sv.len()
                     )
                     .green()
                 );

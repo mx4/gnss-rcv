@@ -61,6 +61,12 @@ pub struct GnssState {
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
     pub osnma_kroot: Option<(u8, u8)>,
+    /// Fix precision from the most recent solve: horizontal and vertical dilution
+    /// of precision (unitless geometry factors, lower is better) and the number
+    /// of satellites that contributed. All zero before the first fix.
+    pub hdop: f64,
+    pub vdop: f64,
+    pub fix_sv_count: usize,
 
     pub channels: HashMap<SV, ChannelState>,
     pub histories: HashMap<SV, History>,
@@ -86,6 +92,9 @@ impl GnssState {
             longitude: 0.0,
             height: 0.0,
             osnma_kroot: None,
+            hdop: 0.0,
+            vdop: 0.0,
+            fix_sv_count: 0,
             channels: HashMap::<SV, ChannelState>::new(),
             histories: HashMap::new(),
             update_func: UpdateFunc {

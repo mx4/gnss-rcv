@@ -116,6 +116,20 @@ fn sig_label(sig: Signal) -> &'static str {
     }
 }
 
+/// Colour a dilution-of-precision value by the usual GNSS quality bands (lower is
+/// better): ≤2 excellent, ≤5 good, ≤10 moderate, else poor.
+fn dop_color(dop: f64) -> egui::Color32 {
+    if dop <= 2.0 {
+        egui::Color32::from_rgb(80, 200, 100) // green
+    } else if dop <= 5.0 {
+        egui::Color32::from_rgb(220, 190, 50) // yellow
+    } else if dop <= 10.0 {
+        egui::Color32::from_rgb(230, 140, 50) // orange
+    } else {
+        egui::Color32::from_rgb(220, 80, 60) // red
+    }
+}
+
 impl GnssRcvApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool) -> Self {
         Self {
@@ -335,7 +349,7 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64)> = st
                 .channels
@@ -359,6 +373,12 @@ impl GnssRcvApp {
             } else {
                 ("no position fix".to_string(), None)
             };
+            // Fix precision, alongside the position (so it shares the fix gate).
+            let dop = if st.longitude != 0.0 {
+                Some((st.hdop, st.vdop, st.fix_sv_count))
+            } else {
+                None
+            };
             (
                 sv_elaz,
                 tow_text,
@@ -367,6 +387,7 @@ impl GnssRcvApp {
                 pos_text,
                 pos_url,
                 st.osnma_kroot,
+                dop,
             )
         };
 
@@ -407,6 +428,23 @@ impl GnssRcvApp {
                                 ui.hyperlink_to(&pos_text, url);
                             } else {
                                 ui.monospace(&pos_text);
+                            }
+                            // Fix precision: HDOP/VDOP geometry factors (lower is
+                            // better, HDOP colour-coded by quality) + SVs used.
+                            if let Some((hdop, vdop, nsv)) = dop {
+                                ui.horizontal(|ui| {
+                                    ui.weak("precision:");
+                                    ui.colored_label(dop_color(hdop), format!("HDOP {hdop:.1}"));
+                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Dilution of precision: how much satellite \
+                                     geometry amplifies range error (lower is \
+                                     better — <2 excellent, 2-5 good, 5-10 \
+                                     moderate). VDOP is vertical, then the satellite \
+                                     count used in the fix.",
+                                );
                             }
                             // OSNMA DSM-KROOT assembly: the TESLA root key arrives
                             // one block per 30 s subframe, and full authentication
