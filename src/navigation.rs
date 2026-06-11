@@ -68,35 +68,39 @@ impl Channel {
 
     /// SBAS L1 (EGNOS/WAAS/MSAS…): feed prompt-I per 1 ms code period to the
     /// streaming decoder; each CRC-valid 250-bit message updates the shared
-    /// ionospheric grid (MT18 masks + MT26 delays) and the UI message counter.
+    /// ionospheric grid (MT18 masks + MT26 delays), the fast/long-term
+    /// correction state (MT1-5/24/25), and the UI message counter.
     fn nav_decode_sbas(&mut self) {
         let Some(&c_p) = self.hist.corr_p.back() else {
             return;
         };
         if let Some(msg) = self.nav.sbas.push_period(c_p.re) {
             self.stats.subframes += 1;
-            let n_igp = {
+            let detail = {
                 let mut st = self.pub_state.lock().unwrap();
-                let fed = st.sbas_iono.feed(&msg);
+                let iono = st.sbas_iono.feed(&msg);
+                let corr = st.sbas_corr.feed(&msg, self.ts_sec);
                 if let Some(cs) = st.channels.get_mut(&self.sv) {
                     cs.sbas_msgs = self.stats.subframes;
                 }
-                fed.then(|| st.sbas_iono.len())
+                if iono {
+                    format!(" — iono grid: {} IGPs", st.sbas_iono.len())
+                } else if corr {
+                    format!(
+                        " — corrections: {} fast / {} long-term",
+                        st.sbas_corr.fast_len(),
+                        st.sbas_corr.long_len()
+                    )
+                } else {
+                    String::new()
+                }
             };
-            match n_igp {
-                Some(n) => log::warn!(
-                    "{}: SBAS L1 message type {} (CRC ok) ts={:.3} — iono grid: {n} IGPs",
-                    self.sv,
-                    msg.mtype,
-                    self.ts_sec
-                ),
-                None => log::warn!(
-                    "{}: SBAS L1 message type {} (CRC ok) ts={:.3}",
-                    self.sv,
-                    msg.mtype,
-                    self.ts_sec
-                ),
-            }
+            log::warn!(
+                "{}: SBAS L1 message type {} (CRC ok) ts={:.3}{detail}",
+                self.sv,
+                msg.mtype,
+                self.ts_sec
+            );
         }
     }
 

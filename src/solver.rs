@@ -410,7 +410,7 @@ impl PositionSolver {
     }
 
     /// Returns true if a position was resolved this call.
-    pub fn compute_position(&mut self, _ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
+    pub fn compute_position(&mut self, ts_sec: f64, ephs: &[RxEphemeris]) -> bool {
         // Refresh this solver's epoch store; the callback objects read it
         // during solver.ppp() below.
         *self.ephs.lock().unwrap() = ephs.to_vec();
@@ -451,10 +451,12 @@ impl PositionSolver {
         let latest_tx = *tx_gpst.iter().max().unwrap();
         let now_gpst = latest_tx + Duration::from_seconds(NOMINAL_TRAVEL_SEC);
 
-        let (iono_valid, iono_alpha, iono_beta, sbas_iono) = {
+        let (iono_valid, iono_alpha, iono_beta, sbas_iono, sbas_corr) = {
             let st = self.pub_state.lock().unwrap();
             let grid = (!st.sbas_iono.is_empty()).then(|| st.sbas_iono.clone());
-            (st.ion_adj, st.iono_alpha, st.iono_beta, grid)
+            let corr = (st.sbas_corr.fast_len() + st.sbas_corr.long_len() > 0)
+                .then(|| st.sbas_corr.clone());
+            (st.ion_adj, st.iono_alpha, st.iono_beta, grid, corr)
         };
         let gps_sod = {
             let r = &ephs[0];
@@ -532,14 +534,37 @@ impl PositionSolver {
                 eph.sv,
                 eph.code_off_sec
             );
+            // SBAS differential corrections (DO-229 A.4.4.3), folded into the
+            // pseudorange: PR_corrected = PR + PRC (fast, clock-error
+            // dominated) + c·δclk − û·δpos (long-term; the line-of-sight
+            // projection stands in for moving the modelled SV — exact to
+            // |δpos|²/range, sub-mm). δpos needs a receiver position for û,
+            // so like iono/tropo it waits for the first fix; PRC and δclk
+            // apply from the start. Unlike iono these are per-SV, so the
+            // receiver-clock state cannot absorb them.
+            let mut sbas_m = 0.0;
+            if let Some(c) = &sbas_corr {
+                if let Some(prc) = c.fast_prc_m(eph.sv, ts_sec) {
+                    sbas_m += prc;
+                }
+                if let Some((dpos, dclk)) = c.long_term(eph.sv, eph.iode as u8, gps_sod) {
+                    sbas_m += SPEED_OF_LIGHT * dclk;
+                    if let Some(rx_ecef) = self.last_fix_ecef {
+                        let s = compute_sv_position_ecef(eph, now_gpst);
+                        let v = Vector3::new(s.0, s.1, s.2) - rx_ecef;
+                        sbas_m -= v.dot(&Vector3::from(dpos)) / v.norm();
+                    }
+                }
+            }
+
             log::warn!(
-                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m tropo={tropo_m:.1}m",
+                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m tropo={tropo_m:.1}m sbas={sbas_m:+.1}m",
                 eph.sv,
                 pseudo_range_sec * 1000.0,
                 eph.tgd,
             );
 
-            let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m;
+            let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m + sbas_m;
 
             // A non-finite pseudorange (e.g. a NaN correction from a garbage prior
             // fix) would panic gnss-rtk's Duration math — drop the SV instead.

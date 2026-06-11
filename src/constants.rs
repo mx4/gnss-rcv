@@ -27,6 +27,7 @@ pub const P2_33: f64 = p2(33);
 pub const P2_34: f64 = p2(34); // Galileo af0
 pub const P2_35: f64 = p2(35); // Galileo GGTO A0G
 pub const P2_38: f64 = p2(38);
+pub const P2_39: f64 = p2(39); // SBAS long-term daf1
 pub const P2_43: f64 = p2(43);
 pub const P2_46: f64 = p2(46); // Galileo af1
 pub const P2_50: f64 = p2(50);

@@ -235,6 +235,22 @@ guesses. Tackle roughly top-to-bottom.
   (~0.4 m horizontal): a calm morning iono is mostly common-mode and the clock
   bias absorbs it. Open: bands 9-10 (|lat|>55°), the 3-point interpolation
   fallback, GIVEI-weighted use.
+- ~~**SBAS fast + long-term corrections (MT1-5/24/25)**~~:
+  [`sbas_corr.rs`](src/sbas_corr.rs) — MT1 PRN mask (IODP-versioned), MT2-5/24
+  fast PRCs (30 s freshness bound; UDREI≥14 and PRC 0x800 clear the slot; MT0
+  parsed as MT2 per the EGNOS test-mode convention), MT24/25 long-term δpos/
+  δclock halves (velocity codes 0 and 1, IODE-gated against the flown
+  ephemeris). Applied per GPS SV at the pseudorange level in the solver:
+  `pr += PRC + c·δclk − û·δpos` (LOS projection; bit layouts cross-checked
+  against RTKLIB sbas.c). CTTC: 13 fast + 14 long-term assembled, per-SV
+  corrections −0.4..−2.6 m with ~2 m differential spread. The fix moves by a
+  couple of metres; CTTC's truth (its own single-frequency NMEA solution) is
+  too coarse to certify the improvement — the gpssim synthetic harness or a
+  capture with surveyed truth is the right judge. EGNOS coverage now spans
+  three captures: CTTC S120+S126, nov3 S136 (54 msgs/60 s incl. MT1/2/3/4 +
+  MT18/26), ION LimeSDR S120+S123 (171 msgs/60 s) — the pre-fix probes that
+  found "no SBAS" were the broken symbol pairing making tracked GEOs look
+  dead.
 - ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
   ([gps_lnav.rs](src/gps_lnav.rs)) feeds real captured LNAV subframes 1-3 through
   the `decode_lnav_subframe{1,2,3}` parsers and range-checks the result (a≈26 560

@@ -1,6 +1,7 @@
 use crate::{
     almanac::Almanac,
     channel::{History, State},
+    sbas_corr::SbasCorrections,
     sbas_iono::SbasIonoGrid,
 };
 use gnss_rs::sv::SV;
@@ -72,6 +73,9 @@ pub struct GnssState {
     /// it is the only iono source that arrives within seconds (Klobuchar's
     /// page 18 needs up to 12.5 min of GPS nav data).
     pub sbas_iono: SbasIonoGrid,
+    /// SBAS fast + long-term corrections (MT1-5/24/25), assembled live by the
+    /// SBAS channels and applied per GPS SV at the pseudorange level.
+    pub sbas_corr: SbasCorrections,
     /// Galileo OSNMA DSM-KROOT assembly progress as `(blocks_received, total)`,
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
@@ -108,6 +112,7 @@ impl GnssState {
             height: 0.0,
             gal_iono_az: None,
             sbas_iono: SbasIonoGrid::default(),
+            sbas_corr: SbasCorrections::default(),
             osnma_kroot: None,
             hdop: 0.0,
             vdop: 0.0,
