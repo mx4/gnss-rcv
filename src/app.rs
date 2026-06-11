@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 
+use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 
 use crate::channel::{History, State};
@@ -118,6 +119,59 @@ fn sig_label(sig: Signal) -> &'static str {
         Signal::L1ca => "L1CA",
         Signal::GalileoE1b => "E1B",
         Signal::GalileoE1c => "E1C",
+    }
+}
+
+/// Colour for the SV label in the tracking table, by constellation — the
+/// quickest visual cue that a row is a GPS, Galileo, SBAS or QZSS satellite.
+fn constellation_color(c: Constellation) -> egui::Color32 {
+    match c {
+        Constellation::GPS => egui::Color32::from_rgb(170, 200, 255), // pale blue
+        Constellation::Galileo => egui::Color32::from_rgb(110, 220, 210), // teal
+        Constellation::SBAS => egui::Color32::from_rgb(255, 170, 70), // orange
+        Constellation::QZSS => egui::Color32::from_rgb(215, 140, 230), // violet
+        _ => egui::Color32::LIGHT_GRAY,
+    }
+}
+
+/// Hover text identifying an SV — most useful for SBAS PRNs, whose "S1xx"
+/// labels say nothing about which augmentation system or GEO bird they are.
+/// PRN→GEO assignments come from the SBAS service providers (the well-known,
+/// long-lived ones only; unlisted PRNs fall back to the system name).
+fn sv_hover_text(sv: SV) -> String {
+    let prn = sv.prn;
+    match sv.constellation {
+        Constellation::SBAS => {
+            let system = match prn {
+                120 | 121 | 123 | 124 | 126 | 136 => "EGNOS (Europe)",
+                131 | 133 | 135 | 138 => "WAAS (North America)",
+                129 | 137 => "MSAS (Japan)",
+                127 | 128 | 132 => "GAGAN (India)",
+                125 | 140 | 141 => "SDCM (Russia)",
+                130 | 143 | 144 => "BDSBAS (China)",
+                134 => "KASS (Korea)",
+                122 => "SouthPAN (Australia/NZ)",
+                _ => "SBAS",
+            };
+            let geo = match prn {
+                120 => Some("Inmarsat 3-F2 / AOR-E"),
+                121 => Some("Eutelsat 5WB"),
+                123 => Some("ASTRA 5B"),
+                124 => Some("Artemis"),
+                126 => Some("Inmarsat 4-F2 / EMEA"),
+                131 => Some("Eutelsat 117WB"),
+                133 => Some("SES-15"),
+                135 => Some("Galaxy 30"),
+                138 => Some("ANIK F1R"),
+                _ => None,
+            };
+            match geo {
+                Some(g) => format!("{system} — {g}"),
+                None => system.to_string(),
+            }
+        }
+        Constellation::QZSS => "QZSS (Japan) — Michibiki".to_string(),
+        c => format!("{c}"),
     }
 }
 
@@ -653,10 +707,12 @@ impl GnssRcvApp {
                 let code_idx = channel.unwrap().code_idx;
                 let eph_pages = channel.unwrap().eph_pages;
                 let osnma_verified = channel.unwrap().osnma_verified;
+                let sbas_msgs = channel.unwrap().sbas_msgs;
 
                 body.row(row_height, |mut row| {
                     row.col(|ui| {
-                        ui.label(format!("{}", sv));
+                        ui.colored_label(constellation_color(sv.constellation), format!("{}", sv))
+                            .on_hover_text(sv_hover_text(sv));
                     });
                     row.col(|ui| {
                         let color = if cn0 >= 40.0 {
@@ -681,6 +737,14 @@ impl GnssRcvApp {
                         });
                     });
                     row.col(|ui| {
+                        if sv.constellation == Constellation::SBAS {
+                            // SBAS GEOs broadcast corrections, not ephemerides —
+                            // an x/3 fraction would sit at 0 forever. Show the
+                            // running count of CRC-valid messages instead.
+                            ui.weak(format!("{sbas_msgs} msgs"))
+                                .on_hover_text("SBAS messages decoded (CRC ok)");
+                            return;
+                        }
                         // How many orbit/clock messages are decoded (Galileo: 5
                         // I/NAV words, GPS: 3 subframes). The fraction turns green
                         // on a full set — no ✓ glyph, which egui's bundled fonts
