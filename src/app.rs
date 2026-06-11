@@ -617,7 +617,11 @@ impl GnssRcvApp {
                     if is_galileo {
                         row.col(|ui| {
                             if osnma_verified {
-                                ui.colored_label(egui::Color32::GREEN, "✓ verified");
+                                // A lock (not a plain check) — this column means
+                                // "cryptographically authenticated", distinct from
+                                // the ephemeris ✓ next to it.
+                                ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "🔒")
+                                    .on_hover_text("OSNMA: navigation data authenticated");
                             }
                         });
                     }
