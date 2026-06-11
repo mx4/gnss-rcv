@@ -324,10 +324,6 @@ impl GnssRcvApp {
     }
 
     fn update_sig_type(&mut self, ui: &mut egui::Ui) {
-        if !self.sig.is_boc11() {
-            ui.checkbox(&mut self.sbas, "SBAS")
-                .on_hover_text("also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)");
-        }
         egui::ComboBox::from_id_salt("signal")
             .width(FIELD_W)
             .selected_text(sig_label(self.sig))
@@ -357,7 +353,13 @@ impl GnssRcvApp {
                 );
                 ui.end_row();
 
-                ui.label("signal");
+                ui.horizontal(|ui| {
+                    ui.label("signal");
+                    if !self.sig.is_boc11() {
+                        ui.checkbox(&mut self.sbas, "SBAS")
+                            .on_hover_text("also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)");
+                    }
+                });
                 self.update_sig_type(ui);
                 ui.label("fi");
                 ui.add_sized(
