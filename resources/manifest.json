@@ -133,8 +133,8 @@
     "dest": "clearsky_signal_C-1.bin",
     "size": 0,
     "archive": "raw",
-    "flags": "-t 2xf32 --fs 50000000 --sig E1B",
-    "note": "Tampere Univ. Galileo E1 clear-sky 2025, 50 MHz zero-IF 32-bit float, ~75s; fixes (Tampere 61.45\u00b0N 23.86\u00b0E)",
+    "flags": "-t 2xi16-be --fs 50000000 --sig E1B --sats 2,10,11,14,25,30,34,36",
+    "note": "Tampere Univ. Galileo E1 clear-sky 2025, 50 MHz zero-IF, ~150s (Tampere 61.45N 23.86E). The dataset labels it 32-bit float but it is int16 big-endian (2xi16-be). 8 E1B SVs acquire (E02/10/11/14/25/30/34/36, 35-45 dB-Hz); restrict --sats -- all 36 PRNs OOMs at 50 MHz (~13 GB of acquisition replicas)",
     "tags": [
       "galileo"
     ]
