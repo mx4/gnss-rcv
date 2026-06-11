@@ -575,8 +575,9 @@ impl PositionSolver {
                 // VDOP^2 + TDOP^2 holds with the value below — so recover the true
                 // VDOP from those. (A future multi-constellation solve would add an
                 // inter-system-bias state and this would over-estimate VDOP.)
-                // Upstream fix submitted (PR to rtk-rs/gnss-rtk); once a release
-                // carrying it lands, drop this and read `pvt.vdop` directly.
+                // Upstream fix submitted as nav-solutions/gnss-rtk#121
+                // (https://github.com/nav-solutions/gnss-rtk/pull/121); once a
+                // release carrying it lands, drop this and read `pvt.vdop` directly.
                 let vdop = (pvt.gdop.powi(2) - pvt.hdop.powi(2) - pvt.tdop.powi(2))
                     .max(0.0)
                     .sqrt();
