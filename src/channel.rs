@@ -115,6 +115,8 @@ pub struct Tracking {
     sum_corr_n: f64,
     txp_ts0: f64, // baseline rx time for the code-implied-Doppler slope (0 = unset)
     txp0: f64,    // baseline transmit phase paired with txp_ts0
+    div_ema: f64, // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
+    div_streak: u32, // consecutive windows the divergence exceeds the gate
 }
 
 // Rolling per-channel diagnostics. These are capped ring buffers: new samples
@@ -495,6 +497,8 @@ impl Channel {
         self.trk.sum_corr_n = 0.0;
         self.trk.txp_ts0 = 0.0;
         self.trk.txp0 = 0.0;
+        self.trk.div_ema = 0.0;
+        self.trk.div_streak = 0;
         self.num_trk_samples = 0;
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
@@ -890,10 +894,7 @@ impl Channel {
     /// discriminator is not data-ambiguous at the bit rate), so this is gated to
     /// Galileo. The decoder ([`crate::galileo_inav`]) independently undoes the
     /// (−1)ⁿ flip, covering the few seconds before this correction engages.
-    fn correct_half_rate_false_lock(&mut self) {
-        if self.sv.constellation != Constellation::Galileo {
-            return;
-        }
+    fn monitor_code_carrier_consistency(&mut self) {
         let txp = self.num_trk_samples as f64 * self.code_sec - self.trk.code_off_sec;
         // Establish the baseline once past carrier pull-in.
         if self.trk.txp0 == 0.0 {
@@ -907,30 +908,71 @@ impl Channel {
         if dt < HALF_RATE_WINDOW {
             return; // need a few seconds for a precise slope
         }
-        // Code-implied (true) Doppler vs the PLL's, expressed in half-rate steps.
+        // The transmit-phase slope gives the code-implied (true) Doppler; its gap
+        // from the PLL's carrier Doppler is the code-carrier divergence.
         let code_dopp = ((txp - self.trk.txp0) / dt - 1.0) * self.fc;
-        let step = 1.0 / (2.0 * self.code_sec); // 125 Hz for E1-B
-        let k = ((code_dopp - self.trk.doppler_hz) / step).round();
-        if std::env::var("GAL_DOPP_CHECK").is_ok() {
-            log::warn!(
-                "{}: DOPPCHK pll_dopp={:7.1} code_dopp={:7.1} k={:+.0}",
-                self.sv,
-                self.trk.doppler_hz,
-                code_dopp,
-                k,
-            );
-        }
-        if k != 0.0 {
-            self.trk.doppler_hz += k * step;
-            self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the jump
-            self.update_state_doppler_hz();
-            log::warn!(
-                "{}: half-rate false lock corrected {:+.0} Hz -> {:.0} Hz at ts={:.1}",
-                self.sv,
-                k * step,
-                self.trk.doppler_hz,
-                self.ts_sec,
-            );
+        let div = code_dopp - self.trk.doppler_hz;
+
+        match self.sv.constellation {
+            // Galileo I/NAV: the carrier discriminator is data-ambiguous, so a
+            // healthy lock can sit a multiple of 125 Hz off; snap it back.
+            Constellation::Galileo => {
+                let step = 1.0 / (2.0 * self.code_sec); // 125 Hz for E1-B
+                let k = (div / step).round();
+                if std::env::var("GAL_DOPP_CHECK").is_ok() {
+                    log::warn!(
+                        "{}: DOPPCHK pll_dopp={:7.1} code_dopp={:7.1} k={:+.0}",
+                        self.sv,
+                        self.trk.doppler_hz,
+                        code_dopp,
+                        k,
+                    );
+                }
+                if k != 0.0 {
+                    self.trk.doppler_hz += k * step;
+                    self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the jump
+                    self.update_state_doppler_hz();
+                    log::warn!(
+                        "{}: half-rate false lock corrected {:+.0} Hz -> {:.0} Hz at ts={:.1}",
+                        self.sv,
+                        k * step,
+                        self.trk.doppler_hz,
+                        self.ts_sec,
+                    );
+                }
+            }
+            // GPS L1 C/A (BPSK): no half-rate ambiguity, so a *persistent*
+            // code-carrier divergence means the code loop has walked off the true
+            // peak (a cross-correlation pull or slow code slip) while the carrier
+            // holds lock — its pseudorange then ramps and silently drags the fix
+            // (C/N0 can stay just above the loss gate the whole time, as G03 does
+            // on the nov3 capture). The healthy divergence is a stable per-lock
+            // systematic, so self-calibrate it and drop the channel to re-acquire
+            // once it deviates persistently.
+            Constellation::GPS => {
+                const DIV_GATE_HZ: f64 = 100.0; // ~6x the healthy ±15 Hz scatter
+                const DIV_FAULT_WINDOWS: u32 = 2; // ~6 s of sustained divergence
+                if self.trk.div_ema == 0.0 {
+                    self.trk.div_ema = div; // first window sets the baseline
+                } else if (div - self.trk.div_ema).abs() > DIV_GATE_HZ {
+                    self.trk.div_streak += 1;
+                    if self.trk.div_streak >= DIV_FAULT_WINDOWS {
+                        log::warn!(
+                            "{}: code-carrier divergence {:+.0} Hz (healthy {:+.0}) — dropping to re-acquire at ts={:.1}",
+                            self.sv,
+                            div,
+                            self.trk.div_ema,
+                            self.ts_sec,
+                        );
+                        self.idle_start();
+                        return;
+                    }
+                } else {
+                    self.trk.div_streak = 0;
+                    self.trk.div_ema += 0.05 * (div - self.trk.div_ema); // slow recal
+                }
+            }
+            _ => {}
         }
         // Re-baseline so the next window measures the post-correction state.
         self.trk.txp_ts0 = self.ts_sec;
@@ -990,7 +1032,7 @@ impl Channel {
         self.hist.doppler_hz.push_back(self.trk.doppler_hz);
         self.hist.trim();
         self.update_all_plots(false);
-        self.correct_half_rate_false_lock();
+        self.monitor_code_carrier_consistency();
         self.log_periodically();
         self.nav.eph.cn0 = self.trk.cn0;
 
