@@ -1,13 +1,17 @@
-use rustfft::{FftPlanner, num_complex::Complex64};
-use std::ops::Mul;
+use rustfft::{
+    FftPlanner,
+    num_complex::{Complex32, Complex64},
+};
 
 const PI: f64 = std::f64::consts::PI;
 
-pub fn norm_square(v: &[Complex64]) -> f64 {
-    v.iter().map(|&x| x.norm_sqr()).sum::<f64>()
+pub fn norm_square(v: &[Complex32]) -> f64 {
+    // f64 accumulator: summing ~50k f32 squares in f32 loses ~3 significant
+    // digits; the cast is free next to the multiply.
+    v.iter().map(|&x| x.norm_sqr() as f64).sum::<f64>()
 }
 
-pub fn norm(v: &[Complex64]) -> f64 {
+pub fn norm(v: &[Complex32]) -> f64 {
     norm_square(v).sqrt()
 }
 
@@ -28,15 +32,20 @@ pub fn get_average(v: &[f64]) -> f64 {
     v.iter().sum::<f64>() / v.len() as f64
 }
 
-fn normalize_post_fft(data: &mut [Complex64]) {
-    let len = data.len() as f64;
+fn normalize_post_fft(data: &mut [Complex32]) {
+    let len = data.len() as f32;
     data.iter_mut().for_each(|x| *x /= len);
 }
 
-pub fn correlate_vec(a: &[Complex64], b: &[Complex64]) -> Complex64 {
+/// Correlate two f32 sample vectors; the products are f32 (SIMD-friendly) but
+/// the running sum is f64 — over a 50k-sample code period an f32 accumulator
+/// would cost ~3 significant digits of the discriminator inputs.
+pub fn correlate_vec(a: &[Complex32], b: &[Complex32]) -> Complex64 {
     let mut sum = Complex64 { re: 0.0, im: 0.0 };
-    for i in 0..a.len() {
-        sum += a[i].mul(b[i].conj());
+    for (x, y) in a.iter().zip(b) {
+        let p = x * y.conj();
+        sum.re += p.re as f64;
+        sum.im += p.im as f64;
     }
     sum
 }
@@ -47,9 +56,9 @@ pub fn correlate_vec(a: &[Complex64], b: &[Complex64]) -> Complex64 {
 /// code period, where per-call buffers were ~120 MB/s of churn per searching
 /// channel at 50 Msps.
 pub fn calc_correlation_inplace(
-    fft_planner: &mut FftPlanner<f64>,
-    buf: &mut [Complex64],
-    prn_code_fft: &[Complex64],
+    fft_planner: &mut FftPlanner<f32>,
+    buf: &mut [Complex32],
+    prn_code_fft: &[Complex32],
 ) {
     assert_eq!(buf.len(), prn_code_fft.len());
     fft_planner.plan_fft_forward(buf.len()).process(buf);
@@ -61,39 +70,42 @@ pub fn calc_correlation_inplace(
 }
 
 pub fn calc_correlation(
-    fft_planner: &mut FftPlanner<f64>,
-    iq_vec: &[Complex64],
-    prn_code_fft: &[Complex64],
-) -> Vec<Complex64> {
+    fft_planner: &mut FftPlanner<f32>,
+    iq_vec: &[Complex32],
+    prn_code_fft: &[Complex32],
+) -> Vec<Complex32> {
     let mut buf = iq_vec.to_owned();
     calc_correlation_inplace(fft_planner, &mut buf, prn_code_fft);
     buf
 }
 
-pub fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -> Vec<Complex64> {
+pub fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -> Vec<Complex32> {
     // carrier[n] = exp(-j (2*pi*doppler*n/fs + 2*pi*phi))
-    // Built by phase recurrence (carrier[n+1] = carrier[n] * step) so it costs one
-    // complex multiply per sample instead of a sin/cos per sample. This runs on
-    // every tracking correlation (per locked SV, per 1 ms) and dominates the CPU.
+    // Built by phase recurrence (carrier[n+1] = carrier[n] * step) so it costs
+    // one complex multiply per sample instead of a sin/cos per sample. The
+    // recurrence runs in f64 — over 50k samples an f32 recurrence drifts both
+    // phase and amplitude — and only the stored sample is f32.
     let step = Complex64::from_polar(1.0, -2.0 * PI * doppler_hz / fs);
     let mut c = Complex64::from_polar(1.0, -2.0 * PI * phi);
 
     let mut carrier = Vec::with_capacity(len);
     for _ in 0..len {
-        carrier.push(c);
+        carrier.push(Complex32::new(c.re as f32, c.im as f32));
         c *= step;
     }
     carrier
 }
 
-pub fn doppler_shift(iq_vec: &mut [Complex64], doppler_hz: f64, phi: f64, fs: f64) {
+pub fn doppler_shift(iq_vec: &mut [Complex32], doppler_hz: f64, phi: f64, fs: f64) {
     // Mix by phase recurrence (one complex multiply per sample) instead of
     // building a carrier vector with a sin/cos per sample. Equivalent to
-    // multiplying sample n by exp(-j(2*pi*doppler*n/fs + 2*pi*phi)).
+    // multiplying sample n by exp(-j(2*pi*doppler*n/fs + 2*pi*phi)). The
+    // recurrence stays f64 (see doppler_shifted_carrier); the sample multiply
+    // is f32.
     let step = Complex64::from_polar(1.0, -2.0 * PI * doppler_hz / fs);
     let mut c = Complex64::from_polar(1.0, -2.0 * PI * phi);
     for s in iq_vec.iter_mut() {
-        *s *= c;
+        *s *= Complex32::new(c.re as f32, c.im as f32);
         c *= step;
     }
 }

@@ -13,7 +13,7 @@
 //! `code · nav · exp(+j·2π·(fi+fd)·t)`, so a correct replica cancels it to the
 //! bare code.
 
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::{Complex32, Complex64};
 use std::f64::consts::{PI, TAU};
 
 use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
@@ -110,7 +110,7 @@ pub fn synth_l1ca(
     fi: f64,
     num_msec: usize,
     seed: Option<u64>,
-) -> Vec<Complex64> {
+) -> Vec<Complex32> {
     let code_sp = (fs * 1e-3) as usize;
     let n_total = code_sp * num_msec;
 
@@ -136,7 +136,7 @@ pub fn synth_l1ca(
     let mut out = Vec::with_capacity(n_total);
     for n in 0..n_total {
         let t = n as f64 * inv_fs;
-        let mut x = Complex64::new(0.0, 0.0);
+        let mut x = Complex32::new(0.0, 0.0);
         for (k, s) in svs.iter().enumerate() {
             let chip = (s.code_phase_chips + chip_rate[k] * t).rem_euclid(L1CA_CODE_LEN as f64);
             let c = codes[k][chip as usize] as f64;
@@ -147,10 +147,11 @@ pub fn synth_l1ca(
                 s.nav_bits[bi] as f64
             };
             let phase = TAU * (fi + s.doppler_hz) * t;
-            x += Complex64::from_polar(amp[k] * c * b, phase);
+            let sv64 = Complex64::from_polar(amp[k] * c * b, phase);
+            x += Complex32::new(sv64.re as f32, sv64.im as f32);
         }
         if let Some(rng) = rng.as_mut() {
-            x += Complex64::new(rng.gauss() * nstd, rng.gauss() * nstd);
+            x += Complex32::new((rng.gauss() * nstd) as f32, (rng.gauss() * nstd) as f32);
         }
         out.push(x);
     }
@@ -200,7 +201,7 @@ pub fn synth_e1(
     fi: f64,
     num_msec: usize,
     seed: Option<u64>,
-) -> Vec<Complex64> {
+) -> Vec<Complex32> {
     let code_sp = (fs * 1e-3) as usize;
     let n_total = code_sp * num_msec;
 
@@ -226,7 +227,7 @@ pub fn synth_e1(
     let mut out = Vec::with_capacity(n_total);
     for n in 0..n_total {
         let t = n as f64 * inv_fs;
-        let mut x = Complex64::new(0.0, 0.0);
+        let mut x = Complex32::new(0.0, 0.0);
         for (k, s) in svs.iter().enumerate() {
             let pos = s.code_phase_subchips + subchip_rate[k] * t;
             let c = codes[k][pos.rem_euclid(E1_BOC_LEN as f64) as usize] as f64;
@@ -239,10 +240,11 @@ pub fn synth_e1(
                 if s.symbols[idx] == 0 { 1.0 } else { -1.0 }
             };
             let phase = TAU * (fi + s.doppler_hz) * t;
-            x += Complex64::from_polar(amp[k] * c * b, phase);
+            let sv64 = Complex64::from_polar(amp[k] * c * b, phase);
+            x += Complex32::new(sv64.re as f32, sv64.im as f32);
         }
         if let Some(rng) = rng.as_mut() {
-            x += Complex64::new(rng.gauss() * nstd, rng.gauss() * nstd);
+            x += Complex32::new((rng.gauss() * nstd) as f32, (rng.gauss() * nstd) as f32);
         }
         out.push(x);
     }
@@ -526,11 +528,11 @@ impl IQReader for GeoFeed {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         if off_samples + num_samples > self.total_samples {
             return Err("end of file".into());
         }
-        let mut out = vec![Complex64::default(); num_samples];
+        let mut out = vec![Complex32::default(); num_samples];
         let b = self.block_sp;
         let inv_fs = 1.0 / self.fs;
         let end = off_samples + num_samples;
@@ -559,13 +561,15 @@ impl IQReader for GeoFeed {
                 let mut bit_pos = t_tx / sv.data_period;
                 let bit_step = dtx / sv.data_period;
                 // Received carrier: θ = 2π(fi·ts − fc·τ); per-sample rotation.
+                // f64 recurrence (f32 would drift over a block), f32 at the sum.
                 let mut car = Complex64::from_polar(sv.amp, TAU * (self.fi * ts - L1_HZ * tau));
                 let rot = Complex64::from_polar(1.0, TAU * (self.fi * inv_fs - L1_HZ * dtau));
 
                 for i in s0..s1 {
                     let c = sv.code[chip.rem_euclid(code_len) as usize] as f64;
                     let d = sv.data[bit_pos as usize] as f64;
-                    out[i - off_samples] += car * (c * d);
+                    let smp = car * (c * d);
+                    out[i - off_samples] += Complex32::new(smp.re as f32, smp.im as f32);
                     car *= rot;
                     chip += chip_step;
                     bit_pos += bit_step;
@@ -577,7 +581,7 @@ impl IQReader for GeoFeed {
                 let mut rng = Rng(seed ^ (m as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
                 let nstd = 0.5f64.sqrt();
                 for v in out[s0 - off_samples..s1 - off_samples].iter_mut() {
-                    *v += Complex64::new(rng.gauss() * nstd, rng.gauss() * nstd);
+                    *v += Complex32::new((rng.gauss() * nstd) as f32, (rng.gauss() * nstd) as f32);
                 }
             }
         }
@@ -740,7 +744,7 @@ mod tests {
         let a = synth_l1ca(&[SynthSv::new(5, 1000.0, 100.0, 45.0)], fs, 0.0, 2, Some(7));
         let b = synth_l1ca(&[SynthSv::new(5, 1000.0, 100.0, 45.0)], fs, 0.0, 2, Some(7));
         assert_eq!(a, b, "same seed must reproduce the same samples");
-        let mean_pwr: f64 = a.iter().map(|c| c.norm_sqr()).sum::<f64>() / a.len() as f64;
+        let mean_pwr: f64 = a.iter().map(|c| c.norm_sqr() as f64).sum::<f64>() / a.len() as f64;
         // noise power ~1 dominates the weak signal; should be close to 1.
         assert!((0.7..1.4).contains(&mean_pwr), "mean power {mean_pwr:.3}");
     }

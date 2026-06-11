@@ -1,6 +1,6 @@
 use bytesize::ByteSize;
 use colored::Colorize;
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::Complex32;
 use std::error::Error;
 use std::fmt;
 use std::fs::File;
@@ -86,7 +86,7 @@ impl IQReader for IQRecording {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         // 1-bit samples are bit-packed (8 per byte), so they don't fit the
         // integer-bytes-per-sample math below; handle them on a dedicated path.
         if let IQFileType::TypeOneBit = self.file_type {
@@ -121,25 +121,25 @@ impl IQReader for IQRecording {
         match self.file_type {
             IQFileType::TypeRtlSdrFile => {
                 for off in (0..bytes.len()).step_by(sample_size) {
-                    iq_vec.push(Complex64 {
-                        re: (bytes[off] as f64 - 127.3) / 128.0,
-                        im: (bytes[off + 1] as f64 - 127.3) / 128.0,
+                    iq_vec.push(Complex32 {
+                        re: (bytes[off] as f32 - 127.3) / 128.0,
+                        im: (bytes[off + 1] as f32 - 127.3) / 128.0,
                     });
                 }
             }
             IQFileType::TypeOneInt8 => {
                 for off in (0..bytes.len()).step_by(sample_size) {
-                    iq_vec.push(Complex64 {
-                        re: bytes[off] as i8 as f64 / i8::MAX as f64,
+                    iq_vec.push(Complex32 {
+                        re: bytes[off] as i8 as f32 / i8::MAX as f32,
                         im: 0.0,
                     });
                 }
             }
             IQFileType::TypePairInt8 => {
                 for off in (0..bytes.len()).step_by(sample_size) {
-                    iq_vec.push(Complex64 {
-                        re: bytes[off] as i8 as f64 / i8::MAX as f64,
-                        im: bytes[off + 1] as i8 as f64 / i8::MAX as f64,
+                    iq_vec.push(Complex32 {
+                        re: bytes[off] as i8 as f32 / i8::MAX as f32,
+                        im: bytes[off + 1] as i8 as f32 / i8::MAX as f32,
                     });
                 }
             }
@@ -147,9 +147,9 @@ impl IQReader for IQRecording {
                 for off in (0..bytes.len()).step_by(sample_size) {
                     let i = i16::from_le_bytes([bytes[off], bytes[off + 1]]);
                     let q = i16::from_le_bytes([bytes[off + 2], bytes[off + 3]]);
-                    iq_vec.push(Complex64 {
-                        re: i as f64 / i16::MAX as f64,
-                        im: q as f64 / i16::MAX as f64,
+                    iq_vec.push(Complex32 {
+                        re: i as f32 / i16::MAX as f32,
+                        im: q as f32 / i16::MAX as f32,
                     });
                 }
             }
@@ -157,9 +157,9 @@ impl IQReader for IQRecording {
                 for off in (0..bytes.len()).step_by(sample_size) {
                     let i = i16::from_be_bytes([bytes[off], bytes[off + 1]]);
                     let q = i16::from_be_bytes([bytes[off + 2], bytes[off + 3]]);
-                    iq_vec.push(Complex64 {
-                        re: i as f64 / i16::MAX as f64,
-                        im: q as f64 / i16::MAX as f64,
+                    iq_vec.push(Complex32 {
+                        re: i as f32 / i16::MAX as f32,
+                        im: q as f32 / i16::MAX as f32,
                     });
                 }
             }
@@ -179,9 +179,9 @@ impl IQReader for IQRecording {
                     ]);
                     assert!((-1.0..=1.0).contains(&i));
                     assert!((-1.0..=1.0).contains(&q));
-                    iq_vec.push(Complex64 {
-                        re: i as f64,
-                        im: q as f64,
+                    iq_vec.push(Complex32 {
+                        re: i as f32,
+                        im: q as f32,
                     });
                 }
             }
@@ -244,7 +244,7 @@ impl IQRecording {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         assert!(
             off_samples.is_multiple_of(8) && num_samples.is_multiple_of(8),
             "1-bit reads must be 8-sample aligned (use an fs that is a multiple of 8000)"
@@ -272,7 +272,7 @@ impl IQRecording {
         for byte in bytes {
             for bit in (0..8).rev() {
                 let re = if (byte >> bit) & 1 == 1 { 1.0 } else { -1.0 };
-                iq_vec.push(Complex64 { re, im: 0.0 });
+                iq_vec.push(Complex32 { re, im: 0.0 });
             }
         }
         Ok(iq_vec)
@@ -285,7 +285,7 @@ impl IQRecording {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         assert!(
             off_samples.is_multiple_of(2) && num_samples.is_multiple_of(2),
             "4-bit reads must be 2-sample aligned (use an fs that is a multiple of 2000)"
@@ -310,17 +310,17 @@ impl IQRecording {
         self.pos_samples += num_samples;
 
         // sign-extend a 4-bit nibble (0..15) to [-8, 7], then normalize by 8.
-        let nib = |n: u8| -> f64 {
+        let nib = |n: u8| -> f32 {
             let v = if n >= 8 { n as i32 - 16 } else { n as i32 };
-            v as f64 / 8.0
+            v as f32 / 8.0
         };
         let mut iq_vec = Vec::with_capacity(num_samples);
         for byte in bytes {
-            iq_vec.push(Complex64 {
+            iq_vec.push(Complex32 {
                 re: nib(byte >> 4),
                 im: 0.0,
             });
-            iq_vec.push(Complex64 {
+            iq_vec.push(Complex32 {
                 re: nib(byte & 0x0f),
                 im: 0.0,
             });

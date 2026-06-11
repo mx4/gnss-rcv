@@ -2,7 +2,7 @@ use colored::Colorize;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use rustfft::FftPlanner;
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::{Complex32, Complex64};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -117,8 +117,8 @@ pub enum State {
 
 #[derive(Default)]
 pub struct Tracking {
-    prn_code: Vec<Complex64>, // upsampled
-    sig_buf: Vec<Complex64>,  // reused scratch for the Doppler-mixed code period
+    prn_code: Vec<Complex32>, // upsampled
+    sig_buf: Vec<Complex32>,  // reused scratch for the Doppler-mixed code period
     doppler_hz: f64,
     code_off_sec: f64,
     cn0: f64,
@@ -173,7 +173,7 @@ impl History {
 
 #[derive(Default)]
 pub struct Acquisition {
-    prn_code_fft: Vec<Complex64>,
+    prn_code_fft: Vec<Complex32>,
     sum_p: Vec<Vec<f64>>,
     // Pre-computed carrier replica for each Doppler bin. The bins are fixed and
     // PRN-independent (they depend only on fs/fi/code_sp), so the whole set is
@@ -181,12 +181,12 @@ pub struct Acquisition {
     // every channel — at 50 MHz each set is ~240 MB, so duplicating it per PRN
     // (36×) was ~8.6 GB and OOM'd. Sharing it avoids that and the sin/cos per
     // sample per bin on every acquisition step (the dominant search-time cost).
-    carriers: Arc<Vec<Vec<Complex64>>>,
+    carriers: Arc<Vec<Vec<Complex32>>>,
     // Half-open bin range this attempt searches — the full sweep until the
     // front-end LO offset is known (see `acquisition_init`).
     bin_range: (usize, usize),
     // Reused mix/correlation scratch (one code period of samples).
-    buf: Vec<Complex64>,
+    buf: Vec<Complex32>,
 }
 
 /// Bin range covering `center_hz ± spread_hz` of the fixed Doppler grid.
@@ -232,7 +232,7 @@ pub struct Channel {
     code_sp: usize,  // samples per upsampled code: e.g. 2046 for L1CA
     tau_dll: f64,    // code-loop group delay for this signal (transmit-time lag comp)
 
-    fft_planner: FftPlanner<f64>,
+    fft_planner: FftPlanner<f32>,
     state: State,
 
     pub ts_sec: f64, // current time
@@ -358,7 +358,7 @@ impl Channel {
     /// Build the per-Doppler-bin carrier replicas once, to be shared (cloned
     /// `Arc`) across every channel — they depend only on `fs`/`fi`/`code_sp`, not
     /// the PRN. See [`Acquisition::carriers`].
-    pub fn build_carriers(fs: f64, fi: f64, code_sp: usize) -> Arc<Vec<Vec<Complex64>>> {
+    pub fn build_carriers(fs: f64, fi: f64, code_sp: usize) -> Arc<Vec<Vec<Complex32>>> {
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
         Arc::new(
             (0..DOPPLER_SPREAD_BINS)
@@ -377,7 +377,7 @@ impl Channel {
         fi: f64,
         plots: bool,
         pub_state: Arc<Mutex<GnssState>>,
-        carriers: Arc<Vec<Vec<Complex64>>>,
+        carriers: Arc<Vec<Vec<Complex32>>>,
     ) -> Self {
         let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
             panic!(
@@ -410,10 +410,10 @@ impl Channel {
         // Resample the PRN code to the actual samples-per-code-period (code_sp =
         // fs * code_sec), so any sampling rate works. (For fs = 2.046 MHz this is
         // exactly 2 samples/chip, matching the previous hardcoded duplication.)
-        let prn_code: Vec<Complex64> = (0..code_sp)
+        let prn_code: Vec<Complex32> = (0..code_sp)
             .map(|i| {
                 let chip = i * code_len / code_sp;
-                Complex64::new(code_buf[chip] as f64, 0.0)
+                Complex32::new(code_buf[chip] as f32, 0.0)
             })
             .collect();
 
@@ -646,7 +646,7 @@ impl Channel {
         }
     }
 
-    fn acquisition_process(&mut self, iq_vec: &[Complex64]) {
+    fn acquisition_process(&mut self, iq_vec: &[Complex32]) {
         // The feed hands us two code periods; correlate over the most recent one.
         let iq_vec_slice = &iq_vec[self.code_sp..];
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
@@ -664,7 +664,7 @@ impl Channel {
             }
             calc_correlation_inplace(&mut self.fft_planner, &mut acq.buf, &acq.prn_code_fft);
             for (p, v) in acq.sum_p[i].iter_mut().zip(acq.buf.iter()) {
-                *p += v.norm_sqr();
+                *p += v.norm_sqr() as f64;
             }
         }
 
@@ -721,7 +721,7 @@ impl Channel {
 
     fn tracking_compute_correlation(
         &mut self,
-        iq_vec2: &[Complex64],
+        iq_vec2: &[Complex32],
     ) -> (Complex64, Complex64, Complex64, Complex64) {
         let n = self.code_sp as i32;
         let code_idx = *self.hist.code_phase_offset.back().unwrap() as i32;
@@ -760,6 +760,14 @@ impl Channel {
         let code = &self.trk.prn_code;
         let len = sig.len();
 
+        // f64 accumulators: 50k f32 products summed in f32 would cost ~3
+        // significant digits of the discriminator inputs. The multiplies (the
+        // SIMD-heavy part) stay f32.
+        #[inline]
+        fn acc(a: &mut Complex64, p: Complex32) {
+            a.re += p.re as f64;
+            a.im += p.im as f64;
+        }
         let mut corr_prompt = Complex64::default();
         let mut corr_early = Complex64::default();
         let mut corr_late = Complex64::default();
@@ -771,13 +779,13 @@ impl Channel {
         for j in 0..len {
             let sj = sig[j];
             let cj = code[j];
-            corr_prompt += sj * cj;
+            acc(&mut corr_prompt, sj * cj);
             if j + pos < len {
-                corr_early += sj * code[j + pos];
-                corr_late += sig[j + pos] * cj;
+                acc(&mut corr_early, sj * code[j + pos]);
+                acc(&mut corr_late, sig[j + pos] * cj);
             }
             if j + pos_neutral < len {
-                corr_neutral += sj * code[j + pos_neutral];
+                acc(&mut corr_neutral, sj * code[j + pos_neutral]);
             }
         }
 
@@ -1058,7 +1066,7 @@ impl Channel {
         self.trk.txp0 = txp;
     }
 
-    fn tracking_process(&mut self, iq_vec: &[Complex64]) {
+    fn tracking_process(&mut self, iq_vec: &[Complex32]) {
         self.get_code_and_carrier_phase();
         let (c_p, c_e, c_l, c_n) = self.tracking_compute_correlation(iq_vec);
         self.hist.corr_p.push_back(c_p);
@@ -1138,7 +1146,7 @@ impl Channel {
         }
     }
 
-    pub fn process_samples(&mut self, iq_vec: &[Complex64], ts_sec: f64) {
+    pub fn process_samples(&mut self, iq_vec: &[Complex32], ts_sec: f64) {
         self.ts_sec = ts_sec;
 
         match self.state {

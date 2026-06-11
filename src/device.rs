@@ -1,4 +1,4 @@
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::Complex32;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,7 +9,7 @@ use crate::receiver::IQReader;
 
 pub struct RtlSdrDevice {
     controller: rtlsdr_mt::Controller,
-    iq_deque: Arc<Mutex<VecDeque<Vec<Complex64>>>>,
+    iq_deque: Arc<Mutex<VecDeque<Vec<Complex32>>>>,
     num_samples_total: Arc<Mutex<usize>>,
     num_samples: Arc<Mutex<usize>>,
     num_sleep: u64,
@@ -32,7 +32,7 @@ impl IQReader for RtlSdrDevice {
         &mut self,
         _off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         loop {
             if *self.num_samples.lock().unwrap() >= num_samples {
                 break;
@@ -118,11 +118,11 @@ impl RtlSdrDevice {
                 log::warn!("starting async_read");
                 reader
                     .read_async(0, 0, |array| {
-                        let mut v = vec![Complex64::default(); array.len()];
+                        let mut v = vec![Complex32::default(); array.len()];
                         for i in 0..array.len() / 2 {
-                            let re = (array[2 * i] as f64 - 127.3) / 128.0;
-                            let im = (array[2 * i + 1] as f64 - 127.3) / 128.0;
-                            v[i] = Complex64 { re, im };
+                            let re = (array[2 * i] as f32 - 127.3) / 128.0;
+                            let im = (array[2 * i + 1] as f32 - 127.3) / 128.0;
+                            v[i] = Complex32 { re, im };
                         }
 
                         let n = v.len();

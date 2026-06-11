@@ -1,5 +1,5 @@
 use core::sync::atomic::Ordering;
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::Complex32;
 use std::collections::VecDeque;
 use std::io::Read;
 use std::io::Write;
@@ -15,7 +15,7 @@ use crate::code::Signal;
 use crate::receiver::IQReader;
 
 pub struct RtlSdrTcp {
-    iq_deque: Arc<Mutex<VecDeque<Vec<Complex64>>>>,
+    iq_deque: Arc<Mutex<VecDeque<Vec<Complex32>>>>,
     num_samples_total: Arc<Mutex<usize>>,
     num_samples: Arc<Mutex<usize>>,
     num_sleep: u64,
@@ -42,7 +42,7 @@ impl IQReader for RtlSdrTcp {
         &mut self,
         _off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         loop {
             if *self.num_samples.lock().unwrap() >= num_samples {
                 break;
@@ -122,7 +122,7 @@ impl RtlSdrTcp {
         let th = thread::spawn(move || {
             loop {
                 let mut data = [0u8; 2036 * 2];
-                let mut v = vec![Complex64::default(); data.len()];
+                let mut v = vec![Complex32::default(); data.len()];
                 let res = socket.read_exact(&mut data);
                 if res.is_err() {
                     log::warn!("Failed to read from rtl-sdr");
@@ -131,10 +131,10 @@ impl RtlSdrTcp {
                 }
 
                 for i in 0..data.len() / 2 {
-                    let re = (data[2 * i] as f64 - 127.3) / 128.0;
-                    let im = (data[2 * i + 1] as f64 - 127.3) / 128.0;
+                    let re = (data[2 * i] as f32 - 127.3) / 128.0;
+                    let im = (data[2 * i + 1] as f32 - 127.3) / 128.0;
 
-                    v[i] = Complex64 { re, im };
+                    v[i] = Complex32 { re, im };
                 }
 
                 let n = v.len();

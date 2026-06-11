@@ -2,7 +2,7 @@ use colored::Colorize;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use rayon::prelude::*;
-use rustfft::num_complex::Complex64;
+use rustfft::num_complex::Complex32;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,18 +27,18 @@ pub trait IQReader {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>>;
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>>;
 }
 
 /// In-memory IQ source: serves slices of a pre-loaded sample buffer and reports
 /// "end of file" past the end, matching the `IQRecording` contract. Lets tests
 /// and synthetic-signal harnesses drive `Receiver`/`Channel` without a file.
 pub struct MockIQReader {
-    samples: Vec<Complex64>,
+    samples: Vec<Complex32>,
 }
 
 impl MockIQReader {
-    pub fn new(samples: Vec<Complex64>) -> Self {
+    pub fn new(samples: Vec<Complex32>) -> Self {
         Self { samples }
     }
 }
@@ -48,7 +48,7 @@ impl IQReader for MockIQReader {
         &mut self,
         off_samples: usize,
         num_samples: usize,
-    ) -> Result<Vec<Complex64>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
         let end = off_samples + num_samples;
         if end > self.samples.len() {
             return Err("end of file".into());
@@ -105,7 +105,7 @@ pub struct Receiver {
     fs: f64,
     code_period_sec: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
     off_samples: usize,
-    cached_iq_vec: Vec<Complex64>,
+    cached_iq_vec: Vec<Complex32>,
     cached_ts_sec_tail: f64,
     channels: HashMap<SV, Channel>,
     /// Shared UI/state handle, so the receiver can publish OSNMA verification
@@ -424,7 +424,7 @@ impl Receiver {
             fs: cfg.fs,
             code_period_sec,
             off_samples: cfg.off_msec * period_sp,
-            cached_iq_vec: Vec::<Complex64>::new(),
+            cached_iq_vec: Vec::<Complex32>::new(),
             cached_ts_sec_tail: 0.0,
             channels,
             pub_state: state.clone(),
@@ -441,7 +441,7 @@ impl Receiver {
         }
     }
 
-    fn fetch_samples_msec(&mut self) -> Result<(Vec<Complex64>, f64), Box<dyn std::error::Error>> {
+    fn fetch_samples_msec(&mut self) -> Result<(Vec<Complex32>, f64), Box<dyn std::error::Error>> {
         let num_samples = if self.cached_iq_vec.is_empty() {
             2 * self.period_sp
         } else {
@@ -786,15 +786,15 @@ mod tests {
 
     #[test]
     fn mock_reader_serves_slices_and_eof() {
-        let samples: Vec<Complex64> = (0..100).map(|i| Complex64::new(i as f64, 0.0)).collect();
+        let samples: Vec<Complex32> = (0..100).map(|i| Complex32::new(i as f32, 0.0)).collect();
         let mut r = MockIQReader::new(samples);
 
         let a = r.get_iq_data(0, 10).unwrap();
         assert_eq!(a.len(), 10);
-        assert_eq!(a[0], Complex64::new(0.0, 0.0));
+        assert_eq!(a[0], Complex32::new(0.0, 0.0));
 
         let b = r.get_iq_data(10, 10).unwrap();
-        assert_eq!(b[0], Complex64::new(10.0, 0.0));
+        assert_eq!(b[0], Complex32::new(10.0, 0.0));
 
         assert!(
             r.get_iq_data(95, 10).is_err(),
