@@ -1237,6 +1237,135 @@ mod tests {
         ((lat - tlat) * 111_000.0).hypot((lon - tlon) * 111_000.0 * tlat.to_radians().cos())
     }
 
+    /// Weighted Gauss-Newton fix over (x, y, z, c·dt, c·ISB_gal) — an
+    /// independent cross-check of gnss-rtk, adding the two things it lacks for
+    /// a mixed pool: per-measurement weights (its measurement sigma is
+    /// literally `1.0 // TODO` in 0.8) and an inter-system bias state. Weights
+    /// are self-calibrated: solve once equal-weighted, set each
+    /// constellation's sigma to its residual RMS, solve again — no hand-tuned
+    /// constants. Returns (fix_ecef, c·dt m, c·ISB m, per-constellation σ m).
+    fn wls_fix(
+        ephs: &[RxEphemeris],
+        x0: [f64; 3],
+    ) -> ([f64; 3], f64, f64, HashMap<Constellation, f64>) {
+        use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
+        use gnss_rtk::prelude::Duration;
+
+        // Fixed per-SV quantities: the measurement (pr + c·clk) and the SV
+        // position rotated into the reception frame (functions of t_tx/now
+        // only, independent of the position iterate).
+        let tx: Vec<_> = ephs
+            .iter()
+            .map(|e| {
+                let elapsed = (e.trk_phase - e.code_off_sec) - e.tow_trk_phase;
+                e.tx_tow_gpst + Duration::from_seconds(elapsed)
+            })
+            .collect();
+        let now = *tx.iter().max().unwrap() + Duration::from_seconds(0.070);
+        let (mut meas, mut svp, mut gal) = (Vec::new(), Vec::new(), Vec::new());
+        for (e, t_tx) in ephs.iter().zip(&tx) {
+            let pr_sec = (now - *t_tx).to_seconds();
+            let clk = crate::solver::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
+            let s = crate::solver::compute_sv_position_ecef(e, *t_tx);
+            let w = EARTH_ROTATION_RATE * pr_sec;
+            let (cw, sw) = (w.cos(), w.sin());
+            meas.push(pr_sec * SPEED_OF_LIGHT + clk);
+            svp.push([cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2]);
+            gal.push(e.sv.constellation == Constellation::Galileo);
+        }
+
+        let mut x = x0;
+        let (mut cdt, mut isb) = (0.0f64, 0.0f64);
+        let mut sigma = HashMap::<Constellation, f64>::new();
+        let cons_of = |g: bool| {
+            if g {
+                Constellation::Galileo
+            } else {
+                Constellation::GPS
+            }
+        };
+        // The ISB state is only observable with both constellations present;
+        // single-constellation pools solve the plain 4-state system.
+        let ns = if gal.iter().any(|&g| g) && gal.iter().any(|&g| !g) {
+            5
+        } else {
+            4
+        };
+
+        for _pass in 0..2 {
+            for _it in 0..8 {
+                // Normal equations A·dx = b for H_i = [−û, 1, gal_i] and
+                // r_i = meas_i − (ρ_i + c·dt + gal_i·c·ISB), weight 1/σ².
+                let (mut a, mut b) = ([[0.0f64; 5]; 5], [0.0f64; 5]);
+                for i in 0..meas.len() {
+                    let d = [svp[i][0] - x[0], svp[i][1] - x[1], svp[i][2] - x[2]];
+                    let rho = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                    let h = [
+                        -d[0] / rho,
+                        -d[1] / rho,
+                        -d[2] / rho,
+                        1.0,
+                        if gal[i] { 1.0 } else { 0.0 },
+                    ];
+                    let r = meas[i] - (rho + cdt + if gal[i] { isb } else { 0.0 });
+                    let w = 1.0 / sigma.get(&cons_of(gal[i])).copied().unwrap_or(1.0).powi(2);
+                    for j in 0..ns {
+                        b[j] += w * h[j] * r;
+                        for k in 0..ns {
+                            a[j][k] += w * h[j] * h[k];
+                        }
+                    }
+                }
+                // Solve the 5×5 system (Gauss-Jordan, partial pivoting).
+                let mut m = [[0.0f64; 6]; 5];
+                for j in 0..ns {
+                    m[j][..5].copy_from_slice(&a[j]);
+                    m[j][5] = b[j];
+                }
+                for col in 0..ns {
+                    let p = (col..ns)
+                        .max_by(|&r1, &r2| m[r1][col].abs().total_cmp(&m[r2][col].abs()))
+                        .unwrap();
+                    m.swap(col, p);
+                    let pivot = m[col];
+                    for (row, mrow) in m.iter_mut().enumerate().take(ns) {
+                        if row != col {
+                            let f = mrow[col] / pivot[col];
+                            for (k, pk) in pivot.iter().enumerate().skip(col) {
+                                mrow[k] -= f * pk;
+                            }
+                        }
+                    }
+                }
+                let dx: Vec<f64> = (0..ns).map(|j| m[j][5] / m[j][j]).collect();
+                x[0] += dx[0];
+                x[1] += dx[1];
+                x[2] += dx[2];
+                cdt += dx[3];
+                if ns == 5 {
+                    isb += dx[4];
+                }
+                if dx.iter().map(|v| v * v).sum::<f64>().sqrt() < 1e-4 {
+                    break;
+                }
+            }
+            // Self-calibrate: each constellation's residual RMS becomes its σ.
+            let mut acc = HashMap::<Constellation, (f64, usize)>::new();
+            for i in 0..meas.len() {
+                let d = [svp[i][0] - x[0], svp[i][1] - x[1], svp[i][2] - x[2]];
+                let rho = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                let r = meas[i] - (rho + cdt + if gal[i] { isb } else { 0.0 });
+                let e = acc.entry(cons_of(gal[i])).or_insert((0.0, 0));
+                e.0 += r * r;
+                e.1 += 1;
+            }
+            for (c, (ss, n)) in acc {
+                sigma.insert(c, (ss / n as f64).sqrt().max(1.0));
+            }
+        }
+        (x, cdt, isb, sigma)
+    }
+
     /// Per-SV pseudorange residual (m) of `ephs`' snapshots against a receiver
     /// position: pr + c·clk − geometric range, the same t_tx / Sagnac math as
     /// compute_position's RESID diagnostic. Within one constellation the
@@ -1414,6 +1543,41 @@ mod tests {
         eprintln!(
             "apparent GPS-GAL system bias after correction: {bias:+.1} m ({:+.1} ns)",
             bias / crate::constants::SPEED_OF_LIGHT * 1e9
+        );
+
+        // The weighted + ISB solve: what gnss-rtk's equal-weight, single-clock
+        // model cannot do with this pool. Per-constellation sigmas are
+        // self-calibrated from residual RMS; the ISB state absorbs the common
+        // Galileo bias instead of letting it leak into position.
+        let to_geo = |p: [f64; 3]| {
+            let (la, lo, _) = map_3d::ecef2geodetic(p[0], p[1], p[2], map_3d::Ellipsoid::WGS84);
+            (la.to_degrees(), lo.to_degrees())
+        };
+        let (wg, _, _, _) = wls_fix(&gps, site);
+        let (wlat_g, wlon_g) = to_geo(wg);
+        let (wc, _, wisb, wsig) = wls_fix(&merged, site);
+        let (wlat, wlon) = to_geo(wc);
+        let sig = |c: Constellation| wsig.get(&c).copied().unwrap_or(0.0);
+        eprintln!(
+            "WLS GPS-only : {wlat_g:.6},{wlon_g:.6}  err {:.0} m",
+            ion_site_error_m(wlat_g, wlon_g)
+        );
+        eprintln!(
+            "WLS combined : {wlat:.6},{wlon:.6}  err {:.0} m  ISB {wisb:+.1} m ({:+.1} ns)  sigma GPS {:.0} m / GAL {:.0} m",
+            ion_site_error_m(wlat, wlon),
+            wisb / crate::constants::SPEED_OF_LIGHT * 1e9,
+            sig(Constellation::GPS),
+            sig(Constellation::Galileo)
+        );
+        // Weighted + ISB, the combined solve must not be dragged below the
+        // quality of its best constituent (the point of this experiment).
+        let (wg_err, wc_err) = (
+            ion_site_error_m(wlat_g, wlon_g),
+            ion_site_error_m(wlat, wlon),
+        );
+        assert!(
+            wc_err <= wg_err + 30.0,
+            "weighted combined fix degraded: {wc_err:.0} m vs WLS GPS-only {wg_err:.0} m"
         );
 
         // Gates lock the experimental facts, not accuracy (the site truth is
