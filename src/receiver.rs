@@ -1480,96 +1480,11 @@ mod tests {
             gal.push(e.sv.constellation == Constellation::Galileo);
         }
 
-        let mut x = x0;
-        let (mut cdt, mut isb) = (0.0f64, 0.0f64);
-        let mut sigma = HashMap::<Constellation, f64>::new();
-        let cons_of = |g: bool| {
-            if g {
-                Constellation::Galileo
-            } else {
-                Constellation::GPS
-            }
-        };
-        // The ISB state is only observable with both constellations present;
-        // single-constellation pools solve the plain 4-state system.
-        let ns = if gal.iter().any(|&g| g) && gal.iter().any(|&g| !g) {
-            5
-        } else {
-            4
-        };
-
-        for _pass in 0..2 {
-            for _it in 0..8 {
-                // Normal equations A·dx = b for H_i = [−û, 1, gal_i] and
-                // r_i = meas_i − (ρ_i + c·dt + gal_i·c·ISB), weight 1/σ².
-                let (mut a, mut b) = ([[0.0f64; 5]; 5], [0.0f64; 5]);
-                for i in 0..meas.len() {
-                    let d = [svp[i][0] - x[0], svp[i][1] - x[1], svp[i][2] - x[2]];
-                    let rho = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    let h = [
-                        -d[0] / rho,
-                        -d[1] / rho,
-                        -d[2] / rho,
-                        1.0,
-                        if gal[i] { 1.0 } else { 0.0 },
-                    ];
-                    let r = meas[i] - (rho + cdt + if gal[i] { isb } else { 0.0 });
-                    let w = 1.0 / sigma.get(&cons_of(gal[i])).copied().unwrap_or(1.0).powi(2);
-                    for j in 0..ns {
-                        b[j] += w * h[j] * r;
-                        for k in 0..ns {
-                            a[j][k] += w * h[j] * h[k];
-                        }
-                    }
-                }
-                // Solve the 5×5 system (Gauss-Jordan, partial pivoting).
-                let mut m = [[0.0f64; 6]; 5];
-                for j in 0..ns {
-                    m[j][..5].copy_from_slice(&a[j]);
-                    m[j][5] = b[j];
-                }
-                for col in 0..ns {
-                    let p = (col..ns)
-                        .max_by(|&r1, &r2| m[r1][col].abs().total_cmp(&m[r2][col].abs()))
-                        .unwrap();
-                    m.swap(col, p);
-                    let pivot = m[col];
-                    for (row, mrow) in m.iter_mut().enumerate().take(ns) {
-                        if row != col {
-                            let f = mrow[col] / pivot[col];
-                            for (k, pk) in pivot.iter().enumerate().skip(col) {
-                                mrow[k] -= f * pk;
-                            }
-                        }
-                    }
-                }
-                let dx: Vec<f64> = (0..ns).map(|j| m[j][5] / m[j][j]).collect();
-                x[0] += dx[0];
-                x[1] += dx[1];
-                x[2] += dx[2];
-                cdt += dx[3];
-                if ns == 5 {
-                    isb += dx[4];
-                }
-                if dx.iter().map(|v| v * v).sum::<f64>().sqrt() < 1e-4 {
-                    break;
-                }
-            }
-            // Self-calibrate: each constellation's residual RMS becomes its σ.
-            let mut acc = HashMap::<Constellation, (f64, usize)>::new();
-            for i in 0..meas.len() {
-                let d = [svp[i][0] - x[0], svp[i][1] - x[1], svp[i][2] - x[2]];
-                let rho = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                let r = meas[i] - (rho + cdt + if gal[i] { isb } else { 0.0 });
-                let e = acc.entry(cons_of(gal[i])).or_insert((0.0, 0));
-                e.0 += r * r;
-                e.1 += 1;
-            }
-            for (c, (ss, n)) in acc {
-                sigma.insert(c, (ss / n as f64).sqrt().max(1.0));
-            }
-        }
-        (x, cdt, isb, sigma)
+        // The math itself is the production solver (promoted to solver.rs as
+        // the live path); this helper only prepares raw uncorrected
+        // measurements from the snapshots.
+        let sol = crate::solver::wls_solve(&meas, &svp, &gal, x0).expect("wls_solve");
+        (sol.pos, sol.cdt_m, sol.isb_m, sol.sigma)
     }
 
     /// Per-SV pseudorange residual (m) of `ephs`' snapshots against a receiver
