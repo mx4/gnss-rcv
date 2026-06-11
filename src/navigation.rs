@@ -101,7 +101,7 @@ impl Channel {
                         map_3d::Ellipsoid::WGS84,
                     );
                     let geo = crate::sbas_corr::mt9_geo_position_ecef(&msg.bits);
-                    let (el, az) = crate::solver::elevation_azimuth(
+                    let (el, az) = crate::models::elevation_azimuth(
                         Vector3::new(x, y, z),
                         (geo[0], geo[1], geo[2]),
                     );

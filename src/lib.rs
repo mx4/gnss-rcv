@@ -1,5 +1,6 @@
 pub mod almanac;
 pub mod app;
+pub mod bits;
 pub mod channel;
 pub mod code;
 pub mod constants;
@@ -9,6 +10,7 @@ pub mod fec;
 mod galileo_e1_codes;
 pub mod galileo_inav;
 pub mod gps_lnav;
+pub mod models;
 pub mod navigation;
 pub mod network;
 pub mod osnma;
@@ -23,6 +25,7 @@ pub mod solver;
 pub mod state;
 pub mod synth;
 pub mod util;
+pub mod wls;
 
 pub use app::egui_main;
 

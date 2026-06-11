@@ -10,12 +10,12 @@
 //! (parity → field parse → ephemeris assembly) with no recording.
 
 use crate::{
+    bits::{
+        bits_equal, bits_opposed, getbits, getbits2, getbitu, getbitu2, hex_str, setbitu, xor_bits,
+    },
     channel::Channel,
     constants::{P2_5, P2_19, P2_24, P2_27, P2_29, P2_30, P2_31, P2_33, P2_43, P2_55, SC2RAD},
     ephemeris::Ephemeris,
-    util::{
-        bits_equal, bits_opposed, getbits, getbits2, getbitu, getbitu2, hex_str, setbitu, xor_bits,
-    },
 };
 use colored::Colorize;
 use gnss_rs::sv::SV;

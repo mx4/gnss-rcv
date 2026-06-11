@@ -17,7 +17,7 @@ use crate::recording::IQFileType;
 use crate::recordings::{self, Recording};
 use crate::state::GnssState;
 
-const WIDTH: usize = 900;
+const WIDTH: usize = 650;
 const HEIGHT: usize = 700;
 
 /// Width of the left control/status column in the top panel (the sky plot fills
@@ -378,12 +378,12 @@ impl GnssRcvApp {
         let paused = self.paused.load(Ordering::SeqCst);
         let accent = ui.visuals().selection.bg_fill;
         let red = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
-        let h = ui.spacing().interact_size.y;
+        let h = ui.spacing().interact_size.y * 1.6;
         ui.horizontal(|ui| {
             // Primary run control: start (idle) -> pause (running) -> resume
-            // (paused). It takes the full row when idle, and shares it with the
-            // red stop button while running.
-            let stop_w = if active { 90.0 } else { 0.0 };
+            // (paused). It takes the full box when idle, and shares it with the
+            // red stop button while running — staying the larger of the two.
+            let stop_w = if active { 46.0 } else { 0.0 };
             let gap = if active {
                 ui.spacing().item_spacing.x
             } else {
@@ -486,86 +486,99 @@ impl GnssRcvApp {
                             });
                             self.update_controls(ui);
                         });
-                        // Status box.
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.monospace(&tow_text);
-                                if has_ion {
-                                    ui.separator();
-                                    ui.monospace("ion: 1");
-                                }
-                                if has_utc {
-                                    ui.separator();
-                                    ui.monospace("utc: 1");
-                                }
-                                // EGNOS/SBAS corrections are live and feeding
-                                // the solver — SBAS-orange, like its SVs.
-                                let (n_igp, n_fast, n_long) = egnos;
-                                if n_igp + n_fast + n_long > 0 {
-                                    ui.separator();
-                                    ui.colored_label(
-                                        constellation_color(Constellation::SBAS),
-                                        "EGNOS",
-                                    )
-                                    .on_hover_text(format!(
-                                        "SBAS corrections applied to the fix: iono grid \
+                        // Position-fix box, with the run controls boxed to its right.
+                        ui.horizontal(|ui| {
+                            let btn_box_w = 130.0_f32;
+                            let status_w = (ui.available_width() - btn_box_w - 40.0).max(240.0);
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(status_w);
+                                ui.horizontal(|ui| {
+                                    ui.monospace(&tow_text);
+                                    if has_ion {
+                                        ui.separator();
+                                        ui.monospace("ion: 1");
+                                    }
+                                    if has_utc {
+                                        ui.separator();
+                                        ui.monospace("utc: 1");
+                                    }
+                                    // EGNOS/SBAS corrections are live and feeding
+                                    // the solver — SBAS-orange, like its SVs.
+                                    let (n_igp, n_fast, n_long) = egnos;
+                                    if n_igp + n_fast + n_long > 0 {
+                                        ui.separator();
+                                        ui.colored_label(
+                                            constellation_color(Constellation::SBAS),
+                                            "EGNOS",
+                                        )
+                                        .on_hover_text(
+                                            format!(
+                                                "SBAS corrections applied to the fix: iono grid \
                                          {n_igp} IGPs (per satellite, where the grid \
                                          covers its pierce point) · {n_fast} fast + \
                                          {n_long} long-term clock/ephemeris corrections"
-                                    ));
+                                            ),
+                                        );
+                                    }
+                                });
+                                if let Some(url) = &pos_url {
+                                    ui.hyperlink_to(&pos_text, url);
+                                } else {
+                                    ui.monospace(&pos_text);
                                 }
-                            });
-                            if let Some(url) = &pos_url {
-                                ui.hyperlink_to(&pos_text, url);
-                            } else {
-                                ui.monospace(&pos_text);
-                            }
-                            // Fix precision: HDOP/VDOP geometry factors (lower is
-                            // better, HDOP colour-coded by quality) + SVs used.
-                            if let Some((hdop, vdop, nsv)) = dop {
-                                ui.horizontal(|ui| {
-                                    ui.weak("precision:");
-                                    ui.colored_label(dop_color(hdop), format!("HDOP {hdop:.1}"));
-                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
-                                })
-                                .response
-                                .on_hover_text(
-                                    "Dilution of precision: how much satellite \
+                                // Fix precision: HDOP/VDOP geometry factors (lower is
+                                // better, HDOP colour-coded by quality) + SVs used.
+                                if let Some((hdop, vdop, nsv)) = dop {
+                                    ui.horizontal(|ui| {
+                                        ui.weak("precision:");
+                                        ui.colored_label(
+                                            dop_color(hdop),
+                                            format!("HDOP {hdop:.1}"),
+                                        );
+                                        ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Dilution of precision: how much satellite \
                                      geometry amplifies range error (lower is \
                                      better — <2 excellent, 2-5 good, 5-10 \
                                      moderate). VDOP is vertical, then the satellite \
                                      count used in the fix.",
-                                );
-                            }
-                            // OSNMA DSM-KROOT assembly: the TESLA root key arrives
-                            // one block per 30 s subframe, and full authentication
-                            // can't complete until every block is in.
-                            if let Some((got, total)) = osnma_kroot {
-                                let done = got >= total;
-                                let label = if done {
-                                    format!("KROOT ✓  {got}/{total} blocks")
-                                } else {
-                                    format!("KROOT  {got}/{total} blocks")
-                                };
-                                let fill = if done {
-                                    egui::Color32::from_rgb(80, 200, 100)
-                                } else {
-                                    egui::Color32::from_rgb(70, 110, 180)
-                                };
-                                ui.add(
-                                    egui::ProgressBar::new(got as f32 / total as f32)
-                                        .text(label)
-                                        .fill(fill),
-                                )
-                                .on_hover_text(
-                                    "OSNMA TESLA root key (DSM-KROOT): blocks \
+                                    );
+                                }
+                                // OSNMA DSM-KROOT assembly: the TESLA root key arrives
+                                // one block per 30 s subframe, and full authentication
+                                // can't complete until every block is in.
+                                if let Some((got, total)) = osnma_kroot {
+                                    let done = got >= total;
+                                    let label = if done {
+                                        format!("KROOT ✓  {got}/{total} blocks")
+                                    } else {
+                                        format!("KROOT  {got}/{total} blocks")
+                                    };
+                                    let fill = if done {
+                                        egui::Color32::from_rgb(80, 200, 100)
+                                    } else {
+                                        egui::Color32::from_rgb(70, 110, 180)
+                                    };
+                                    ui.add(
+                                        egui::ProgressBar::new(got as f32 / total as f32)
+                                            .text(label)
+                                            .fill(fill),
+                                    )
+                                    .on_hover_text(
+                                        "OSNMA TESLA root key (DSM-KROOT): blocks \
                                      assembled / needed before nav data can be \
                                      authenticated",
-                                );
-                            }
+                                    );
+                                }
+                            });
+                            // Run controls, boxed to the right of the position-fix box.
+                            egui::Frame::group(ui.style()).show(ui, |ui| {
+                                ui.set_width(btn_box_w);
+                                self.update_start_stop(ui, ctx);
+                            });
                         });
-                        // Start/stop, sitting to the left of the sky plot.
-                        self.update_start_stop(ui, ctx);
                     });
                     // Right column: sky plot, pinned to the right edge.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {

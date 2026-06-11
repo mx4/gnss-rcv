@@ -1,6 +1,6 @@
 use crate::{
+    bits::{getbitu, getbitu2},
     constants::{P2_11, P2_19, P2_20, P2_21, P2_23, P2_38, SC2RAD},
-    util::{getbitu, getbitu2},
 };
 
 #[derive(Default, Clone, Debug)]
