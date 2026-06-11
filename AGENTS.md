@@ -341,6 +341,16 @@ The rest are correct refactors but mostly scaffolding until there's a second
 - Galileo E1 needs a BOC(1,1)-aware correlator, embedded 4092-chip memory codes,
   and an I/NAV decoder (FEC + interleaving); GLONASS L1 is FDMA (per-SV carrier),
   which breaks the single-IF assumption end-to-end. Both rank well below QZSS.
+- ~~**Hatch filter (carrier smoothing)**~~: implemented and measured — then
+  reverted as redundant. A per-SV Hatch filter on the solver's pseudoranges
+  (predict by −λ·Δadr, blend the code at 1/N) produced **bit-identical fixes**
+  on CTTC with smoothing on vs off: the tracking loop is *carrier-aided*
+  (`code_off -= doppler/fc` every period, DLL nudging at τ≈0.16 s), so the
+  pseudoranges are already carrier-smoothed at the loop level and an explicit
+  Hatch stage has nothing left to remove (σ_gps ≈ 1.6 m raw single-frequency
+  residual RMS on CTTC corroborates). Don't re-attempt without first widening
+  the DLL bandwidth or de-aiding the code loop — the smoothing already lives
+  there.
 - Trait-based ionosphere model (Klobuchar / NeQuick / none) in
   [solver.rs](src/solver.rs).
 
