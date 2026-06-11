@@ -382,11 +382,23 @@ impl Receiver {
         // the signal's, not a hardcoded 1 ms (E1 is 4 ms).
         let code_period_sec = cfg.sig.code_period_sec();
         let period_sp = (code_period_sec * cfg.fs) as usize;
+        // Build the acquisition carrier replicas once and share them across every
+        // channel (period_sp == code_sp). PRN-independent, so this is the same data
+        // for all 36 — duplicating it per channel was the 50 MHz OOM.
+        let carriers = Channel::build_carriers(cfg.fs, cfg.fi, period_sp);
         let mut channels = HashMap::<SV, Channel>::new();
         for sv in get_sat_list(&cfg.sats, cfg.sig, cfg.sbas, cfg.qzss) {
             channels.insert(
                 sv,
-                Channel::new(cfg.sig, sv, cfg.fs, cfg.fi, cfg.plots, state.clone()),
+                Channel::new(
+                    cfg.sig,
+                    sv,
+                    cfg.fs,
+                    cfg.fi,
+                    cfg.plots,
+                    state.clone(),
+                    carriers.clone(),
+                ),
             );
         }
 
@@ -749,7 +761,10 @@ fn print_summary(sum: &RunSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::synth::{GeoFeed, SynthE1Sv, SynthSv, pick_geo_constellation, synth_e1, synth_l1ca};
+    use crate::synth::{
+        GeoFeed, SynthE1Sv, SynthSv, pick_geo_constellation, pick_geo_constellation_gal, synth_e1,
+        synth_l1ca,
+    };
 
     #[test]
     fn mock_reader_serves_slices_and_eof() {
@@ -990,6 +1005,59 @@ mod tests {
         assert!(err < 15.0, "fix error {err:.1} m vs truth");
     }
 
+    // The Galileo twin of the hermetic positioning regression: a
+    // geometry-consistent E1-B scene (BOC(1,1) codes, full I/NAV pages with
+    // ICD-convention word-5 TOWs) must drive the real pipeline — including the
+    // I/NAV decoder's 2.0 s anchor-latency correction — to a Galileo-only fix
+    // within metres of the truth. Without the latency correction this scene
+    // carries a ~2 s common transmit-time error: the solve still converges (a
+    // common offset folds into the clock) but the absolute t_tx is wrong —
+    // exactly what broke the GPS+Galileo merge.
+    #[test]
+    #[ignore] // ~12 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn synthetic_e1_geometry_solves_to_truth() {
+        let (fs, fi) = (4_092_000.0, 0.0);
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
+        let ephs = pick_geo_constellation_gal(truth, 1300, 36_000, 6);
+        assert!(ephs.len() >= 5, "picked only {} SVs", ephs.len());
+        let sats = ephs
+            .iter()
+            .map(|e| e.sv.prn.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let feed = GeoFeed::new_e1(&ephs, truth, fs, fi, 25_000, 45.0, None);
+        let state = Arc::new(Mutex::new(GnssState::new()));
+        let cfg = ReceiverConfig {
+            sats,
+            sig: Signal::GalileoE1b,
+            fs,
+            fi,
+            exit_on_fix: true,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(feed),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            state.clone(),
+        );
+        rx.run_loop(0);
+
+        let st = state.lock().unwrap();
+        assert!(st.longitude != 0.0, "no fix from the synthetic E1 scene");
+        let (x, y, z) = map_3d::geodetic2ecef(
+            st.latitude.to_radians(),
+            st.longitude.to_radians(),
+            st.height,
+            map_3d::Ellipsoid::WGS84,
+        );
+        let err =
+            ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt();
+        eprintln!("synthetic E1 fix error vs truth: {err:.2} m");
+        assert!(err < 15.0, "E1 fix error {err:.1} m vs truth");
+    }
+
     // The same scene in AWGN at a realistic open-sky 44 dB-Hz (deterministic
     // seed): adds acquisition/tracking/DLL noise on top of the systematic
     // error, so the gate is looser. Locks the pipeline's noise robustness —
@@ -1000,6 +1068,92 @@ mod tests {
     fn synthetic_geometry_solves_to_truth_in_noise() {
         let err = run_geo_scene_fix_error_m("noisy", 44.0, Some(0x6E55));
         assert!(err < 30.0, "noisy fix error {err:.1} m vs truth");
+    }
+
+    /// Build a geometric scene for `ephs`, run the full receiver over it, and
+    /// measure each anchored channel's transmit-time error directly against
+    /// the generator's own ground truth: δ = true_t_tx − receiver_t_tx at the
+    /// channel's final snapshot. Solver-free — no least-squares absorption can
+    /// hide an anchor offset here.
+    fn anchor_deltas(
+        ephs: &[crate::ephemeris::Ephemeris],
+        truth: [f64; 3],
+        sig: Signal,
+        fs: f64,
+        num_msec: usize,
+    ) -> Vec<(SV, f64)> {
+        use gnss_rtk::prelude::Duration;
+        let mk = || match sig {
+            Signal::L1ca => GeoFeed::new(ephs, truth, fs, 0.0, num_msec, 45.0, None),
+            _ => GeoFeed::new_e1(ephs, truth, fs, 0.0, num_msec, 45.0, None),
+        };
+        let (feed, twin) = (mk(), mk());
+        let sats = ephs
+            .iter()
+            .map(|e| e.sv.prn.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let cfg = ReceiverConfig {
+            sats,
+            sig,
+            fs,
+            fi: 0.0,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(feed),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        );
+        rx.run_loop(0);
+
+        let mut out: Vec<(SV, f64)> = rx
+            .channels
+            .values()
+            .filter(|ch| ch.is_state_tracking() && ch.nav.eph.tx_anchored)
+            .map(|ch| {
+                let e = &ch.nav.eph;
+                let rx_tx = e.tx_tow_gpst
+                    + Duration::from_seconds((e.trk_phase - e.code_off_sec) - e.tow_trk_phase);
+                // The snapshot phase corresponds to the end of the channel's
+                // last prompt window, at ts + code_off (sub-ms past ts).
+                let t_snap = ch.ts_sec;
+                let truth_tx = twin.true_transmit_time(ch.sv, t_snap).unwrap();
+                (ch.sv, (truth_tx - rx_tx).to_seconds())
+            })
+            .collect();
+        out.sort_by_key(|(sv, _)| *sv);
+        out
+    }
+
+    // Direct, solver-free measurement of both nav decoders' transmit-time
+    // anchor conventions against synthetic ground truth. This is the
+    // instrument that resolves the 1.84 s inter-constellation offset the
+    // two-pass LimeSDR experiment measured: each decoder's absolute anchor
+    // latency, per SV, with no least-squares absorption in the way.
+    #[test]
+    #[ignore] // ~15 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn tx_anchor_latency_measured_against_synthetic_truth() {
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
+
+        let gps = pick_geo_constellation(truth, 2348, 36_000, 5);
+        for (sv, d) in anchor_deltas(&gps, truth, Signal::L1ca, 2_046_000.0, 30_000) {
+            eprintln!("LNAV anchor delta {sv}: {:+.4} s", d);
+            assert!(
+                d.abs() < 0.01,
+                "{sv}: LNAV transmit-time anchor off by {d:+.4} s"
+            );
+        }
+
+        let gal = pick_geo_constellation_gal(truth, 1300, 36_000, 5);
+        for (sv, d) in anchor_deltas(&gal, truth, Signal::GalileoE1b, 4_092_000.0, 25_000) {
+            eprintln!("I/NAV anchor delta {sv}: {:+.4} s", d);
+            assert!(
+                d.abs() < 0.01,
+                "{sv}: I/NAV transmit-time anchor off by {d:+.4} s"
+            );
+        }
     }
 
     /// Run one decode pass over the ION LimeSDR capture with the given signal
@@ -1102,18 +1256,15 @@ mod tests {
     //  1. The LNAV 10-bit week (+2048 pin) and the 12-bit GST week disagree by
     //     exactly 1024 weeks on pre-2019 captures — fatal for a merge, invisible
     //     within one constellation. (The "GPS week rollover" roadmap item.)
-    //  2. The two decoders' TOW->phase anchors disagree by exactly 1.8400 s
-    //     (= 460 E1 code periods; 2.0 s page minus 0.16 s / 8 LNAV bits — the
-    //     two decode latencies). Which side carries the absolute offset is NOT
-    //     yet resolved: the GPS chain is synth-validated end-to-end, but the
-    //     Galileo-only solve (5 SVs, 1 DOF) absorbs nearly any common epoch
-    //     error, and the residual diagnostics against the ~100 m site truth are
-    //     confounded. A Galileo GeoFeed (hermetic E1 scene with exact truth)
-    //     will pin the I/NAV anchor convention absolutely.
-    //  3. With the weeks rebased and the empirical 1.84 s alignment applied,
-    //     gnss-rtk solves the mixed 15-SV pool with no special configuration;
-    //     the leftover inter-system bias is ~40 m / ~130 ns (GGTO +
-    //     inter-signal-delay class), not the seconds class.
+    //  2. The two decoders' TOW->phase anchors disagreed by exactly 1.8400 s
+    //     (2.0 s I/NAV page minus 8 LNAV bits — the two structural decode
+    //     latencies, since measured directly against synthetic truth by
+    //     tx_anchor_latency_measured_against_synthetic_truth and corrected in
+    //     nav_anchor_tx). This test now asserts the corrected offset is in the
+    //     GGTO class.
+    //  3. With the weeks rebased, gnss-rtk solves the mixed 15-SV pool with no
+    //     special configuration; the leftover inter-system bias is tens of
+    //     metres (GGTO + inter-signal-delay class).
     #[test]
     #[ignore] // needs resources/ION_LimeSDR_Bands-L1.2xi16 (fetch.py ion-lime); ~1 min
     fn combined_gps_galileo_fix_from_two_passes() {
@@ -1196,27 +1347,8 @@ mod tests {
         };
         let delta_sec = (cmean(Constellation::Galileo) - cmean(Constellation::GPS))
             / crate::constants::SPEED_OF_LIGHT;
-        eprintln!("inter-constellation timing offset: {delta_sec:+.4} s (GAL anchors early)");
+        eprintln!("inter-constellation timing offset: {delta_sec:+.4} s");
 
-        // Page-latency hypothesis: the I/NAV word-5 TOW is paired with the
-        // decode-completion phase ~one 2 s page late, leaving every Galileo
-        // t_tx early by ~the same constant. Test it: shift the Galileo anchors
-        // by the measured offset and check the predictions — the Galileo-only
-        // fix should improve, and the merged solve should become consistent.
-        let mut gal_shifted = gal.clone();
-        for e in &mut gal_shifted {
-            e.tx_tow_gpst += Duration::from_seconds(delta_sec);
-        }
-        let (slat, slon, _) = solve(&gal_shifted);
-        eprintln!(
-            "GAL-only shifted by {delta_sec:+.3} s: {slat:.6},{slon:.6}  err {:.0} m (unshifted {:.0} m)",
-            ion_site_error_m(slat, slon),
-            ion_site_error_m(elat, elon)
-        );
-
-        let mut merged = gps.clone();
-        merged.extend(gal_shifted.iter().copied());
-        let merged = reject_cross_correlations(merged);
         let (clat, clon, cfix) = solve(&merged);
 
         eprintln!(
@@ -1261,14 +1393,14 @@ mod tests {
         );
 
         // Gates lock the experimental facts, not accuracy (the site truth is
-        // only ~100 m precise): the measured inter-decoder anchor offset is
-        // the reproducible 1.84 s constant; the merged solve must use both
-        // constellations, land within the same error class, and leave a
-        // residual system bias in the GGTO/inter-signal class (tens of m),
-        // not the seconds class.
+        // only ~100 m precise): with the decoders' structural anchor latencies
+        // corrected (nav_anchor_tx), the inter-constellation timing offset must
+        // be in the GGTO/inter-signal class (sub-µs), not the 1.84 s the
+        // uncorrected anchors carried; the merged solve must use both
+        // constellations and land within the single-constellation error class.
         assert!(
-            (delta_sec - 1.84).abs() < 0.05,
-            "inter-decoder anchor offset changed: {delta_sec:.4} s (expected ~1.84)"
+            delta_sec.abs() < 1e-5,
+            "inter-constellation timing offset {delta_sec:+.6} s — anchor latency regression?"
         );
         assert!(n > gps.len().max(gal.len()), "merge must add SVs");
         let c_err = ion_site_error_m(clat, clon);

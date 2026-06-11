@@ -151,10 +151,13 @@ impl History {
 pub struct Acquisition {
     prn_code_fft: Vec<Complex64>,
     sum_p: Vec<Vec<f64>>,
-    // Pre-computed carrier replica for each Doppler bin. The bins are fixed, so
-    // building these once avoids a sin/cos per sample per bin on every 1 ms
-    // acquisition step (the dominant CPU cost while searching for SVs).
-    carriers: Vec<Vec<Complex64>>,
+    // Pre-computed carrier replica for each Doppler bin. The bins are fixed and
+    // PRN-independent (they depend only on fs/fi/code_sp), so the whole set is
+    // built once by the receiver ([`Channel::build_carriers`]) and *shared* across
+    // every channel — at 50 MHz each set is ~240 MB, so duplicating it per PRN
+    // (36×) was ~8.6 GB and OOM'd. Sharing it avoids that and the sin/cos per
+    // sample per bin on every acquisition step (the dominant search-time cost).
+    carriers: Arc<Vec<Vec<Complex64>>>,
 }
 
 /// Per-channel work/quality counters, aggregated and printed at end of run.
@@ -303,6 +306,21 @@ impl Channel {
         self.publish(|cs| cs.cn0 = cn0);
     }
 
+    /// Build the per-Doppler-bin carrier replicas once, to be shared (cloned
+    /// `Arc`) across every channel — they depend only on `fs`/`fi`/`code_sp`, not
+    /// the PRN. See [`Acquisition::carriers`].
+    pub fn build_carriers(fs: f64, fi: f64, code_sp: usize) -> Arc<Vec<Vec<Complex64>>> {
+        let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
+        Arc::new(
+            (0..DOPPLER_SPREAD_BINS)
+                .map(|i| {
+                    let doppler_hz = -DOPPLER_SPREAD_HZ + i as f64 * step_hz;
+                    doppler_shifted_carrier(fi + doppler_hz, 0.0, fs, code_sp)
+                })
+                .collect(),
+        )
+    }
+
     pub fn new(
         sig: Signal,
         sv: SV,
@@ -310,6 +328,7 @@ impl Channel {
         fi: f64,
         plots: bool,
         pub_state: Arc<Mutex<GnssState>>,
+        carriers: Arc<Vec<Vec<Complex64>>>,
     ) -> Self {
         let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
             panic!(
@@ -343,15 +362,6 @@ impl Channel {
 
         let fft_fw = fft_planner.plan_fft_forward(prn_code_fft.len());
         fft_fw.process(&mut prn_code_fft);
-
-        // Pre-compute the carrier replica for each (fixed) acquisition Doppler bin.
-        let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
-        let carriers: Vec<Vec<Complex64>> = (0..DOPPLER_SPREAD_BINS)
-            .map(|i| {
-                let doppler_hz = -DOPPLER_SPREAD_HZ + i as f64 * step_hz;
-                doppler_shifted_carrier(fi + doppler_hz, 0.0, fs, code_sp)
-            })
-            .collect();
 
         pub_state
             .lock()
