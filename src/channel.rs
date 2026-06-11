@@ -342,7 +342,17 @@ impl Channel {
         // Per-signal transmit-time lag compensation: the code (DLL) loop's group
         // delay depends on the correlation peak shape (BOC vs BPSK), see dll_tau.
         let tau_dll = dll_tau(if sig.is_boc11() {
-            DLL_DISC_GAIN_BOC
+            // The BOC discriminator gain depends on the front-end shaping of
+            // the ±half-chip BOC peak: 0.256 was calibrated on the *filtered*
+            // ION LimeSDR capture (docs/dll-group-delay.md), while ideal
+            // unfiltered BOC (synthetic scenes) has a steep BPSK-like slope —
+            // using the filtered value there leaves a Doppler-proportional
+            // pseudorange bias (measured 1.5 km -> 4 m on the hermetic E1 fix
+            // test). GNSS_DLL_GAIN_BOC overrides the default for such sources.
+            std::env::var("GNSS_DLL_GAIN_BOC")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DLL_DISC_GAIN_BOC)
         } else {
             DLL_DISC_GAIN_BPSK
         });

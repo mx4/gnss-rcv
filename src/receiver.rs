@@ -1026,6 +1026,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
 
+        // The scene's BOC is ideal/unfiltered: its E-L discriminator is steep
+        // (BPSK-like), unlike the filtered real captures the default BOC DLL
+        // gain is calibrated for. Without this the tau_dll mismatch leaves a
+        // Doppler-proportional bias (~1.5 km fix error on this scene).
+        unsafe { std::env::set_var("GNSS_DLL_GAIN_BOC", "3.18") };
         let feed = GeoFeed::new_e1(&ephs, truth, fs, fi, 25_000, 45.0, None);
         let state = Arc::new(Mutex::new(GnssState::new()));
         let cfg = ReceiverConfig {
@@ -1052,8 +1057,7 @@ mod tests {
             st.height,
             map_3d::Ellipsoid::WGS84,
         );
-        let err =
-            ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt();
+        let err = ((x - truth[0]).powi(2) + (y - truth[1]).powi(2) + (z - truth[2]).powi(2)).sqrt();
         eprintln!("synthetic E1 fix error vs truth: {err:.2} m");
         assert!(err < 15.0, "E1 fix error {err:.1} m vs truth");
     }
@@ -1137,23 +1141,41 @@ mod tests {
     fn tx_anchor_latency_measured_against_synthetic_truth() {
         let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
 
+        // The pipeline's reference convention: every decoder leaves t_tx early
+        // by the LNAV decode latency (0.160 s) — deliberately uncorrected (see
+        // LNAV_DECODE_LATENCY_SEC). What the GPS+Galileo merge requires is that
+        // both decoders sit at the SAME offset; the I/NAV anchor is aligned to
+        // LNAV by INAV_DECODE_LATENCY_SEC (= 2.000 − 0.160 s).
+        let expect = crate::gps_lnav::LNAV_DECODE_LATENCY_SEC;
+
         let gps = pick_geo_constellation(truth, 2348, 36_000, 5);
-        for (sv, d) in anchor_deltas(&gps, truth, Signal::L1ca, 2_046_000.0, 30_000) {
+        let dg = anchor_deltas(&gps, truth, Signal::L1ca, 2_046_000.0, 30_000);
+        for (sv, d) in &dg {
             eprintln!("LNAV anchor delta {sv}: {:+.4} s", d);
             assert!(
-                d.abs() < 0.01,
-                "{sv}: LNAV transmit-time anchor off by {d:+.4} s"
+                (d - expect).abs() < 0.01,
+                "{sv}: LNAV anchor at {d:+.4} s (convention is {expect:+.3})"
             );
         }
 
         let gal = pick_geo_constellation_gal(truth, 1300, 36_000, 5);
-        for (sv, d) in anchor_deltas(&gal, truth, Signal::GalileoE1b, 4_092_000.0, 25_000) {
+        let de = anchor_deltas(&gal, truth, Signal::GalileoE1b, 4_092_000.0, 25_000);
+        for (sv, d) in &de {
             eprintln!("I/NAV anchor delta {sv}: {:+.4} s", d);
             assert!(
-                d.abs() < 0.01,
-                "{sv}: I/NAV transmit-time anchor off by {d:+.4} s"
+                (d - expect).abs() < 0.01,
+                "{sv}: I/NAV anchor at {d:+.4} s (convention is {expect:+.3})"
             );
         }
+
+        // The merge-critical invariant: identical conventions across signals.
+        let mean = |v: &[(SV, f64)]| v.iter().map(|(_, d)| d).sum::<f64>() / v.len() as f64;
+        let cross = mean(&dg) - mean(&de);
+        eprintln!("LNAV-INAV convention difference: {cross:+.4} s");
+        assert!(
+            cross.abs() < 0.005,
+            "anchor conventions diverge across constellations: {cross:+.4} s"
+        );
     }
 
     /// Run one decode pass over the ION LimeSDR capture with the given signal

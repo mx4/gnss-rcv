@@ -53,6 +53,16 @@ in seeded AWGN at a realistic 44 dB-Hz (gate 30 m, measured ~10 m): the clean
 test pins the systematic error, the noisy one locks noise robustness — a
 tracking-loop regression that only hurts in noise shows up there.
 
+The Galileo twin is `synthetic_e1_geometry_solves_to_truth` (`GeoFeed::new_e1`:
+BOC(1,1) codes + full I/NAV pages with ICD-convention word-5 TOWs, GST-built
+epochs; measured ~4 m — it sets `GNSS_DLL_GAIN_BOC=3.18` because ideal
+unfiltered BOC has a steep BPSK-like E−L discriminator, unlike the filtered
+real captures the default BOC DLL gain is calibrated for). And
+`tx_anchor_latency_measured_against_synthetic_truth` measures both decoders'
+TOW→phase anchor conventions *directly* against generator truth, per SV,
+solver-free — it locks the cross-constellation anchor alignment (LNAV = I/NAV
+convention, difference < 5 ms) that mixed GPS+Galileo solves require.
+
 The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
 **full pipeline** against a gps-sdr-sim recording at a known location:
 - `acquires_and_tracks_gpssim` (fast) — ≥4 SVs reach tracking.

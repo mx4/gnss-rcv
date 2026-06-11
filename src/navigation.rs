@@ -11,13 +11,13 @@
 
 use crate::channel::Channel;
 use crate::ephemeris::Ephemeris;
-use crate::galileo_inav::{InavDecoder, decode_ephemeris_word};
+use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
 use crate::osnma::OsnmaPage;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
-use gnss_rtk::prelude::{Epoch, TimeScale};
+use gnss_rtk::prelude::{Duration, Epoch, TimeScale};
 
 /// Per-channel navigation state: the decoded ephemeris (generic, consumed by the
 /// solver) plus the per-signal decoder state.
@@ -122,7 +122,7 @@ impl Channel {
                 Epoch::from_time_of_week(w, sow_ns(self.nav.eph.toc), TimeScale::GST);
             // Word 5 carries a fresh GST tow; (re)anchor the OSNMA page clock to it.
             self.nav.osnma_anchor = Some((self.nav.eph.tow, self.ts_sec));
-            self.nav_anchor_tx();
+            self.nav_anchor_tx(INAV_DECODE_LATENCY_SEC);
         }
 
         // Buffer the page for the receiver-level OSNMA verifier, timestamped with
@@ -152,9 +152,21 @@ impl Channel {
     /// After a signal decoder has filled the ephemeris and set its tow/toe/toc
     /// epochs, mark it usable to the solver and pin the transmit-time anchor: the
     /// integer code-period count (`trk_phase`) at the current TOW edge. Shared by
-    /// GPS LNAV (per subframe) and Galileo I/NAV (per word-5 page) — both carry
-    /// the TOW at the call site, so the pinned phase matches the epoch.
-    pub(crate) fn nav_anchor_tx(&mut self) {
+    /// GPS LNAV (per subframe) and Galileo I/NAV (per word-5 page).
+    ///
+    /// `decode_latency_sec` is the signal's *structural* gap between the
+    /// transmit instant the broadcast TOW names and the moment the decoder can
+    /// emit the frame that carries it (LNAV: the next subframe's 8 preamble
+    /// bits the frame check requires, 0.16 s; I/NAV: TOW names the start of
+    /// its own 2 s page, emitted at page end). The pinned phase belongs to the
+    /// decode moment, so the paired epoch is `tow + latency`. A wrong latency
+    /// is invisible within one constellation (common across its SVs, it folds
+    /// into the receiver clock bias — which is how it went unnoticed) but
+    /// shifts that constellation's absolute t_tx, breaking mixed
+    /// GPS+Galileo solves by the LNAV/INAV difference (measured 1.84 s on the
+    /// ION LimeSDR capture). Both constants are verified directly against
+    /// synthetic ground truth by `tx_anchor_latency_measured_against_synthetic_truth`.
+    pub(crate) fn nav_anchor_tx(&mut self, decode_latency_sec: f64) {
         if self.is_ephemeris_complete() {
             self.pub_state
                 .lock()
@@ -169,7 +181,8 @@ impl Channel {
         // inter-SV range (carried in code_off_sec) into a relative one.
         if self.is_ephemeris_complete() && !self.nav.eph.tx_anchored {
             self.nav.eph.tow_trk_phase = self.nav.eph.trk_phase;
-            self.nav.eph.tx_tow_gpst = self.nav.eph.tow_gpst;
+            self.nav.eph.tx_tow_gpst =
+                self.nav.eph.tow_gpst + Duration::from_seconds(decode_latency_sec);
             self.nav.eph.tx_anchored = true;
             log::warn!(
                 "{}: tx anchored tow={:?} phase={:.6}",

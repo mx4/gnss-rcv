@@ -258,8 +258,10 @@ const SECS_PER_WEEK: f64 = 604_800.0;
 /// One satellite of a [`GeoFeed`] scene.
 struct GeoSv {
     eph: Ephemeris, // the LSB-quantized ephemeris it both broadcasts and flies
-    code: Vec<i8>,
-    bits: Vec<i8>, // transmitted ±1 LNAV bits; bit k spans t_tx = tow0 + [k, k+1)·20 ms
+    code: Vec<i8>,  // spreading replica (chips; BOC sub-chips for E1)
+    chip_rate: f64, // code units per transmit second
+    data: Vec<i8>,  // ±1 data stream; item k spans t_tx = tow0 + [k, k+1)·data_period
+    data_period: f64,
     amp: f64,
 }
 
@@ -290,6 +292,7 @@ pub struct GeoFeed {
     fs: f64,
     fi: f64,
     week: u32,
+    gst: bool, // epochs built on the GST timescale (Galileo scenes)
     t0_sow: f64,
     tow0: f64,
     block_sp: usize,
@@ -350,7 +353,9 @@ impl GeoFeed {
                 GeoSv {
                     eph: q,
                     code: Code::gen_code("L1CA", e.sv.prn).expect("L1CA code"),
-                    bits,
+                    chip_rate: CODE_RATE_HZ,
+                    data: bits,
+                    data_period: NAV_BIT_SEC,
                     amp,
                 }
             })
@@ -363,6 +368,90 @@ impl GeoFeed {
             fs,
             fi,
             week,
+            gst: false,
+            t0_sow,
+            tow0,
+            block_sp,
+            total_samples: num_msec * block_sp,
+            seed,
+        }
+    }
+
+    /// The Galileo E1-B twin of [`new`](Self::new): BOC(1,1) memory codes at the
+    /// 2.046 Msc/s sub-chip rate, modulated by full I/NAV page streams (word
+    /// types 1-5 cycling, 2 s per page). The word-5 WN/TOW follows the OS SIS
+    /// ICD convention: the broadcast TOW is the GST at the start of the page
+    /// carrying it. `week` fields are GST weeks; the generator builds epochs
+    /// via `TimeScale::GST`, exactly as the receiver's I/NAV decoder does.
+    pub fn new_e1(
+        ephs: &[Ephemeris],
+        rx_ecef: [f64; 3],
+        fs: f64,
+        fi: f64,
+        num_msec: usize,
+        cn0_dbhz: f64,
+        seed: Option<u64>,
+    ) -> Self {
+        use crate::galileo_inav::{encode_ephemeris_word, encode_inav_page, quantize_via_inav};
+        use gnss_rtk::prelude::TimeScale;
+
+        assert!(!ephs.is_empty());
+        let week = ephs[0].week;
+        assert!(
+            ephs.iter().all(|e| e.week == week),
+            "one GST week per scene"
+        );
+        let t0_sow = ephs[0].toe as f64;
+        // Stream origin: a 5-page word-cycle boundary (10 s grid) at least one
+        // cycle before t0, so every transmit time maps to a data index ≥ 0.
+        let tow0 = (t0_sow / 10.0).floor() * 10.0 - 10.0;
+        let n_cycles = num_msec / 10_000 + 4;
+
+        let amp = match seed {
+            None => 1.0,
+            Some(_) => (10f64.powf(cn0_dbhz / 10.0) / fs).sqrt(),
+        };
+        let svs = ephs
+            .iter()
+            .map(|e| {
+                let mut q = quantize_via_inav(e);
+                let ns = |sow: u32| (sow as u64) * 1_000_000_000;
+                q.toe_gpst = Epoch::from_time_of_week(q.week, ns(q.toe), TimeScale::GST);
+                q.toc_gpst = q.toe_gpst;
+                // Pages: word types 1..5 cycling, 2 s each; word 5 carries the
+                // GST WN/TOW of its own page's start (ICD convention).
+                let mut data = Vec::with_capacity(n_cycles * 5 * 500);
+                for k in 0..n_cycles {
+                    for wt in 1..=5u8 {
+                        let mut e_page = q;
+                        if wt == 5 {
+                            e_page.tow = tow0 as u32 + 10 * k as u32 + 8;
+                        }
+                        let page = encode_inav_page(&encode_ephemeris_word(&e_page, wt));
+                        data.extend(page.iter().map(|&s| if s == 0 { 1i8 } else { -1 }));
+                    }
+                }
+                GeoSv {
+                    eph: q,
+                    code: Signal::GalileoE1b
+                        .spreading_code(e.sv.prn)
+                        .expect("E1-B code"),
+                    chip_rate: E1_SUBCHIP_RATE_HZ,
+                    data,
+                    data_period: 4e-3,
+                    amp,
+                }
+            })
+            .collect();
+
+        let block_sp = (fs * 1e-3) as usize;
+        Self {
+            svs,
+            rx: rx_ecef,
+            fs,
+            fi,
+            week,
+            gst: true,
             t0_sow,
             tow0,
             block_sp,
@@ -372,7 +461,24 @@ impl GeoFeed {
     }
 
     fn epoch_at(&self, sow: f64) -> Epoch {
-        Epoch::from_gpst_seconds(self.week as f64 * SECS_PER_WEEK + sow)
+        if self.gst {
+            // Mirror the receiver's I/NAV epoch construction (GST week + sow).
+            use gnss_rtk::prelude::TimeScale;
+            Epoch::from_time_of_week(self.week, 0, TimeScale::GST)
+                + gnss_rtk::prelude::Duration::from_seconds(sow)
+        } else {
+            Epoch::from_gpst_seconds(self.week as f64 * SECS_PER_WEEK + sow)
+        }
+    }
+
+    /// The true transmit time (as an absolute epoch) of the signal received
+    /// from `sv` at scene time `ts_sec` — the generator's own ground truth,
+    /// for measuring the receiver's transmit-time (anchor) accuracy directly.
+    pub fn true_transmit_time(&self, sv: SV, ts_sec: f64) -> Option<Epoch> {
+        let g = self.svs.iter().find(|g| g.eph.sv == sv)?;
+        let t_rx = self.t0_sow + ts_sec;
+        let tau = self.travel_time_sec(&g.eph, t_rx);
+        Some(self.epoch_at(t_rx - tau))
     }
 
     /// Signal travel time from `eph`'s satellite to the receiver for a signal
@@ -425,17 +531,18 @@ impl IQReader for GeoFeed {
                 let ts = ts0 + f0 * inv_fs;
                 let tau = tau0 + f0 * dtau;
                 let t_tx = self.t0_sow + ts - tau - self.tow0; // since stream origin
-                let mut chip = t_tx * CODE_RATE_HZ;
-                let chip_step = dtx * CODE_RATE_HZ;
-                let mut bit_pos = t_tx / NAV_BIT_SEC;
-                let bit_step = dtx / NAV_BIT_SEC;
+                let code_len = sv.code.len() as f64;
+                let mut chip = t_tx * sv.chip_rate;
+                let chip_step = dtx * sv.chip_rate;
+                let mut bit_pos = t_tx / sv.data_period;
+                let bit_step = dtx / sv.data_period;
                 // Received carrier: θ = 2π(fi·ts − fc·τ); per-sample rotation.
                 let mut car = Complex64::from_polar(sv.amp, TAU * (self.fi * ts - L1_HZ * tau));
                 let rot = Complex64::from_polar(1.0, TAU * (self.fi * inv_fs - L1_HZ * dtau));
 
                 for i in s0..s1 {
-                    let c = sv.code[chip.rem_euclid(L1CA_CODE_LEN as f64) as usize] as f64;
-                    let d = sv.bits[bit_pos as usize] as f64;
+                    let c = sv.code[chip.rem_euclid(code_len) as usize] as f64;
+                    let d = sv.data[bit_pos as usize] as f64;
                     out[i - off_samples] += car * (c * d);
                     car *= rot;
                     chip += chip_step;
@@ -462,21 +569,53 @@ impl IQReader for GeoFeed {
 /// Circular zero-clock orbits make every SV clock term (relativistic, f0/f1/f2,
 /// TGD) exactly zero, so the scene needs no clock model on either side.
 pub fn pick_geo_constellation(rx_ecef: [f64; 3], week: u32, toe: u32, n: usize) -> Vec<Ephemeris> {
-    let toe_gpst = Epoch::from_gpst_seconds(week as f64 * SECS_PER_WEEK + toe as f64);
+    pick_constellation(rx_ecef, week, toe, n, Constellation::GPS)
+}
+
+/// The Galileo twin of [`pick_geo_constellation`]: Galileo MEO shells
+/// (a ≈ 29 600 km), `week` is a GST week and the epochs are built on the GST
+/// timescale, exactly as the receiver's I/NAV decoder builds them.
+pub fn pick_geo_constellation_gal(
+    rx_ecef: [f64; 3],
+    week: u32,
+    toe: u32,
+    n: usize,
+) -> Vec<Ephemeris> {
+    pick_constellation(rx_ecef, week, toe, n, Constellation::Galileo)
+}
+
+fn pick_constellation(
+    rx_ecef: [f64; 3],
+    week: u32,
+    toe: u32,
+    n: usize,
+    cons: Constellation,
+) -> Vec<Ephemeris> {
+    use gnss_rtk::prelude::TimeScale;
+    let (a, toe_gpst) = match cons {
+        Constellation::Galileo => (
+            29_600_000.0,
+            Epoch::from_time_of_week(week, toe as u64 * 1_000_000_000, TimeScale::GST),
+        ),
+        _ => (
+            26_560_000.0,
+            Epoch::from_gpst_seconds(week as f64 * SECS_PER_WEEK + toe as f64),
+        ),
+    };
     let rx = Vector3::new(rx_ecef[0], rx_ecef[1], rx_ecef[2]);
 
     let mut cands: Vec<(f64, f64, Ephemeris)> = Vec::new();
     for i_omg0 in 0..12 {
         for i_m0 in 0..18 {
-            let mut e = Ephemeris::new(SV::new(Constellation::GPS, 1));
+            let mut e = Ephemeris::new(SV::new(cons, 1));
             e.week = week;
             e.toe = toe;
             e.toc = toe;
             e.toe_gpst = toe_gpst;
             e.toc_gpst = toe_gpst;
-            e.a = 26_560_000.0;
+            e.a = a;
             e.ecc = 0.0;
-            e.i0 = 0.96; // ~55°, the GPS inclination
+            e.i0 = 0.96; // ~55-56°, the GPS/Galileo inclination
             e.omg0 = i_omg0 as f64 * (TAU / 12.0) - PI;
             e.m0 = i_m0 as f64 * (TAU / 18.0) - PI;
             e.omg_dot = -8.0e-9; // typical nodal regression; also gates is_valid
@@ -518,7 +657,7 @@ pub fn pick_geo_constellation(rx_ecef: [f64; 3], week: u32, toe: u32, n: usize) 
 
     let mut ephs: Vec<Ephemeris> = picked.into_iter().map(|(_, _, e)| e).collect();
     for (k, e) in ephs.iter_mut().enumerate() {
-        e.sv = SV::new(Constellation::GPS, (k + 1) as u8);
+        e.sv = SV::new(cons, (k + 1) as u8);
     }
     ephs
 }

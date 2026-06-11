@@ -56,6 +56,21 @@ const PREAMBLE: u32 = 0x8b;
 const PREAMBLE_BITS: [u8; 8] = [1, 0, 0, 0, 1, 0, 1, 1];
 /// One LNAV data bit spans 20 C/A code periods (50 bps over 1 ms codes).
 const PERIODS_PER_BIT: usize = 20;
+/// Structural decode latency of the LNAV frame: the HOW TOW names the start of
+/// the *next* subframe, but the decoder emits a subframe only once that next
+/// subframe's 8-bit preamble is demodulated — 8 bits × 20 ms after the instant
+/// the TOW names. So the LNAV transmit-time anchor pairs the TOW with a phase
+/// 0.16 s late, leaving every GPS t_tx 0.16 s *early* in absolute terms
+/// (measured directly against synthetic truth by the tx-anchor test).
+///
+/// This is deliberately NOT corrected: a common offset folds into the receiver
+/// clock bias within a constellation, and the whole validated pipeline —
+/// including gnss-rtk's epoch-sensitive frame handling — is self-consistent at
+/// this convention (correcting it was measured to *degrade* the synthetic fix
+/// 2.45 m → 184 m; see `INAV_DECODE_LATENCY_SEC` and AGENTS.md). What must
+/// hold for mixed GPS+Galileo solves is that every constellation uses the SAME
+/// convention: the I/NAV anchor is aligned to this one.
+pub(crate) const LNAV_DECODE_LATENCY_SEC: f64 = 8.0 * PERIODS_PER_BIT as f64 * 1e-3;
 /// Prompt window kept by the decoder: bit-edge detection reads 2·19 periods
 /// straddling a candidate edge (see `sync_bit`), plus slack for wrap repeats.
 const PROMPT_WINDOW: usize = 40;
@@ -505,7 +520,7 @@ impl Channel {
                 self.nav.eph.tgd,
                 self.nav.eph.toe_gpst
             );
-            self.nav_anchor_tx();
+            self.nav_anchor_tx(0.0); // the LNAV convention is the cross-constellation reference
         }
     }
 

@@ -98,6 +98,18 @@ pub fn deinterleave(input: &[u8]) -> Vec<u8> {
 const PREAMBLE: [u8; 10] = [0, 1, 0, 1, 1, 0, 0, 0, 0, 0];
 /// Each page part is 250 symbols: the preamble then 240 FEC symbols.
 const PAGE_PART_SYMBOLS: usize = 250;
+/// I/NAV transmit-time anchor alignment. The word-5 WN/TOW names the GST at
+/// the start of the 2 s page carrying it (OS SIS ICD), and [`InavDecoder`]
+/// emits the word at the page's last symbol — a 2.000 s structural decode
+/// latency (measured directly against synthetic truth). The LNAV decoder has
+/// the same kind of latency, 0.160 s (8 preamble bits), which is the
+/// pipeline's *reference convention* and is deliberately left uncorrected
+/// (see `gps_lnav::LNAV_DECODE_LATENCY_SEC`). For mixed GPS+Galileo solves
+/// the constellations must agree, so the I/NAV anchor adds the *difference*:
+/// 2.000 − 0.160 = 1.840 s — exactly the inter-constellation offset the
+/// two-pass ION LimeSDR merge measured before this correction.
+pub(crate) const INAV_DECODE_LATENCY_SEC: f64 =
+    2.0 * PAGE_PART_SYMBOLS as f64 * 4e-3 - crate::gps_lnav::LNAV_DECODE_LATENCY_SEC;
 
 /// A decoded, CRC-valid I/NAV word: its 6-bit word type, 128 data bits, and the
 /// 40-bit OSNMA field. The OSNMA field is the odd page's "Reserved 1"
@@ -386,6 +398,20 @@ pub fn encode_inav_page(word: &InavWord) -> Vec<u8> {
     let mut syms = render(&page[..114]);
     syms.extend(render(&page[114..]));
     syms
+}
+
+/// Round-trip `eph` through the I/NAV word encode → field-parse path: the
+/// result is the ephemeris exactly as a receiver will decode it, every field
+/// quantized to its broadcast LSB. The geometric E1 generator
+/// (`synth::GeoFeed::new_e1`) flies this orbit, so generator and solver use
+/// bit-identical ephemerides.
+pub fn quantize_via_inav(eph: &Ephemeris) -> Ephemeris {
+    let mut q = Ephemeris::new(eph.sv);
+    for wt in 1..=5u8 {
+        decode_ephemeris_word(&mut q, &encode_ephemeris_word(eph, wt));
+    }
+    q.ts_sec = 1.0;
+    q
 }
 
 /// The I/NAV symbol stream (one symbol per 4 ms code period) broadcasting `eph` as
