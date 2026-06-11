@@ -419,7 +419,7 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, egnos) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64)> = st
                 .channels
@@ -458,6 +458,11 @@ impl GnssRcvApp {
                 pos_url,
                 st.osnma_kroot,
                 dop,
+                (
+                    st.sbas_iono.len(),
+                    st.sbas_corr.fast_len(),
+                    st.sbas_corr.long_len(),
+                ),
             )
         };
 
@@ -492,6 +497,22 @@ impl GnssRcvApp {
                                 if has_utc {
                                     ui.separator();
                                     ui.monospace("utc: 1");
+                                }
+                                // EGNOS/SBAS corrections are live and feeding
+                                // the solver — SBAS-orange, like its SVs.
+                                let (n_igp, n_fast, n_long) = egnos;
+                                if n_igp + n_fast + n_long > 0 {
+                                    ui.separator();
+                                    ui.colored_label(
+                                        constellation_color(Constellation::SBAS),
+                                        "EGNOS",
+                                    )
+                                    .on_hover_text(format!(
+                                        "SBAS corrections applied to the fix: iono grid \
+                                         {n_igp} IGPs (per satellite, where the grid \
+                                         covers its pierce point) · {n_fast} fast + \
+                                         {n_long} long-term clock/ephemeris corrections"
+                                    ));
                                 }
                             });
                             if let Some(url) = &pos_url {
