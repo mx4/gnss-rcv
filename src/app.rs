@@ -640,17 +640,18 @@ impl GnssRcvApp {
                         // I/NAV words, GPS: 3 subframes). The fraction turns green
                         // on a full set — no ✓ glyph, which egui's bundled fonts
                         // render as a tofu box (U+2713 is unsupported).
+                        // The fraction stays muted at every stage (0/3 reads the
+                        // same as 3/3); the only green element is the check that
+                        // appears once the full set is decoded.
                         let needed = if is_galileo { 5 } else { 3 };
-                        if eph_pages >= needed {
-                            // Heavy check U+2714 — a real emoji NotoEmoji renders
-                            // (unlike the plain U+2713 ✓, which is a tofu box).
-                            ui.colored_label(
-                                egui::Color32::from_rgb(80, 200, 100),
-                                format!("{eph_pages}/{needed} ✔"),
-                            );
-                        } else {
+                        ui.horizontal(|ui| {
                             ui.weak(format!("{eph_pages}/{needed}"));
-                        }
+                            if eph_pages >= needed {
+                                // Heavy check U+2714 — a real emoji NotoEmoji
+                                // renders (the plain U+2713 ✓ is a tofu box).
+                                ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✔");
+                            }
+                        });
                     });
                     if is_galileo {
                         row.col(|ui| {
