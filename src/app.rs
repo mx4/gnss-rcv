@@ -17,8 +17,6 @@ use crate::recording::IQFileType;
 use crate::recordings::{self, Recording};
 use crate::state::GnssState;
 
-const PI: f64 = std::f64::consts::PI;
-
 const WIDTH: usize = 900;
 const HEIGHT: usize = 700;
 
@@ -580,7 +578,6 @@ impl GnssRcvApp {
             .column(Column::auto().at_least(30.0).resizable(true))
             .column(Column::auto())
             .column(Column::auto())
-            .column(Column::auto())
             .column(Column::auto()) // ephemeris
             .min_scrolled_height(0.0)
             .max_scroll_height(available_height);
@@ -610,9 +607,6 @@ impl GnssRcvApp {
                 ui.strong("code_idx");
             });
             header.col(|ui| {
-                ui.strong("phi");
-            });
-            header.col(|ui| {
                 ui.strong("ephemeris");
             });
             if is_galileo {
@@ -636,7 +630,6 @@ impl GnssRcvApp {
                     continue;
                 }
                 let cn0 = channel.unwrap().cn0;
-                let phi = (channel.unwrap().phi % 1.0) * 2.0 * PI;
                 let doppler_hz = channel.unwrap().doppler_hz;
                 let code_idx = channel.unwrap().code_idx;
                 let eph_pages = channel.unwrap().eph_pages;
@@ -666,11 +659,6 @@ impl GnssRcvApp {
                     row.col(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.label(format!("{:.0}", code_idx));
-                        });
-                    });
-                    row.col(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(format!("{:.2}", phi));
                         });
                     });
                     row.col(|ui| {
