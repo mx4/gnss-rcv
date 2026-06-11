@@ -110,10 +110,33 @@ visible at Andøya, so there's no extra redundancy to recover block 4 from.
 
 So both FGI captures fall one step short of full nav-data auth, for different
 reasons: clean = no KROOT broadcast (PKR-dominated), jammertest = KROOT broadcast
-but one block denied. To demonstrate the full TESLA/MAC step end-to-end, feed a
-stream that contains a *complete* DSM-KROOT — e.g. the GSC EUSPA OSNMA test
-vectors (a hex I/NAV+OSNMA stream, fed straight into `OsnmaVerifier`, no
-acquire/track), or a recording from a clean KROOT-broadcasting window.
+but one block denied.
+
+## Full authentication — the tuni2025 capture
+
+The Tampere University clear-sky 2025 recording (`tuni2025`, 50 MHz, 8 E1B SVs,
+~150 s — see [datasets.md](datasets.md)) finally closes the loop. OSNMA
+auto-selects the **2024 PKID-1** anchor (GST week 1326 is before the 2025-12-10
+PKID-2 rotation), and the whole chain runs end-to-end:
+
+> `OSNMA: GST week 1326 -> 2024 (PKID 1) trust anchor`
+> `completed DSM with id = 10, size = 104 bytes`        ← DSM-KROOT, NB = 8, all blocks 0-7
+> `verified KROOT with public key id 1`                  ← ECDSA-checked vs the built-in 2024 key
+> `new TESLA key … successfully validated by` KROOT      ← delayed key chains back to KROOT
+> `E02/E10/E11/E25/E30/E34/E36: OSNMA authenticated`     ← 7 SVs' nav data authenticated
+
+Every link verifies: DSM-KROOT reassembled → its ECDSA signature checked against
+our built-in public key → the TESLA chain (chain id 3, SHA-256 / HMAC-SHA256,
+16-byte keys, 40-bit tags) bootstrapped → each subframe's delayed key validated
+back to KROOT → the MAC tags authenticate the ephemeris/clock/health. This is the
+first **live, real-signal** nav-data authentication through the full pipeline —
+where the FGI captures only ever got as far as the public key (clean) or a
+near-complete KROOT (jammertest), tuni2025 carries a complete KROOT and 8 strong
+SVs, so the TESLA/MAC step closes.
+
+(A hex-vector path — the GSC EUSPA OSNMA test vectors fed straight into
+`OsnmaVerifier`, no acquire/track — remains a useful hermetic regression, but is
+no longer needed to *prove* the chain works.)
 
 ## Running it
 

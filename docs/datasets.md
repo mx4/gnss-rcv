@@ -41,6 +41,7 @@ already had is 2013–2021 and carries no OSNMA bits).
 | ION BladeRF / HackRF / RTL-SDR | some | too short / narrow / don't nav-decode |
 | PocketSDR (Tokyo, Dec 2021) | yes | ~30 s; GPS+QZSS; too short for an E1 ephemeris |
 | CTTC (Spain, 2013) | **IOV** | GPS fix + **EGNOS SBAS** S120/S126; also `--sig E1B` decodes **3 Galileo IOV ephemerides** (E11/E12/E20, GST week 710) — the 2013 4-satellite constellation, too sparse for a Galileo-only fix but real dual-constellation data |
+| **tuni2025** (Tampere, 2025) | **yes** | TUNI clear-sky, 50 MHz, **int16 big-endian** (`2xi16-be`; dataset's "32-bit float" label is wrong). Carries both: **Galileo fix** (8 E1B SVs) + **GPS fix** (16 L1CA SVs) at 61.450, 23.856. **✅ first live full OSNMA nav-data authentication** — DSM-KROOT (NB=8) → KROOT verified vs the built-in 2024 PKID-1 key → TESLA chain → 7 SVs authenticated. Prime combined-GPS+Galileo candidate. |
 
 ## Evaluated — not usable for us
 
