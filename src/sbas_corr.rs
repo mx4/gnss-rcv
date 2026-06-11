@@ -276,6 +276,22 @@ impl SbasCorrections {
     }
 }
 
+/// The GEO's ECEF position (m) from an MT9 GEO navigation message — unlike
+/// MEO ephemerides it is a plain state vector (position at the message's
+/// reference time; the velocity/acceleration/clock terms also present are not
+/// extracted here). Good for pointing — the skyplot needs ~0.1°, and a GEO
+/// drifts metres per minute against a 36 000 km range — but NOT for ranging:
+/// EGNOS marks its GEOs do-not-use-for-ranging, and without the reference
+/// time the quadratic extrapolation is anchored at "now" anyway. Offsets per
+/// DO-229 / RTKLIB decode_sbstype9.
+pub fn mt9_geo_position_ecef(m: &[u8; 250]) -> [f64; 3] {
+    [
+        sbits(m, 39, 30) as f64 * 0.08,
+        sbits(m, 69, 30) as f64 * 0.08,
+        sbits(m, 99, 25) as f64 * 0.4,
+    ]
+}
+
 /// Synthetic MT1/MT2 builders, shared with the receiver-level end-to-end
 /// test (which broadcasts known SIS errors and corrects them with these).
 #[cfg(test)]
@@ -389,6 +405,21 @@ mod tests {
         // Wrong IODE: the correction is for another ephemeris issue.
         assert_eq!(c.long_term(gps(7), 0x5B, 43000.0), None);
         assert_eq!(c.long_term(gps(3), 0x5A, 43000.0), None);
+    }
+
+    #[test]
+    fn mt9_position_roundtrips() {
+        // A plausible GEO state vector, on the field LSBs for exactness.
+        let truth: [f64; 3] = [24_000_000.08, -15_000_000.16, 6_400.4];
+        let mut m = [0u8; 250];
+        put(&mut m, 8, 6, 9);
+        puts(&mut m, 39, 30, (truth[0] / 0.08).round() as i32);
+        puts(&mut m, 69, 30, (truth[1] / 0.08).round() as i32);
+        puts(&mut m, 99, 25, (truth[2] / 0.4).round() as i32);
+        let got = mt9_geo_position_ecef(&m);
+        for (g, t) in got.iter().zip(truth) {
+            assert!((g - t).abs() < 1e-6, "{got:?} vs {truth:?}");
+        }
     }
 
     #[test]

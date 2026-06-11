@@ -17,7 +17,7 @@ use crate::osnma::OsnmaPage;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
-use gnss_rtk::prelude::{Duration, Epoch, TimeScale};
+use gnss_rtk::prelude::{Duration, Epoch, TimeScale, Vector3};
 
 /// Per-channel navigation state: the decoded ephemeris (generic, consumed by the
 /// solver) plus the per-signal decoder state.
@@ -80,8 +80,30 @@ impl Channel {
                 let mut st = self.pub_state.lock().unwrap();
                 let iono = st.sbas_iono.feed(&msg);
                 let corr = st.sbas_corr.feed(&msg, self.ts_sec);
+                // MT9 (GEO navigation): place this GEO on the sky plot. Its
+                // ECEF position + the current fix give elevation/azimuth —
+                // the solver never computes them for SBAS channels (no
+                // ranging, so they are not in the fix pool).
+                let elaz = (msg.mtype == 9 && st.latitude != 0.0).then(|| {
+                    let (x, y, z) = map_3d::geodetic2ecef(
+                        st.latitude.to_radians(),
+                        st.longitude.to_radians(),
+                        st.height,
+                        map_3d::Ellipsoid::WGS84,
+                    );
+                    let geo = crate::sbas_corr::mt9_geo_position_ecef(&msg.bits);
+                    let (el, az) = crate::solver::elevation_azimuth(
+                        Vector3::new(x, y, z),
+                        (geo[0], geo[1], geo[2]),
+                    );
+                    (el.to_degrees(), az.to_degrees())
+                });
                 if let Some(cs) = st.channels.get_mut(&self.sv) {
                     cs.sbas_msgs = self.stats.subframes;
+                    if let Some((el, az)) = elaz {
+                        cs.elevation_deg = el;
+                        cs.azimuth_deg = az;
+                    }
                 }
                 if iono {
                     format!(" — iono grid: {} IGPs", st.sbas_iono.len())
@@ -91,6 +113,8 @@ impl Channel {
                         st.sbas_corr.fast_len(),
                         st.sbas_corr.long_len()
                     )
+                } else if let Some((el, az)) = elaz {
+                    format!(" — GEO at el={el:.1}° az={az:.1}°")
                 } else {
                     String::new()
                 }
