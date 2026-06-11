@@ -12,25 +12,39 @@
     ]
   },
   {
-    "name": "jks-1bit",
-    "url": "http://www.jks.com/gps/gps.samples.1bit.I.fs5456.if4092.bin",
-    "dest": "gps.samples.1bit.I.fs5456.if4092.bin",
-    "size": 55791616,
+    "name": "tuni2025",
+    "url": "https://zenodo.org/records/15470143/files/clearsky_signal_C-1.bin?download=1",
+    "dest": "clearsky_signal_C-1.bin",
+    "size": 0,
     "archive": "raw",
-    "flags": "-t 1bit --fs 5456000 --fi 1364000",
-    "note": "jks.com 1-bit real, ~82s; tracks ~7 SVs at a marginal ~30 dB-Hz",
+    "flags": "-t 2xi16-be --fs 50000000 --sig E1B",
+    "note": "Tampere Univ. clear-sky 2025, 50 MHz zero-IF, ~150s. The dataset labels it 32-bit float but it is int16 big-endian (2xi16-be). Carries BOTH constellations: 8 Galileo E1B SVs fix at 61.4500, 23.8563, and 16 GPS L1CA SVs (--sig L1CA) fix at 61.4501, 23.8566 (both Tampere, ~few m) -- prime candidate for a combined GPS+Galileo fix.",
     "tags": [
-      "gps"
+      "gps",
+      "galileo"
     ]
   },
   {
-    "name": "zenodo-sigmf",
-    "url": "https://zenodo.org/records/6394603/files/GPS-L1-2022-03-27.sigmf-data?download=1",
-    "dest": "GPS-L1-2022-03-27.sigmf-data",
-    "size": 240000000,
+    "name": "fgi-osnma",
+    "url": "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
+    "dest": "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat",
+    "size": 0,
+    "archive": "manual",
+    "flags": "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
+    "note": "FGI OSNMA (Finland 2023), L1/E1 i8 26 MHz fi 6.39 MHz; Galileo fixes (Otaniemi); clean 460s + jammertest + OSNMA bits; manual, see docs/datasets.md",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "ion-lime",
+    "url": "https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16",
+    "dest": "ION_LimeSDR_Bands-L1.2xi16",
+    "size": 2459077760,
     "archive": "raw",
-    "flags": "-t 2xi16 --fs 4000000",
-    "note": "SigMF ci16, 4 MHz, ~15s; GPS + E1B both track (5 SVs each), too short for a fix",
+    "flags": "-t 2xi16 --fs 10000000 --fi 420000",
+    "note": "ION LimeSDR L1, 10 MHz IF 420 kHz, 60s; fixes (Netherlands)",
     "tags": [
       "gps",
       "galileo"
@@ -62,45 +76,6 @@
     ]
   },
   {
-    "name": "ion-bladerf",
-    "url": "https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16",
-    "dest": "ION_BladeRF_Bands-L1.2xi16",
-    "size": 527335424,
-    "archive": "raw",
-    "flags": "-t 2xi16 --fs 10000000",
-    "note": "ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix",
-    "tags": [
-      "gps",
-      "galileo"
-    ]
-  },
-  {
-    "name": "ion-lime",
-    "url": "https://sdr.ion.org/LimeSDR/LimeSDR_Bands-L1.int16",
-    "dest": "ION_LimeSDR_Bands-L1.2xi16",
-    "size": 2459077760,
-    "archive": "raw",
-    "flags": "-t 2xi16 --fs 10000000 --fi 420000",
-    "note": "ION LimeSDR L1, 10 MHz IF 420 kHz, 60s; fixes (Netherlands)",
-    "tags": [
-      "gps",
-      "galileo"
-    ]
-  },
-  {
-    "name": "ion-hackrf",
-    "url": "https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8",
-    "dest": "ION_HackRF_Bands-L1.2xi8",
-    "size": 1200000000,
-    "archive": "raw",
-    "flags": "-t 2xi8 --fs 10000000 --fi 420000",
-    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
-    "tags": [
-      "gps",
-      "galileo"
-    ]
-  },
-  {
     "name": "sjtu",
     "url": "https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat",
     "dest": "SJTU_Bands-L1E1.dat",
@@ -128,26 +103,51 @@
     ]
   },
   {
-    "name": "tuni2025",
-    "url": "https://zenodo.org/records/15470143/files/clearsky_signal_C-1.bin?download=1",
-    "dest": "clearsky_signal_C-1.bin",
-    "size": 0,
+    "name": "zenodo-sigmf",
+    "url": "https://zenodo.org/records/6394603/files/GPS-L1-2022-03-27.sigmf-data?download=1",
+    "dest": "GPS-L1-2022-03-27.sigmf-data",
+    "size": 240000000,
     "archive": "raw",
-    "flags": "-t 2xi16-be --fs 50000000 --sig E1B",
-    "note": "Tampere Univ. clear-sky 2025, 50 MHz zero-IF, ~150s. The dataset labels it 32-bit float but it is int16 big-endian (2xi16-be). Carries BOTH constellations: 8 Galileo E1B SVs fix at 61.4500, 23.8563, and 16 GPS L1CA SVs (--sig L1CA) fix at 61.4501, 23.8566 (both Tampere, ~few m) -- prime candidate for a combined GPS+Galileo fix.",
+    "flags": "-t 2xi16 --fs 4000000",
+    "note": "SigMF ci16, 4 MHz, ~15s; GPS + E1B both track (5 SVs each), too short for a fix",
     "tags": [
       "gps",
       "galileo"
     ]
   },
   {
-    "name": "fgi-osnma",
-    "url": "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
-    "dest": "OSNMAspoofingdatasets/Scenario1:Clean opensky/OSNMA_cleandata_opensky_460s.dat",
-    "size": 0,
-    "archive": "manual",
-    "flags": "-t i8 --fs 26000000 --fi 6390000 --sig E1B",
-    "note": "FGI OSNMA (Finland 2023), L1/E1 i8 26 MHz fi 6.39 MHz; Galileo fixes (Otaniemi); clean 460s + jammertest + OSNMA bits; manual, see docs/datasets.md",
+    "name": "ion-bladerf",
+    "url": "https://sdr.ion.org/BladeRF/BladeRF_Bands-L1.int16",
+    "dest": "ION_BladeRF_Bands-L1.2xi16",
+    "size": 527335424,
+    "archive": "raw",
+    "flags": "-t 2xi16 --fs 10000000",
+    "note": "ION BladeRF L1, 10 MHz, ~13s; tracks 13 SVs, too short for a fix",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "jks-1bit",
+    "url": "http://www.jks.com/gps/gps.samples.1bit.I.fs5456.if4092.bin",
+    "dest": "gps.samples.1bit.I.fs5456.if4092.bin",
+    "size": 55791616,
+    "archive": "raw",
+    "flags": "-t 1bit --fs 5456000 --fi 1364000",
+    "note": "jks.com 1-bit real, ~82s; tracks ~7 SVs at a marginal ~30 dB-Hz",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "ion-hackrf",
+    "url": "https://sdr.ion.org/HackRF/HackRF_Bands-L1.int8",
+    "dest": "ION_HackRF_Bands-L1.2xi8",
+    "size": 1200000000,
+    "archive": "raw",
+    "flags": "-t 2xi8 --fs 10000000 --fi 420000",
+    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
     "tags": [
       "gps",
       "galileo"
