@@ -65,7 +65,7 @@ fn normalize_week_seconds(mut dt: f64) -> f64 {
     dt
 }
 
-fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
+pub(crate) fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
     let f_rel = -2.0 * earth_mu(eph.sv).sqrt() / SPEED_OF_LIGHT.powi(2);
 
     let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());

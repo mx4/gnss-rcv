@@ -247,11 +247,10 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// and `--qzss` flags (only meaningful in the empty / default case).
 fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     if sats.is_empty() {
-        let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) =
-            match sig {
-                Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
-                _ => (Constellation::GPS, 1..=32),
-            };
+        let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) = match sig {
+            Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
+            _ => (Constellation::GPS, 1..=32),
+        };
         let mut svs: Vec<SV> = range.map(|prn| SV::new(base_cons, prn)).collect();
         if sbas {
             svs.extend((120..=138_u8).map(|prn| SV::new(Constellation::SBAS, prn)));
@@ -279,9 +278,15 @@ fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     sats.split(',')
         .map(|token| {
             let token = token.trim();
-            if token.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            if token
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic())
+            {
                 // Prefixed: delegate to the gnss_rs parser ("G3", "E11", …).
-                token.parse::<SV>().unwrap_or_else(|_| panic!("invalid SV: {token}"))
+                token
+                    .parse::<SV>()
+                    .unwrap_or_else(|_| panic!("invalid SV: {token}"))
             } else {
                 let prn = token
                     .parse::<u8>()
@@ -997,6 +1002,280 @@ mod tests {
         assert!(err < 30.0, "noisy fix error {err:.1} m vs truth");
     }
 
+    /// Run one decode pass over the ION LimeSDR capture with the given signal
+    /// and PRN list for `steps` code periods, and return the fix-ready
+    /// ephemeris snapshots (tracking + complete + anchored — `compute_fix`'s
+    /// filter). Both signals' passes end at the same file time, so their
+    /// transmit-time snapshots share one receiver timeline and can be solved
+    /// jointly.
+    fn limesdr_pass(sig: Signal, sats: &str, steps: usize) -> Vec<RxEphemeris> {
+        let cfg = ReceiverConfig {
+            file: PathBuf::from("resources/ION_LimeSDR_Bands-L1.2xi16"),
+            iq_file_type: IQFileType::TypePairInt16,
+            fs: 10_000_000.0,
+            fi: 420_000.0,
+            sig,
+            sats: sats.to_string(),
+            ..Default::default()
+        };
+        let mut rx = Receiver::new(
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        )
+        .expect("open LimeSDR capture");
+        rx.run_loop(steps);
+        rx.channels
+            .values()
+            .filter(|ch| ch.is_state_tracking())
+            .filter(|ch| ch.is_ephemeris_complete())
+            .filter(|ch| ch.nav.eph.tx_anchored)
+            .map(|ch| ch.nav.eph)
+            .collect()
+    }
+
+    /// Solve a fix from `ephs` with a fresh solver; return (lat°, lon°, ECEF).
+    fn solve(ephs: &[RxEphemeris]) -> (f64, f64, [f64; 3]) {
+        let mut solver = PositionSolver::new(Arc::new(Mutex::new(GnssState::new())));
+        assert!(
+            solver.compute_position(60.0, ephs),
+            "no fix from {} SVs",
+            ephs.len()
+        );
+        let (lat, lon, alt) = solver.last_fix_geodetic().unwrap();
+        let (x, y, z) = map_3d::geodetic2ecef(
+            lat.to_radians(),
+            lon.to_radians(),
+            alt,
+            map_3d::Ellipsoid::WGS84,
+        );
+        (lat, lon, [x, y, z])
+    }
+
+    /// Horizontal error (m) vs the ION antenna site (52.177, 4.488 — published
+    /// to ~100 m precision, so gates against it are necessarily loose).
+    fn ion_site_error_m(lat: f64, lon: f64) -> f64 {
+        let (tlat, tlon) = (52.177f64, 4.488f64);
+        ((lat - tlat) * 111_000.0).hypot((lon - tlon) * 111_000.0 * tlat.to_radians().cos())
+    }
+
+    /// Per-SV pseudorange residual (m) of `ephs`' snapshots against a receiver
+    /// position: pr + c·clk − geometric range, the same t_tx / Sagnac math as
+    /// compute_position's RESID diagnostic. Within one constellation the
+    /// residual is ~constant (the common rx clock bias); spread = geometry
+    /// error, constellation-mean difference = apparent inter-system bias.
+    fn residuals(ephs: &[RxEphemeris], rx: [f64; 3]) -> Vec<(SV, f64)> {
+        use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
+        use gnss_rtk::prelude::Duration;
+        let tx: Vec<_> = ephs
+            .iter()
+            .map(|e| {
+                let elapsed = (e.trk_phase - e.code_off_sec) - e.tow_trk_phase;
+                e.tx_tow_gpst + Duration::from_seconds(elapsed)
+            })
+            .collect();
+        let now = *tx.iter().max().unwrap() + Duration::from_seconds(0.070);
+        ephs.iter()
+            .zip(&tx)
+            .map(|(e, t_tx)| {
+                let pr_sec = (now - *t_tx).to_seconds();
+                let pr = pr_sec * SPEED_OF_LIGHT;
+                let clk = crate::solver::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
+                let s = crate::solver::compute_sv_position_ecef(e, *t_tx);
+                let w = EARTH_ROTATION_RATE * pr_sec;
+                let (cw, sw) = (w.cos(), w.sin());
+                let (sx, sy) = (cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1);
+                let geom =
+                    ((sx - rx[0]).powi(2) + (sy - rx[1]).powi(2) + (s.2 - rx[2]).powi(2)).sqrt();
+                (e.sv, pr + clk - geom)
+            })
+            .collect()
+    }
+
+    // The combined GPS + Galileo fix, without the multi-signal receiver: two
+    // single-signal passes over the same capture (one file = one sample clock,
+    // so the passes' tx anchors share a receiver timeline), merged into a
+    // single gnss-rtk solve. De-risks the solver-side constellation mixing
+    // before the receiver-side multi-signal stepping refactor.
+    //
+    // Findings this test locks in (ION LimeSDR, 2017):
+    //  1. The LNAV 10-bit week (+2048 pin) and the 12-bit GST week disagree by
+    //     exactly 1024 weeks on pre-2019 captures — fatal for a merge, invisible
+    //     within one constellation. (The "GPS week rollover" roadmap item.)
+    //  2. The two decoders' TOW->phase anchors disagree by exactly 1.8400 s
+    //     (= 460 E1 code periods; 2.0 s page minus 0.16 s / 8 LNAV bits — the
+    //     two decode latencies). Which side carries the absolute offset is NOT
+    //     yet resolved: the GPS chain is synth-validated end-to-end, but the
+    //     Galileo-only solve (5 SVs, 1 DOF) absorbs nearly any common epoch
+    //     error, and the residual diagnostics against the ~100 m site truth are
+    //     confounded. A Galileo GeoFeed (hermetic E1 scene with exact truth)
+    //     will pin the I/NAV anchor convention absolutely.
+    //  3. With the weeks rebased and the empirical 1.84 s alignment applied,
+    //     gnss-rtk solves the mixed 15-SV pool with no special configuration;
+    //     the leftover inter-system bias is ~40 m / ~130 ns (GGTO +
+    //     inter-signal-delay class), not the seconds class.
+    #[test]
+    #[ignore] // needs resources/ION_LimeSDR_Bands-L1.2xi16 (fetch.py ion-lime); ~1 min
+    fn combined_gps_galileo_fix_from_two_passes() {
+        if !Path::new("resources/ION_LimeSDR_Bands-L1.2xi16").exists() {
+            eprintln!("skipping combined_gps_galileo_fix_from_two_passes: recording absent");
+            return;
+        }
+        // Surface the solver's warn-level diagnostics (fix failures, RESID).
+        let _ = env_logger::builder()
+            .filter_level(log::LevelFilter::Warn)
+            .try_init();
+
+        // 60 s of file time in both passes (60000 1 ms L1CA steps, 15000 4 ms
+        // E1B steps), so the snapshots refer to the same receive instant. The
+        // GPS PRN list is the set the in-run fix accepts on this capture
+        // (G19/G25 also complete an ephemeris but carry inconsistent
+        // pseudoranges the in-run solver never used).
+        let mut gps = limesdr_pass(Signal::L1ca, "2,5,6,7,9,13,16,23,29,30", 60_000);
+        let gal = limesdr_pass(Signal::GalileoE1b, "1,4,9,11,19", 15_000);
+        assert!(gps.len() >= 4, "GPS pass yielded only {} SVs", gps.len());
+        assert!(
+            gal.len() >= 4,
+            "Galileo pass yielded only {} SVs",
+            gal.len()
+        );
+
+        // The capture is from 2017 (GPS week 1971) — outside the [2048, 3071]
+        // window the 10-bit LNAV week is pinned to (the "GPS week rollover"
+        // roadmap item): the GPS pass decodes week 2995 while the 12-bit GST
+        // week gives the true epoch, leaving the two passes exactly 1024 weeks
+        // apart. A common week error cancels within one constellation (why
+        // both single fixes work) but breaks the merge; rebase the GPS epochs
+        // onto the Galileo timeline (GST week w == continuous GPS week
+        // w + 1024).
+        use gnss_rtk::prelude::Duration;
+        let dw = gps[0].week as i64 - (gal[0].week as i64 + 1024);
+        if dw != 0 {
+            eprintln!("rebasing GPS week by {dw} weeks (LNAV 10-bit week rollover)");
+            let shift = Duration::from_seconds(dw as f64 * 604_800.0);
+            for e in &mut gps {
+                e.week = (e.week as i64 - dw) as u32;
+                e.tow_gpst -= shift;
+                e.toe_gpst -= shift;
+                e.toc_gpst -= shift;
+                e.tx_tow_gpst -= shift;
+            }
+        }
+
+        let (glat, glon, _) = solve(&gps);
+        let (elat, elon, _) = solve(&gal);
+        let mut merged = gps.clone();
+        merged.extend(gal.iter().copied());
+        let merged = reject_cross_correlations(merged);
+        let n = merged.len();
+
+        // Solver-independent consistency check first: per-SV residuals vs the
+        // (coarse) site truth. Within one constellation the residual must be
+        // ~constant (the rx clock bias); the constellation-mean difference is
+        // the apparent inter-system timing offset.
+        let site = {
+            let (x, y, z) = map_3d::geodetic2ecef(
+                52.177f64.to_radians(),
+                4.488f64.to_radians(),
+                30.0,
+                map_3d::Ellipsoid::WGS84,
+            );
+            [x, y, z]
+        };
+        let rs = residuals(&merged, site);
+        for (sv, r) in &rs {
+            eprintln!("  resid {sv}: {:.3} km", r / 1000.0);
+        }
+        let cmean = |c: Constellation| {
+            let v: Vec<f64> = rs
+                .iter()
+                .filter(|(sv, _)| sv.constellation == c)
+                .map(|(_, r)| *r)
+                .collect();
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        let delta_sec = (cmean(Constellation::Galileo) - cmean(Constellation::GPS))
+            / crate::constants::SPEED_OF_LIGHT;
+        eprintln!("inter-constellation timing offset: {delta_sec:+.4} s (GAL anchors early)");
+
+        // Page-latency hypothesis: the I/NAV word-5 TOW is paired with the
+        // decode-completion phase ~one 2 s page late, leaving every Galileo
+        // t_tx early by ~the same constant. Test it: shift the Galileo anchors
+        // by the measured offset and check the predictions — the Galileo-only
+        // fix should improve, and the merged solve should become consistent.
+        let mut gal_shifted = gal.clone();
+        for e in &mut gal_shifted {
+            e.tx_tow_gpst += Duration::from_seconds(delta_sec);
+        }
+        let (slat, slon, _) = solve(&gal_shifted);
+        eprintln!(
+            "GAL-only shifted by {delta_sec:+.3} s: {slat:.6},{slon:.6}  err {:.0} m (unshifted {:.0} m)",
+            ion_site_error_m(slat, slon),
+            ion_site_error_m(elat, elon)
+        );
+
+        let mut merged = gps.clone();
+        merged.extend(gal_shifted.iter().copied());
+        let merged = reject_cross_correlations(merged);
+        let (clat, clon, cfix) = solve(&merged);
+
+        eprintln!(
+            "GPS-only  ({:2} SV): {glat:.6},{glon:.6}  err {:.0} m",
+            gps.len(),
+            ion_site_error_m(glat, glon)
+        );
+        eprintln!(
+            "GAL-only  ({:2} SV): {elat:.6},{elon:.6}  err {:.0} m",
+            gal.len(),
+            ion_site_error_m(elat, elon)
+        );
+        eprintln!(
+            "combined  ({n:2} SV): {clat:.6},{clon:.6}  err {:.0} m",
+            ion_site_error_m(clat, clon)
+        );
+
+        // Per-constellation residual stats vs the combined fix. The mean
+        // difference is the leftover GPS-Galileo system bias the mixed solve
+        // absorbed; the per-constellation SPREAD is the smoking gun for the
+        // anchor correction being an *epoch* correction: if +Δ had only fixed
+        // the pseudoranges while the orbit epochs stayed 1.84 s early, the
+        // Galileo model errors would spread ±1.5 km here (range-rate × Δ).
+        let mut stats = HashMap::<Constellation, Vec<f64>>::new();
+        for (sv, r) in residuals(&merged, cfix) {
+            stats.entry(sv.constellation).or_default().push(r);
+        }
+        let mean = |c: Constellation| stats[&c].iter().sum::<f64>() / stats[&c].len() as f64;
+        let spread = |c: Constellation| {
+            let v = &stats[&c];
+            v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        let bias = mean(Constellation::GPS) - mean(Constellation::Galileo);
+        eprintln!(
+            "residual spread vs combined fix: GPS {:.0} m, GAL {:.0} m",
+            spread(Constellation::GPS),
+            spread(Constellation::Galileo)
+        );
+        eprintln!(
+            "apparent GPS-GAL system bias after correction: {bias:+.1} m ({:+.1} ns)",
+            bias / crate::constants::SPEED_OF_LIGHT * 1e9
+        );
+
+        // Gates lock the experimental facts, not accuracy (the site truth is
+        // only ~100 m precise): the measured inter-decoder anchor offset is
+        // the reproducible 1.84 s constant; the merged solve must use both
+        // constellations, land within the same error class, and leave a
+        // residual system bias in the GGTO/inter-signal class (tens of m),
+        // not the seconds class.
+        assert!(
+            (delta_sec - 1.84).abs() < 0.05,
+            "inter-decoder anchor offset changed: {delta_sec:.4} s (expected ~1.84)"
+        );
+        assert!(n > gps.len().max(gal.len()), "merge must add SVs");
+        let c_err = ion_site_error_m(clat, clon);
+        assert!(c_err < 1000.0, "combined fix off by {c_err:.0} m");
+        assert!(bias.abs() < 150.0, "system bias {bias:.0} m out of class");
+    }
+
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
         let mut e = RxEphemeris::new(SV::new(Constellation::GPS, prn));
         e.m0 = m0;
@@ -1065,12 +1344,22 @@ mod tests {
         // --sbas appends the 120-138 block (19 PRNs) on the GPS default.
         let l = get_sat_list("", Signal::L1ca, true, false);
         assert_eq!(l.len(), 32 + 19);
-        assert_eq!(l.iter().filter(|s| s.constellation == Constellation::SBAS).count(), 19);
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::SBAS)
+                .count(),
+            19
+        );
 
         // --qzss appends the 193-202 block (10 PRNs).
         let l = get_sat_list("", Signal::L1ca, false, true);
         assert_eq!(l.len(), 32 + 10);
-        assert_eq!(l.iter().filter(|s| s.constellation == Constellation::QZSS).count(), 10);
+        assert_eq!(
+            l.iter()
+                .filter(|s| s.constellation == Constellation::QZSS)
+                .count(),
+            10
+        );
 
         // Default Galileo block: 1..=36, all tagged Galileo.
         let l = get_sat_list("", Signal::GalileoE1b, false, false);
