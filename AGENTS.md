@@ -245,12 +245,27 @@ guesses. Tackle roughly top-to-bottom.
   against RTKLIB sbas.c). CTTC: 13 fast + 14 long-term assembled, per-SV
   corrections −0.4..−2.6 m with ~2 m differential spread. The fix moves by a
   couple of metres; CTTC's truth (its own single-frequency NMEA solution) is
-  too coarse to certify the improvement — the gpssim synthetic harness or a
-  capture with surveyed truth is the right judge. EGNOS coverage now spans
-  three captures: CTTC S120+S126, nov3 S136 (54 msgs/60 s incl. MT1/2/3/4 +
+  too coarse to certify the improvement — the certifying judge is the
+  hermetic regression `sbas_fast_corrections_recover_broadcast_clock_errors`
+  (receiver.rs): `GeoFeed::new_diverged` broadcasts ±10 m per-SV clock errors
+  the signal doesn't have (fix corrupts to 14.26 m), synthetic MT1+MT2 with
+  PRC = −c·ε through the production path recover **1.81 m** — sign and
+  magnitude locked against exact truth. EGNOS coverage now spans three
+  captures: CTTC S120+S126, nov3 S136 (54 msgs/60 s incl. MT1/2/3/4 +
   MT18/26), ION LimeSDR S120+S123 (171 msgs/60 s) — the pre-fix probes that
   found "no SBAS" were the broken symbol pairing making tracked GEOs look
-  dead.
+  dead. MT9 GEO positions feed the sky plot (el/az vs the current fix;
+  EGNOS GEOs stay out of the fix pool — flagged do-not-use-for-ranging).
+- **CTTC height drift (open observation)**: every CTTC run slides h ~45 → 17 m
+  and ~10 m east over 95 s, SBAS on or off. Truth-residual analysis
+  (GNSS_TRUTH_ECEF + RESID trends): the common-mode residual ramps 3.3 m/s
+  (≈11 ppb front-end TCXO, absorbed by the clock state, harmless); the slide
+  comes from slowly evolving *differential* residuals (−4..+1 m per SV over
+  the run, G32/G23/G20 dominating) on top of standing per-SV biases up to
+  ±12 m (G17 +12 m, G23 +10 m — rooftop multipath suspects; 2013 solar-max
+  morning iono ramp is the other candidate). VDOP ~4 amplifies the trend
+  into the height. Not attributable to receiver code so far; the per-SV
+  code-carrier divergence instrument is the right next probe.
 - ~~**Nav-decode unit tests**~~: `decodes_real_lnav_subframes_to_a_valid_ephemeris`
   ([gps_lnav.rs](src/gps_lnav.rs)) feeds real captured LNAV subframes 1-3 through
   the `decode_lnav_subframe{1,2,3}` parsers and range-checks the result (a≈26 560
