@@ -30,6 +30,11 @@ const PREAMBLES: [u8; 3] = [0x53, 0x9A, 0xC6];
 const NS: usize = 64; // 2^(K-1) convolutional states
 /// Streaming traceback depth (~7×K); long enough for the survivors to merge.
 const TB_DEPTH: usize = 48;
+/// Bits the framer may slide past without a CRC-valid message before the locked
+/// hypothesis is declared misaligned and the search re-opens. A healthy stream
+/// frames back-to-back (slide 0); each noise-corrupted message costs ~250, so
+/// four slots distinguishes noise from a broken period→bit alignment.
+const STALL_BITS: usize = 4 * MSG_BITS;
 
 /// A decoded, CRC-valid SBAS L1 message: its type (0-63) and 250 bits.
 pub struct SbasMessage {
@@ -115,6 +120,7 @@ struct Hypothesis {
     sym0: Option<u8>,  // first of the 2 symbols of the current bit
     vit: Viterbi,
     bits: VecDeque<u8>, // decoded data bits awaiting framing
+    slid: usize,        // bits slid past by the framer since the last message
 }
 
 impl Hypothesis {
@@ -126,6 +132,7 @@ impl Hypothesis {
             sym0: None,
             vit: Viterbi::new(invert_g2),
             bits: VecDeque::new(),
+            slid: 0,
         }
     }
 
@@ -160,9 +167,11 @@ impl Hypothesis {
         while self.bits.len() >= MSG_BITS {
             if let Some(msg) = self.try_message() {
                 self.bits.drain(..MSG_BITS);
+                self.slid = 0;
                 return Some(msg);
             }
             self.bits.pop_front();
+            self.slid += 1;
         }
         None
     }
@@ -192,10 +201,24 @@ impl Hypothesis {
 
 /// Streaming SBAS L1 decoder for one channel. Searches the period→bit alignment
 /// (4 phases) and the G2 convention (2) in parallel, then locks onto the first
-/// hypothesis that yields a CRC-valid message.
+/// hypothesis that yields a CRC-valid message. The lock is provisional: if the
+/// framer slides [`STALL_BITS`] without another valid message the alignment is
+/// taken as broken and the search re-opens — every hypothesis is kept fed in
+/// the background, so the replacement alignment is warm when that happens.
+///
+/// The alignment hinges on the channel feeding exactly one prompt per
+/// *transmitted* code period: a code-phase wrap re-correlates or skips one, and
+/// the channel reports it via [`wrap_drop`](Self::wrap_drop) /
+/// [`wrap_repeat`](Self::wrap_repeat) (mirroring `LnavState`) so the
+/// 2-periods-per-symbol grid keeps its phase and no message is lost. An
+/// unreported wrap shifts the grid and breaks the locked hypothesis — that is
+/// what the stall watchdog recovers from, at the cost of a few messages.
 pub struct SbasL1Channel {
     hyps: Vec<Hypothesis>,
     locked: Option<usize>,
+    last: Option<f64>,            // last consumed prompt, the wrap_repeat stand-in
+    drop_next: bool,              // next prompt re-correlates the period just consumed
+    pending: Option<SbasMessage>, // message framed inside wrap_repeat
 }
 
 impl Default for SbasL1Channel {
@@ -212,22 +235,78 @@ impl SbasL1Channel {
                 hyps.push(Hypothesis::new(skip, invert_g2));
             }
         }
-        Self { hyps, locked: None }
+        Self {
+            hyps,
+            locked: None,
+            last: None,
+            drop_next: false,
+            pending: None,
+        }
+    }
+
+    /// The channel re-correlated the same transmitted code period (positive
+    /// code-phase wrap): the prompt just consumed arrives again next period —
+    /// ignore that re-delivery to keep the symbol grid in phase.
+    pub fn wrap_drop(&mut self) {
+        if self.last.is_some() {
+            self.drop_next = true;
+        }
+    }
+
+    /// The channel skipped a transmitted code period (negative code-phase
+    /// wrap): stand in the last prompt for the missing period. A message that
+    /// frames here is held for the next `push_period`.
+    pub fn wrap_repeat(&mut self) {
+        if let Some(p) = self.last
+            && let Some(msg) = self.feed(p)
+        {
+            self.pending = Some(msg);
+        }
     }
 
     /// Feed one prompt-I value (one C/A code period). Returns a CRC-valid message
     /// when one frames.
     pub fn push_period(&mut self, prompt_i: f64) -> Option<SbasMessage> {
-        if let Some(i) = self.locked {
-            return self.hyps[i].push_period(prompt_i);
+        self.last = Some(prompt_i);
+        if std::mem::take(&mut self.drop_next) {
+            return self.pending.take();
         }
-        for i in 0..self.hyps.len() {
-            if let Some(msg) = self.hyps[i].push_period(prompt_i) {
-                self.locked = Some(i); // CRC passed: commit to this hypothesis
-                return Some(msg);
+        let msg = self.feed(prompt_i);
+        self.pending.take().or(msg)
+    }
+
+    fn feed(&mut self, prompt_i: f64) -> Option<SbasMessage> {
+        // Every hypothesis is fed even while locked (8 small Viterbis at 250
+        // bit/s are trivial next to the correlators): each keeps its pairing
+        // phase synced to the stream, so when the locked alignment breaks, its
+        // replacement is already warm. Only the correct alignment can pass the
+        // preamble + CRC gate, so at most one hypothesis fires per period.
+        let mut hit: Option<(usize, SbasMessage)> = None;
+        for (j, h) in self.hyps.iter_mut().enumerate() {
+            if let Some(m) = h.push_period(prompt_i)
+                && hit.is_none()
+            {
+                hit = Some((j, m));
             }
         }
-        None
+        match self.locked {
+            Some(i) => {
+                // Locked: surface only the locked hypothesis's messages, so a
+                // chance CRC collision in a misaligned stream can't slip
+                // through. If its framing stalls, the alignment broke for good
+                // (a missed code-phase wrap): re-open the search.
+                let msg = hit.and_then(|(j, m)| (j == i).then_some(m));
+                if msg.is_none() && self.hyps[i].slid > STALL_BITS {
+                    self.locked = None;
+                }
+                msg
+            }
+            None => {
+                let (j, m) = hit?;
+                self.locked = Some(j); // CRC passed: commit to this hypothesis
+                Some(m)
+            }
+        }
     }
 }
 
@@ -319,6 +398,79 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wrap_callbacks_preserve_the_symbol_alignment() {
+        let sent: Vec<u8> = (0..12).map(|k| (k as u8 * 5 + 3) & 0x3f).collect();
+        let msgs: Vec<_> = sent
+            .iter()
+            .enumerate()
+            .map(|(k, &t)| build_message(k, t))
+            .collect();
+        let periods = to_periods(&msgs, 0, 1.0, 0);
+
+        // A positive code-phase wrap re-correlates one transmitted period (the
+        // channel re-delivers it after wrap_drop); a negative wrap skips one
+        // (wrap_repeat stands the last prompt in). One of each, mid-stream,
+        // after the decoder has locked. Without the callbacks each wrap shifts
+        // the 2-periods-per-symbol pairing and kills the stream for good.
+        let wrap_pos = 4 * 2 * 2 * MSG_BITS + 1; // inside message 4
+        let wrap_neg = 8 * 2 * 2 * MSG_BITS + 3; // inside message 8
+        let mut ch = SbasL1Channel::new();
+        let mut got: Vec<u8> = Vec::new();
+        let mut i = 0;
+        while i < periods.len() {
+            if i == wrap_neg {
+                ch.wrap_repeat(); // transmitted period i is never delivered
+                i += 1;
+                continue;
+            }
+            got.extend(ch.push_period(periods[i]).map(|m| m.mtype));
+            if i == wrap_pos {
+                ch.wrap_drop(); // the same period re-correlates and re-delivers
+                got.extend(ch.push_period(periods[i]).map(|m| m.mtype));
+            }
+            i += 1;
+        }
+
+        // Both wraps must cost nothing: a contiguous run reaching past them.
+        let run = (0..=sent.len() - got.len()).any(|st| sent[st..st + got.len()] == got[..]);
+        assert!(run, "{got:?} not a run of {sent:?}");
+        assert!(
+            got.contains(&sent[10]),
+            "no message decoded after the wraps: {got:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreported_slip_unlocks_and_the_search_recovers() {
+        let sent: Vec<u8> = (0..16).map(|k| (k as u8 * 3 + 1) & 0x3f).collect();
+        let msgs: Vec<_> = sent
+            .iter()
+            .enumerate()
+            .map(|(k, &t)| build_message(k, t))
+            .collect();
+        let periods = to_periods(&msgs, 0, 1.0, 0);
+
+        // One duplicated period the channel never reports: the locked
+        // hypothesis's alignment breaks. The stall watchdog must re-open the
+        // hypothesis search and resume decoding within ~STALL_BITS plus
+        // re-lock warm-up (a handful of messages), not stay dead.
+        let slip = 5 * 2 * 2 * MSG_BITS + 7;
+        let mut ch = SbasL1Channel::new();
+        let mut got: Vec<u8> = Vec::new();
+        for (i, &p) in periods.iter().enumerate() {
+            if i == slip {
+                got.extend(ch.push_period(p).map(|m| m.mtype));
+            }
+            got.extend(ch.push_period(p).map(|m| m.mtype));
+        }
+        let recovered = got.iter().filter(|&&t| sent[12..].contains(&t)).count();
+        assert!(
+            recovered >= 2,
+            "no recovery after the unreported slip: {got:?}"
+        );
     }
 
     #[test]

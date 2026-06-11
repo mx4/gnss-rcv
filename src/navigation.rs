@@ -85,11 +85,17 @@ impl Channel {
             };
             match n_igp {
                 Some(n) => log::warn!(
-                    "{}: SBAS L1 message type {} (CRC ok) — iono grid: {n} IGPs",
+                    "{}: SBAS L1 message type {} (CRC ok) ts={:.3} — iono grid: {n} IGPs",
                     self.sv,
-                    msg.mtype
+                    msg.mtype,
+                    self.ts_sec
                 ),
-                None => log::warn!("{}: SBAS L1 message type {} (CRC ok)", self.sv, msg.mtype),
+                None => log::warn!(
+                    "{}: SBAS L1 message type {} (CRC ok) ts={:.3}",
+                    self.sv,
+                    msg.mtype,
+                    self.ts_sec
+                ),
             }
         }
     }

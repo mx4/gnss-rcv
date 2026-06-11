@@ -113,9 +113,9 @@ pub struct Tracking {
     sum_corr_l: f64,
     sum_corr_p: f64,
     sum_corr_n: f64,
-    txp_ts0: f64, // baseline rx time for the code-implied-Doppler slope (0 = unset)
-    txp0: f64,    // baseline transmit phase paired with txp_ts0
-    div_ema: f64, // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
+    txp_ts0: f64,    // baseline rx time for the code-implied-Doppler slope (0 = unset)
+    txp0: f64,       // baseline transmit phase paired with txp_ts0
+    div_ema: f64,    // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
     div_streak: u32, // consecutive windows the divergence exceeds the gate
 }
 
@@ -817,14 +817,16 @@ impl Channel {
             // num_trk_samples steps back — and because it also indexes the
             // prompt history, the just-stored prompt is popped: the next
             // correlation re-correlates that same transmitted code period and
-            // replaces it. (The LNAV decoder mirrors the same bookkeeping on
-            // its own window; no-op for non-GPS/QZSS signals.)
+            // replaces it. (The LNAV and SBAS decoders mirror the same
+            // bookkeeping on their own windows; no-op for Galileo, whose
+            // symbol grid is one code period.)
             self.trk.code_off_sec -= self.code_sec;
             self.num_tx_codes += 1.0;
             if self.hist.corr_p.pop_back().is_some() {
                 self.num_trk_samples -= 1;
             }
             self.nav.lnav.wrap_drop();
+            self.nav.sbas.wrap_drop();
         } else if self.trk.code_off_sec < 0.0 {
             // Negative wrap (approaching SV: the received code slipped a whole
             // period earlier) — the dual case: one transmitted period falls
@@ -839,6 +841,7 @@ impl Channel {
                 self.num_trk_samples += 1;
             }
             self.nav.lnav.wrap_repeat();
+            self.nav.sbas.wrap_repeat();
         }
 
         // Local-carrier phase (cycles) at the first sample of this period's
