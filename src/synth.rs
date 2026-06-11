@@ -17,7 +17,7 @@ use rustfft::num_complex::Complex64;
 use std::f64::consts::{PI, TAU};
 
 use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
-use crate::constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
+use crate::constants::{EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT};
 use crate::ephemeris::Ephemeris;
 use crate::gps_lnav::{encode_lnav_subframe_source, encode_subframe, quantize_via_lnav};
 use crate::receiver::IQReader;
@@ -28,8 +28,6 @@ use gnss_rtk::prelude::{Epoch, Vector3};
 
 /// L1 C/A chip rate (1023 chips / 1 ms).
 const CODE_RATE_HZ: f64 = 1_023_000.0;
-/// L1 carrier, used to stretch the code rate by the carrier Doppler.
-const L1_HZ: f64 = 1_575_420_000.0;
 /// Galileo E1 BOC(1,1) sub-chip rate (8184 sub-chips / 4 ms).
 const E1_SUBCHIP_RATE_HZ: f64 = 2_046_000.0;
 /// E1-B/C BOC code length in sub-chips (4092 chips × 2).

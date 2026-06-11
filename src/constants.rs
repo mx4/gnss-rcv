@@ -8,6 +8,10 @@ const fn p2(n: u32) -> f64 {
     1.0 / (1u64 << n) as f64
 }
 
+/// L1/E1 carrier frequency (Hz) — the one band this receiver works in (GPS
+/// L1 C/A, Galileo E1, SBAS L1 and QZSS L1 all share it).
+pub const L1_HZ: f64 = 1_575_420_000.0;
+
 pub const P2_2: f64 = p2(2); // Galileo iono ai0
 pub const P2_5: f64 = p2(5);
 pub const P2_8: f64 = p2(8); // Galileo iono ai1

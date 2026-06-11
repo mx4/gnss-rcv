@@ -120,7 +120,7 @@ pub enum Signal {
 impl Signal {
     /// Carrier frequency (Hz). All of these share the L1 band (1575.42 MHz).
     pub fn carrier_hz(&self) -> f64 {
-        1_575_420_000.0
+        crate::constants::L1_HZ
     }
 
     /// Primary-code period (s): one full spreading-code repetition.
