@@ -50,6 +50,9 @@ const T_ACQ: f64 = 0.01; // 10msec acquisition time
 const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
 const T_IDLE_SBAS: f64 = 10.0;
 const SBAS_TRACKED_ENOUGH: usize = 2;
+// Tracking this long without one CRC-valid message marks a SBAS channel as a
+// cross-correlation false lock (a real GEO frames within ~3 s at 1 msg/s).
+const SBAS_MSG_TIMEOUT_SEC: f64 = 12.0;
 const T_FPULLIN: f64 = 1.0;
 const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
 const HALF_RATE_WINDOW: f64 = 3.0; // code-carrier Doppler slope window (s)
@@ -244,6 +247,9 @@ pub struct Channel {
     // below the lock threshold so a search (e.g. for weak SBAS GEOs) can tell
     // "present but weak" from "noise floor"; surfaced in the IDLE log.
     acq_cn0: f64,
+    // stats.subframes at tracking start — the baseline for the SBAS
+    // no-message false-lock timeout.
+    subfr_at_lock: u64,
 
     pub hist: History,
     pub nav: Navigation,
@@ -435,6 +441,7 @@ impl Channel {
             num_acq_samples: 0,
             num_idl_samples: 0,
             num_acq_fails: 0,
+            subfr_at_lock: 0,
             acq_cn0: 0.0,
             num_trk_samples: 0,
             num_tx_codes: 0.0,
@@ -572,6 +579,7 @@ impl Channel {
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
         self.num_tx_codes = 0.0;
+        self.subfr_at_lock = self.stats.subframes;
         self.nav.eph.tx_anchored = false;
         self.nav.eph.tow_trk_phase = 0.0;
         self.nav.init();
@@ -1110,6 +1118,24 @@ impl Channel {
         self.nav.eph.cn0 = self.trk.cn0;
 
         if self.trk.cn0 < CN0_THRESHOLD_LOST {
+            self.idle_start();
+            return;
+        }
+        // A real SBAS GEO frames CRC-valid messages within seconds of locking
+        // (1 msg/s, continuous); a cross-correlation phantom lock never does —
+        // and phantom GEO channels correlating forever were the dominant cost
+        // of the default-on SBAS block (+27% tracking periods on CTTC). Drop
+        // them, with the fail counter pushed past grace so retries back off.
+        if self.sv.constellation == Constellation::SBAS
+            && self.num_trk_samples as f64 * self.code_sec > SBAS_MSG_TIMEOUT_SEC
+            && self.stats.subframes == self.subfr_at_lock
+        {
+            log::warn!(
+                "{}: tracking {:.0} s without a CRC-valid message — false lock, dropping",
+                self.sv,
+                SBAS_MSG_TIMEOUT_SEC
+            );
+            self.num_acq_fails = self.num_acq_fails.max(ACQ_FAIL_GRACE + 1);
             self.idle_start();
         }
     }
