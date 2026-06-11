@@ -7,7 +7,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 
 use crate::channel::{History, State};
@@ -44,6 +43,12 @@ pub struct GnssRcvApp {
     fi: f64,
     sig: Signal,
     plots: bool,
+    /// Also search the SBAS L1 block (PRN 120-138, EGNOS/WAAS GEOs) — same
+    /// C/A machinery as GPS; decoded messages show in the log, the GEOs in
+    /// the SV table. Seeded from the CLI --sbas flag, toggleable here.
+    sbas: bool,
+    /// Also search the QZSS L1 block (PRN 193-202).
+    qzss: bool,
     needs_stop: Arc<AtomicBool>,
     active: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
@@ -63,6 +68,8 @@ impl Default for GnssRcvApp {
             fi: 0.0,
             sig: Signal::L1ca,
             plots: false,
+            sbas: false,
+            qzss: false,
             active: Arc::new(AtomicBool::new(false)),
             needs_stop: Arc::new(AtomicBool::new(false)),
             paused: Arc::new(AtomicBool::new(false)),
@@ -129,9 +136,11 @@ fn dop_color(dop: f64) -> egui::Color32 {
 }
 
 impl GnssRcvApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool) -> Self {
+    pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool, sbas: bool, qzss: bool) -> Self {
         Self {
             plots,
+            sbas,
+            qzss,
             ..Default::default()
         }
     }
@@ -178,6 +187,8 @@ impl GnssRcvApp {
             fi: self.fi,
             sig: self.sig,
             plots: self.plots,
+            sbas: self.sbas,
+            qzss: self.qzss,
             ..Default::default()
         };
 
@@ -189,7 +200,7 @@ impl GnssRcvApp {
     }
 }
 
-pub fn egui_main(plots: bool) {
+pub fn egui_main(plots: bool, sbas: bool, qzss: bool) {
     log::warn!("egui_main");
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([WIDTH as f32, HEIGHT as f32]),
@@ -198,7 +209,7 @@ pub fn egui_main(plots: bool) {
     eframe::run_native(
         "gnss-rcv",
         native_options,
-        Box::new(move |cc| Ok(Box::new(GnssRcvApp::new(cc, plots)))),
+        Box::new(move |cc| Ok(Box::new(GnssRcvApp::new(cc, plots, sbas, qzss)))),
     )
     .unwrap();
 }
@@ -259,6 +270,10 @@ impl GnssRcvApp {
     }
 
     fn update_sig_type(&mut self, ui: &mut egui::Ui) {
+        if !self.sig.is_boc11() {
+            ui.checkbox(&mut self.sbas, "SBAS")
+                .on_hover_text("also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)");
+        }
         egui::ComboBox::from_id_salt("signal")
             .width(FIELD_W)
             .selected_text(sig_label(self.sig))
@@ -587,10 +602,19 @@ impl GnssRcvApp {
             tb
         };
 
-        let (constellation, max_prn) = if is_galileo {
-            (Constellation::Galileo, 36)
-        } else {
-            (Constellation::GPS, 32)
+        // Rows come from whatever is actually tracking — covering GPS,
+        // Galileo, and the SBAS/QZSS blocks alike (a fixed PRN range used to
+        // hide S/J satellites even while they tracked).
+        let tracked: Vec<SV> = {
+            let st = self.pub_state.lock().unwrap();
+            let mut v: Vec<SV> = st
+                .channels
+                .iter()
+                .filter(|(_, cs)| cs.state == State::Tracking)
+                .map(|(sv, _)| *sv)
+                .collect();
+            v.sort();
+            v
         };
 
         tb.header(20.0, |mut header| {
@@ -616,17 +640,12 @@ impl GnssRcvApp {
             }
         })
         .body(|mut body| {
-            for row_index in 1..=max_prn {
+            for sv in tracked {
                 let row_height = 20.0;
-                let sv = SV::new(constellation, row_index);
                 let pub_state = self.pub_state.lock().unwrap();
                 let channel = pub_state.channels.get(&sv);
 
                 if channel.is_none() {
-                    continue;
-                }
-                let state = channel.unwrap().state.clone();
-                if state != State::Tracking {
                     continue;
                 }
                 let cn0 = channel.unwrap().cn0;

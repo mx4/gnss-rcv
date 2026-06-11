@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if opt.use_ui {
-        gnss_rcv::egui_main(opt.plots);
+        gnss_rcv::egui_main(opt.plots, opt.sbas, opt.qzss);
         return Ok(());
     }
 
