@@ -1180,6 +1180,110 @@ mod tests {
         );
     }
 
+    // The epoch-sensitivity question, settled: sweep a common shift on every
+    // tx anchor of a clean synthetic scene and solve each point with BOTH
+    // solvers — gnss-rtk and the frame-free wls_fix. Findings this test locks:
+    //  1. gnss-rtk is exonerated: it matches the independent solver to the
+    //     decimetre at every shift, so there is no coordinate/frame
+    //     integration issue (the EARTH_J2000 label is inert for SPP — ranges
+    //     are computed from our raw coordinates; the only ANISE transform
+    //     feeds el/az into bias models we disable).
+    //  2. The sensitivity itself is plain orbital physics: ~700 m of fix
+    //     error per second of common anchor-epoch offset (per-SV range-rate
+    //     spread), identical in both solvers.
+    //  3. The error minimum sits exactly at the anchor convention (shift 0) —
+    //     the generator+decoder+solver system is self-consistent there. The
+    //     tx-anchor truth instrument labels that point "true − 0.16 s"; that
+    //     ±0.16 s is a bookkeeping question confined to the *instrument's*
+    //     reference (trk_phase/code_off pairing semantics), not a production
+    //     error: all fixes operate at the consistent point, and the
+    //     cross-constellation alignment measures 0.0000 s on real SIS.
+    #[test]
+    #[ignore] // ~7 s — runs via `just test-all` / `cargo test -- --ignored`
+    fn epoch_sensitivity_probe() {
+        use gnss_rtk::prelude::Duration;
+        let (fs, fi) = (2_046_000.0, 0.0);
+        let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
+        let cons = pick_geo_constellation(truth, 2348, 36_000, 6);
+        let sats = cons
+            .iter()
+            .map(|e| e.sv.prn.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let feed = GeoFeed::new(&cons, truth, fs, fi, 30_000, 45.0, None);
+        let cfg = ReceiverConfig {
+            sats,
+            fs,
+            fi,
+            ..Default::default()
+        };
+        let mut rx = Receiver::with_feed(
+            Box::new(feed),
+            &cfg,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(GnssState::new())),
+        );
+        rx.run_loop(0);
+        let ephs: Vec<RxEphemeris> = rx
+            .channels
+            .values()
+            .filter(|ch| ch.is_state_tracking() && ch.is_ephemeris_complete())
+            .filter(|ch| ch.nav.eph.tx_anchored)
+            .map(|ch| ch.nav.eph)
+            .collect();
+        assert!(ephs.len() >= 5);
+
+        let err3 = |p: [f64; 3]| {
+            ((p[0] - truth[0]).powi(2) + (p[1] - truth[1]).powi(2) + (p[2] - truth[2]).powi(2))
+                .sqrt()
+        };
+        // Anchors sit at the LNAV convention; the tx-anchor instrument labels
+        // that point "true − 0.160 s" (see finding 3 above).
+        let mut results: Vec<(f64, f64, Option<f64>)> = Vec::new();
+        for shift in [-0.16, 0.0, 0.08, 0.16, 0.24, 0.32] {
+            let mut e2 = ephs.clone();
+            for e in &mut e2 {
+                e.tx_tow_gpst += Duration::from_seconds(shift);
+            }
+            let (wx, _, _, _) = wls_fix(&e2, truth);
+            let mut solver = PositionSolver::new(Arc::new(Mutex::new(GnssState::new())));
+            let rtk_err = if solver.compute_position(30.0, &e2) {
+                let (la, lo, al) = solver.last_fix_geodetic().unwrap();
+                let (x, y, z) = map_3d::geodetic2ecef(
+                    la.to_radians(),
+                    lo.to_radians(),
+                    al,
+                    map_3d::Ellipsoid::WGS84,
+                );
+                Some(err3([x, y, z]))
+            } else {
+                None
+            };
+            let rtk = match rtk_err {
+                Some(e) => format!("{e:8.1} m"),
+                None => "  no fix".to_string(),
+            };
+            eprintln!(
+                "anchor shift {shift:+.2} s:  wls {:8.1} m   gnss-rtk {rtk}",
+                err3(wx)
+            );
+            results.push((shift, err3(wx), rtk_err));
+        }
+
+        // Lock finding 1: the two solvers agree at every epoch.
+        for (shift, wls_err, rtk_err) in &results {
+            let rtk_err = rtk_err.expect("gnss-rtk must solve every shifted set");
+            assert!(
+                (wls_err - rtk_err).abs() < 1.0,
+                "solvers diverge at shift {shift:+.2}: wls {wls_err:.1} vs rtk {rtk_err:.1} m"
+            );
+        }
+        // Lock finding 3: the consistency point is the anchor convention.
+        let min = results.iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+        assert_eq!(min.0, 0.0, "error minimum moved off the anchor convention");
+        assert!(min.1 < 15.0, "consistency-point error {:.1} m", min.1);
+    }
+
     /// Run one decode pass over the ION LimeSDR capture with the given signal
     /// and PRN list for `steps` code periods, and return the fix-ready
     /// ephemeris snapshots (tracking + complete + anchored — `compute_fix`'s
