@@ -641,11 +641,15 @@ impl GnssRcvApp {
                         // on a full set — no ✓ glyph, which egui's bundled fonts
                         // render as a tofu box (U+2713 is unsupported).
                         let needed = if is_galileo { 5 } else { 3 };
-                        let text = format!("{eph_pages}/{needed}");
                         if eph_pages >= needed {
-                            ui.colored_label(egui::Color32::from_rgb(80, 200, 100), text);
+                            // Heavy check U+2714 — a real emoji NotoEmoji renders
+                            // (unlike the plain U+2713 ✓, which is a tofu box).
+                            ui.colored_label(
+                                egui::Color32::from_rgb(80, 200, 100),
+                                format!("{eph_pages}/{needed} ✔"),
+                            );
                         } else {
-                            ui.weak(text);
+                            ui.weak(format!("{eph_pages}/{needed}"));
                         }
                     });
                     if is_galileo {
