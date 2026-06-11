@@ -40,6 +40,16 @@ const T_IDLE: f64 = 3.0;
 const ACQ_FAIL_GRACE: u32 = 20;
 const T_IDLE_MAX: f64 = 30.0;
 const T_ACQ: f64 = 0.01; // 10msec acquisition time
+// SBAS search throttles (the block is on by default, so its 19 mostly-absent
+// PRNs must stay cheap): GEOs are stationary, so once the receiver-side LO
+// offset is known from any tracking channel, the Doppler search shrinks to
+// LO ± this spread (vs the full ±12 kHz). Idle longer between attempts (the
+// 1 msg/s correction stream loses nothing to a slow first lock), and stop
+// searching altogether once this many GEOs track — every GEO of a system
+// broadcasts the same corrections, two covers redundancy.
+const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
+const T_IDLE_SBAS: f64 = 10.0;
+const SBAS_TRACKED_ENOUGH: usize = 2;
 const T_FPULLIN: f64 = 1.0;
 const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
 const HALF_RATE_WINDOW: f64 = 3.0; // code-carrier Doppler slope window (s)
@@ -166,6 +176,20 @@ pub struct Acquisition {
     // (36×) was ~8.6 GB and OOM'd. Sharing it avoids that and the sin/cos per
     // sample per bin on every acquisition step (the dominant search-time cost).
     carriers: Arc<Vec<Vec<Complex64>>>,
+    // Half-open bin range this attempt searches — the full sweep, except for
+    // SBAS GEOs once the LO offset is known (see `acquisition_init`).
+    bin_range: (usize, usize),
+}
+
+/// Bin range covering `center_hz ± spread_hz` of the fixed Doppler grid.
+fn doppler_bin_range(center_hz: f64, spread_hz: f64) -> (usize, usize) {
+    let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
+    let lo = ((center_hz - spread_hz + DOPPLER_SPREAD_HZ) / step_hz).floor() as isize;
+    let hi = ((center_hz + spread_hz + DOPPLER_SPREAD_HZ) / step_hz).ceil() as isize + 1;
+    (
+        lo.clamp(0, DOPPLER_SPREAD_BINS as isize) as usize,
+        hi.clamp(0, DOPPLER_SPREAD_BINS as isize) as usize,
+    )
 }
 
 /// Per-channel work/quality counters, aggregated and printed at end of run.
@@ -426,6 +450,7 @@ impl Channel {
                 prn_code_fft,
                 sum_p: vec![vec![0.0; code_sp]; DOPPLER_SPREAD_BINS],
                 carriers,
+                bin_range: (0, DOPPLER_SPREAD_BINS),
             },
         }
     }
@@ -462,13 +487,35 @@ impl Channel {
         // Normal retry rate during the grace window; afterwards (PRN very likely
         // absent) grow the idle time linearly, capped, so the FFT search runs far
         // less often. A successful lock resets num_acq_fails, so a visible SV that
-        // locks during grace is never throttled.
+        // locks during grace is never throttled. SBAS idles longer from the start:
+        // the block is on by default and a slow first lock costs nothing (the
+        // correction stream repeats every second).
+        let is_sbas = self.sv.constellation == Constellation::SBAS;
+        let t_idle = if is_sbas { T_IDLE_SBAS } else { T_IDLE };
         let idle = if self.num_acq_fails <= ACQ_FAIL_GRACE {
-            T_IDLE
+            t_idle
         } else {
-            (T_IDLE * (self.num_acq_fails - ACQ_FAIL_GRACE + 1) as f64).min(T_IDLE_MAX)
+            (t_idle * (self.num_acq_fails - ACQ_FAIL_GRACE + 1) as f64).min(T_IDLE_MAX)
         };
         if self.num_idl_samples as f64 * self.code_sec > idle {
+            // Enough GEOs already track → their corrections are flowing; the
+            // remaining SBAS PRNs stop burning the FFT search entirely.
+            if is_sbas
+                && self
+                    .pub_state
+                    .lock()
+                    .unwrap()
+                    .channels
+                    .iter()
+                    .filter(|(sv, cs)| {
+                        sv.constellation == Constellation::SBAS && cs.state == State::Tracking
+                    })
+                    .count()
+                    >= SBAS_TRACKED_ENOUGH
+            {
+                self.num_idl_samples = 0;
+                return;
+            }
             self.acquisition_start();
         }
     }
@@ -478,6 +525,28 @@ impl Channel {
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
         self.num_trk_samples = 0;
+        // GEOs are geostationary: their physical Doppler is ±100 Hz-class, so
+        // the ±12 kHz sweep exists only for the front-end LO offset — which is
+        // common-mode, so any tracking channel's Doppler measures it. Once one
+        // is available, SBAS searches LO ± SBAS_DOPPLER_SPREAD_HZ (~4× fewer
+        // bins); until then (or for non-SBAS SVs) the full sweep stands.
+        self.acq.bin_range = (0, DOPPLER_SPREAD_BINS);
+        if self.sv.constellation == Constellation::SBAS {
+            let dopplers: Vec<f64> = {
+                let st = self.pub_state.lock().unwrap();
+                st.channels
+                    .values()
+                    .filter(|cs| cs.state == State::Tracking)
+                    .map(|cs| cs.doppler_hz)
+                    .collect()
+            };
+            if !dopplers.is_empty() {
+                let mut d = dopplers;
+                d.sort_by(f64::total_cmp);
+                let lo_offset = d[d.len() / 2];
+                self.acq.bin_range = doppler_bin_range(lo_offset, SBAS_DOPPLER_SPREAD_HZ);
+            }
+        }
     }
 
     fn acquisition_start(&mut self) {
@@ -581,8 +650,9 @@ impl Channel {
         // The feed hands us two code periods; correlate over the most recent one.
         let iq_vec_slice = &iq_vec[self.code_sp..];
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
+        let (bin_lo, bin_hi) = self.acq.bin_range;
 
-        for i in 0..DOPPLER_SPREAD_BINS {
+        for i in bin_lo..bin_hi {
             let c_non_coherent = self.acquisition_integrate_correlation(iq_vec_slice, i);
             assert_eq!(c_non_coherent.len(), self.code_sp);
 
@@ -607,7 +677,7 @@ impl Channel {
             // spread interference energy; with several strong SVs present (e.g.
             // the CTTC capture) that steers acquisition to an interference bin
             // near 0 Hz and misses the real auto-correlation peak.
-            for i in 0..DOPPLER_SPREAD_BINS {
+            for i in bin_lo..bin_hi {
                 let (j_peak, v_peak) = get_max_with_idx(&self.acq.sum_p[i]);
                 if v_peak > p_peak {
                     idx = i;
@@ -628,7 +698,7 @@ impl Channel {
             // power per cell; (peak − mean)/mean is the SNR in the coherent
             // bandwidth 1/T, and dividing by T = code_sec converts to the
             // 1 Hz reference: C/N0 = 10·log10(SNR / T) dB-Hz.
-            let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / DOPPLER_SPREAD_BINS as f64;
+            let p_avg = p_total / self.acq.sum_p[idx].len() as f64 / (bin_hi - bin_lo) as f64;
             let cn0 = 10.0 * ((p_peak - p_avg) / p_avg / self.code_sec).log10();
             self.acq_cn0 = cn0;
             self.stats.acq_attempts += 1;
@@ -1058,6 +1128,25 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doppler_bin_range_covers_and_clamps() {
+        // Full grid: ±12 kHz over 75 bins (320 Hz step).
+        let step = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
+        // A centred ±3 kHz window: ~19 bins, containing the centre frequency.
+        let (lo, hi) = doppler_bin_range(0.0, SBAS_DOPPLER_SPREAD_HZ);
+        assert!(hi - lo < DOPPLER_SPREAD_BINS / 3);
+        let f = |i: usize| -DOPPLER_SPREAD_HZ + i as f64 * step;
+        assert!(f(lo) <= -3000.0 && 3000.0 <= f(hi - 1));
+        // An offset window keeps the requested band covered.
+        let (lo, hi) = doppler_bin_range(2700.0, SBAS_DOPPLER_SPREAD_HZ);
+        assert!(f(lo) <= -300.0 && 5700.0 <= f(hi - 1));
+        // Extreme centres clamp to the grid instead of indexing out of it.
+        let (lo, hi) = doppler_bin_range(20_000.0, SBAS_DOPPLER_SPREAD_HZ);
+        assert!(lo <= hi && hi <= DOPPLER_SPREAD_BINS);
+        let (lo, hi) = doppler_bin_range(-20_000.0, SBAS_DOPPLER_SPREAD_HZ);
+        assert!(lo == 0 && hi <= DOPPLER_SPREAD_BINS);
+    }
 
     /// Windowed-sinc FIR low-pass (one-sided cutoff `bw_hz`), circular — a
     /// stand-in for a receiver front-end filter.

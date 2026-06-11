@@ -59,8 +59,13 @@ struct Options {
         default_value = ""
     )]
     sats: String,
-    #[structopt(long, help = "also search the SBAS L1 block (PRN 120-138)")]
+    #[structopt(
+        long,
+        help = "search the SBAS L1 block (PRN 120-138) — on by default; kept for compatibility"
+    )]
     sbas: bool,
+    #[structopt(long, help = "disable the SBAS L1 search")]
+    no_sbas: bool,
     #[structopt(long, help = "also search the QZSS L1 block (PRN 193-202)")]
     qzss: bool,
     #[structopt(short = "-u", long, help = "use ui")]
@@ -156,8 +161,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opt.sig.carrier_hz() / 1_000_000.0
     );
 
+    // SBAS is on by default (--no-sbas disables; bare --sbas is accepted for
+    // compatibility and wins over --no-sbas). The E1 path drops the GEOs
+    // regardless (L1 C/A signals).
+    let sbas = opt.sbas || !opt.no_sbas;
+
     if opt.use_ui {
-        gnss_rcv::egui_main(opt.plots, opt.sbas, opt.qzss);
+        gnss_rcv::egui_main(opt.plots, sbas, opt.qzss);
         return Ok(());
     }
 
@@ -171,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         off_msec: opt.off_msec,
         sig: opt.sig,
         sats: opt.sats.clone(),
-        sbas: opt.sbas,
+        sbas,
         qzss: opt.qzss,
         plots: opt.plots,
         exit_on_fix: opt.exit_on_fix,
