@@ -215,3 +215,30 @@ through automatically; only the discriminator gain is calibrated.
   and the `code_off_sec` capture (the compensation).
 - `src/solver.rs` — the `RESID` diagnostic (printed when `GNSS_TRUTH_ECEF` is set).
 - `scripts/validate_fix.py` — the GPS / Galileo fix-vs-truth regression checks.
+
+## Correction (2026-06-11): the E1/BOC calibration was a mis-attribution
+
+The τ_E1 ≈ 1.95 s / `G_BOC = 0.256` calibration above is **wrong about the
+mechanism**, and with hindsight the numbers say so: the bias it nulled
+(λ_L1 · 2.0 s = 0.381 m/Hz of Doppler) matches the line-of-sight error of a
+**2.000-second orbit-epoch offset** — which is exactly the I/NAV word-5
+transmit-time anchor latency that was diagnosed and fixed later (see
+`nav_anchor_tx`: the broadcast TOW names the start of the 2 s page, but the
+decoder emits the word at the page's end). τ = 1.95 s mimics it at
+0.371 m/Hz — within 2.5%. The DLL was never the source.
+
+Once the anchor was corrected, keeping `G_BOC = 0.256` double-compensated:
+on the ION LimeSDR capture it alone accounted for a self-calibrated Galileo
+measurement noise of ~720 m (vs 14 m for GPS), a 502 m Galileo-only fix and
+a 145 m apparent inter-system bias. Restoring the BPSK gain (3.18, τ ≈
+0.157 s) for BOC gives, on the same capture: Galileo residual spread
+1554 → 8 m, Galileo-only 502 → 148 m, GPS+Galileo combined = GPS-only =
+140 m, inter-system bias +9.4 ns.
+
+The shape story was also tested directly and refuted: a static-correlation
+probe (`dll_discriminator_shape_probe`, channel.rs) shows a front-end
+low-pass barely changes the E−L slope, and a noisy synthetic BOC scene at
+42 dB-Hz still prefers 3.18 (9 m fix) over 0.256 (1570 m). The loop's
+effective discriminator gain is, within measurement error, the same for
+BPSK and BOC(1,1) at our 0.5-code-unit spacing. `GNSS_DLL_GAIN_BOC`
+remains as an experimental override only.

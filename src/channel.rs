@@ -50,17 +50,23 @@ const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 /// Effective early-late discriminator slope (normalized output per unit code
-/// error) that sets the code-loop group delay [`dll_tau`]. It depends on the
-/// correlation peak vs the correlator spacing (`SP_CORR`), so it's signal-specific
-/// and calibrated to null the per-signal residual Doppler slope. The diagnosis and
-/// calibration experiments are written up in `docs/dll-group-delay.md`.
-/// - **BPSK** (L1CA / SBAS): ~1-chip-wide triangular peak, well matched by
-///   `SP_CORR` → a steep discriminator → small group delay (τ ≈ 0.157 s).
+/// error) that sets the code-loop group delay [`dll_tau`]; calibrated to null
+/// the residual Doppler slope (history in `docs/dll-group-delay.md`).
+/// - **BPSK** (L1CA / SBAS): calibrated on gpssim (τ ≈ 0.157 s).
 const DLL_DISC_GAIN_BPSK: f64 = 3.18;
-/// - **BOC(1,1)** (Galileo E1): the ~½-chip-wide main peak is mismatched by the
-///   BPSK-tuned `SP_CORR`, giving a ~12× shallower discriminator → a much larger
-///   group delay (τ ≈ 1.95 s). Tightens the LimeSDR Galileo fix 3.4 km → ~110 m.
-const DLL_DISC_GAIN_BOC: f64 = 0.256;
+/// - **BOC(1,1)** (Galileo E1): the *same* value — the loop's effective gain
+///   is shape-independent within measurement error (verified on ideal and
+///   noisy synthetic BOC scenes and on the real LimeSDR capture). The earlier
+///   0.256 calibration ("BOC needs τ ≈ 1.95 s") was in fact compensating the
+///   then-undiagnosed 2.000 s I/NAV anchor latency: the anchor's orbit-epoch
+///   error produces a Doppler-proportional LOS error of λ·2.0 = 0.381 m/Hz,
+///   which τ = 1.95 s mimics (0.371 m/Hz) to 2.5%. Once the anchor was fixed
+///   (`nav_anchor_tx` latency alignment), 0.256 became a double-correction —
+///   it alone was the ~720 m Galileo measurement noise on LimeSDR; restoring
+///   3.18 took the Galileo-only fix 502 → 148 m and the residual
+///   inter-system bias to +9 ns. GNSS_DLL_GAIN_BOC still overrides it for
+///   experiments.
+const DLL_DISC_GAIN_BOC: f64 = 3.18;
 
 /// Code-loop group delay = 1/(loop velocity gain). `run_dll` corrects `code_off`
 /// at rate `(B_DLL/0.25)·disc_gain` per unit error, so a code-Doppler ramp leaves a
@@ -1000,6 +1006,142 @@ impl Channel {
             State::Acquisition => self.acquisition_process(iq_vec),
             State::Tracking => self.tracking_process(iq_vec),
             State::Idle => self.idle_process(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windowed-sinc FIR low-pass (one-sided cutoff `bw_hz`), circular — a
+    /// stand-in for a receiver front-end filter.
+    fn lowpass(v: &mut [f64], fs: f64, bw_hz: f64) {
+        const TAPS: usize = 101;
+        let fc = bw_hz / fs;
+        let m = (TAPS - 1) as f64 / 2.0;
+        let h: Vec<f64> = (0..TAPS)
+            .map(|k| {
+                let x = k as f64 - m;
+                let sinc = if x == 0.0 {
+                    2.0 * fc
+                } else {
+                    (2.0 * PI * fc * x).sin() / (PI * x)
+                };
+                let w = 0.54 - 0.46 * (2.0 * PI * k as f64 / (TAPS - 1) as f64).cos();
+                sinc * w
+            })
+            .collect();
+        let n = v.len();
+        let orig = v.to_vec();
+        for (i, out) in v.iter_mut().enumerate() {
+            let mut acc = 0.0;
+            for (k, hk) in h.iter().enumerate() {
+                acc += orig[(i + n + k - TAPS / 2) % n] * hk;
+            }
+            *out = acc;
+        }
+    }
+
+    /// The DLL early-late discriminator slope for `sig` at sample rate `fs`,
+    /// optionally through a front-end low-pass — computed exactly as the
+    /// tracking correlator does it (same ZOH replica upsampling, same
+    /// integer-truncated ±pos taps, same (E−L)/(E+L)/2 normalization), with a
+    /// clean noiseless signal at a small code offset. Units: normalized
+    /// discriminator output per code unit (chip; BOC sub-chip for E1) — the
+    /// quantity `DLL_DISC_GAIN_*` calibrates.
+    fn discriminator_slope(sig: Signal, fs: f64, bw_hz: Option<f64>) -> f64 {
+        let code = sig.spreading_code(1).unwrap();
+        let code_len = sig.code_len();
+        let code_sec = sig.code_period_sec();
+        let code_sp = (fs * code_sec) as usize;
+        let replica: Vec<f64> = (0..code_sp)
+            .map(|i| code[i * code_len / code_sp] as f64)
+            .collect();
+        let sp_per_chip = code_sec * fs / code_len as f64;
+        let pos = (SP_CORR * sp_per_chip) as usize;
+
+        let disc = |delta_chips: f64| -> f64 {
+            let chiprate = code_len as f64 / code_sec;
+            let mut s: Vec<f64> = (0..code_sp)
+                .map(|i| {
+                    let t = i as f64 / fs;
+                    let c = ((t * chiprate - delta_chips).rem_euclid(code_len as f64)) as usize;
+                    code[c] as f64
+                })
+                .collect();
+            if let Some(bw) = bw_hz {
+                lowpass(&mut s, fs, bw);
+            }
+            let (mut e, mut l) = (0.0f64, 0.0f64);
+            for j in 0..code_sp {
+                if j + pos < code_sp {
+                    e += s[j] * replica[j + pos];
+                    l += s[j + pos] * replica[j];
+                }
+            }
+            let (e, l) = (e.abs(), l.abs());
+            (e - l) / (e + l) / 2.0
+        };
+
+        let h = 0.05;
+        (disc(h) - disc(-h)) / (2.0 * h)
+    }
+
+    // The shape probe behind the DLL_DISC_GAIN_* constants: measures the
+    // discriminator slope for every signal/front-end combination we care
+    // about, so the hand-calibrated gains (BPSK 3.18, LimeSDR-BOC 0.256)
+    // become explainable — and so a shape-derived gain (the planned online
+    // calibration) has a verified reference implementation.
+    #[test]
+    #[ignore]
+    fn dll_discriminator_shape_probe() {
+        let cases: Vec<(&str, Signal, f64, Option<f64>)> = vec![
+            ("L1CA ideal @2.046M", Signal::L1ca, 2_046_000.0, None),
+            ("L1CA ideal @10M", Signal::L1ca, 10_000_000.0, None),
+            (
+                "L1CA @10M bw 2.5M",
+                Signal::L1ca,
+                10_000_000.0,
+                Some(2_500_000.0),
+            ),
+            ("E1B ideal @4.092M", Signal::GalileoE1b, 4_092_000.0, None),
+            ("E1B ideal @10M", Signal::GalileoE1b, 10_000_000.0, None),
+            (
+                "E1B @10M bw 4M",
+                Signal::GalileoE1b,
+                10_000_000.0,
+                Some(4_000_000.0),
+            ),
+            (
+                "E1B @10M bw 3M",
+                Signal::GalileoE1b,
+                10_000_000.0,
+                Some(3_000_000.0),
+            ),
+            (
+                "E1B @10M bw 2.5M",
+                Signal::GalileoE1b,
+                10_000_000.0,
+                Some(2_500_000.0),
+            ),
+            (
+                "E1B @10M bw 2M",
+                Signal::GalileoE1b,
+                10_000_000.0,
+                Some(2_000_000.0),
+            ),
+        ];
+        let s_ref = discriminator_slope(Signal::L1ca, 2_046_000.0, None);
+        let kappa = DLL_DISC_GAIN_BPSK / s_ref;
+        eprintln!("reference: L1CA ideal slope {s_ref:.3} -> kappa {kappa:.3}");
+        for (name, sig, fs, bw) in cases {
+            let s = discriminator_slope(sig, fs, bw);
+            eprintln!(
+                "{name:22}  slope {s:7.3}   implied gain {:7.3}   tau {:7.3} s",
+                kappa * s,
+                dll_tau(kappa * s)
+            );
         }
     }
 }

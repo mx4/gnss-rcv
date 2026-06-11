@@ -1028,11 +1028,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
 
-        // The scene's BOC is ideal/unfiltered: its E-L discriminator is steep
-        // (BPSK-like), unlike the filtered real captures the default BOC DLL
-        // gain is calibrated for. Without this the tau_dll mismatch leaves a
-        // Doppler-proportional bias (~1.5 km fix error on this scene).
-        unsafe { std::env::set_var("GNSS_DLL_GAIN_BOC", "3.18") };
         let feed = GeoFeed::new_e1(&ephs, truth, fs, fi, 25_000, 45.0, None);
         let state = Arc::new(Mutex::new(GnssState::new()));
         let cfg = ReceiverConfig {
@@ -1697,7 +1692,11 @@ mod tests {
         assert!(n > gps.len().max(gal.len()), "merge must add SVs");
         let c_err = ion_site_error_m(clat, clon);
         assert!(c_err < 1000.0, "combined fix off by {c_err:.0} m");
-        assert!(bias.abs() < 150.0, "system bias {bias:.0} m out of class");
+        assert!(
+            bias.abs() < 30.0,
+            "system bias {bias:.0} m — GGTO/hardware class is metres (was 145 m \
+             when the old BOC DLL calibration double-compensated the anchor fix)"
+        );
     }
 
     fn eph(prn: u8, m0: f64, omg0: f64, f0: f64, cn0: f64) -> RxEphemeris {
