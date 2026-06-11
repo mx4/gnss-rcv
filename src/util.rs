@@ -41,27 +41,33 @@ pub fn correlate_vec(a: &[Complex64], b: &[Complex64]) -> Complex64 {
     sum
 }
 
+/// In-place FFT circular correlation: `buf` enters holding the (carrier-mixed)
+/// samples and leaves holding the complex correlation against `prn_code_fft`.
+/// Allocation-free — the acquisition hot path calls this per Doppler bin per
+/// code period, where per-call buffers were ~120 MB/s of churn per searching
+/// channel at 50 Msps.
+pub fn calc_correlation_inplace(
+    fft_planner: &mut FftPlanner<f64>,
+    buf: &mut [Complex64],
+    prn_code_fft: &[Complex64],
+) {
+    assert_eq!(buf.len(), prn_code_fft.len());
+    fft_planner.plan_fft_forward(buf.len()).process(buf);
+    for (s, c) in buf.iter_mut().zip(prn_code_fft) {
+        *s *= c.conj();
+    }
+    fft_planner.plan_fft_inverse(buf.len()).process(buf);
+    normalize_post_fft(buf);
+}
+
 pub fn calc_correlation(
     fft_planner: &mut FftPlanner<f64>,
     iq_vec: &[Complex64],
     prn_code_fft: &[Complex64],
 ) -> Vec<Complex64> {
-    let num_samples = iq_vec.len();
-    assert_eq!(iq_vec.len(), prn_code_fft.len());
-    let fft_fw = fft_planner.plan_fft_forward(num_samples);
-
-    let mut iq_samples_fft = iq_vec.to_owned();
-
-    fft_fw.process(&mut iq_samples_fft);
-
-    let mut v_res: Vec<_> = (0..num_samples)
-        .map(|i| iq_samples_fft[i] * prn_code_fft[i].conj())
-        .collect();
-
-    let fft_bw = fft_planner.plan_fft_inverse(num_samples);
-    fft_bw.process(&mut v_res);
-    normalize_post_fft(&mut v_res);
-    v_res
+    let mut buf = iq_vec.to_owned();
+    calc_correlation_inplace(fft_planner, &mut buf, prn_code_fft);
+    buf
 }
 
 pub fn doppler_shifted_carrier(doppler_hz: f64, phi: f64, fs: f64, len: usize) -> Vec<Complex64> {

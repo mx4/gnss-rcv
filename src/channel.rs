@@ -14,7 +14,7 @@ use crate::navigation::Navigation;
 use crate::plots::plot_channel;
 use crate::state::ChannelState;
 use crate::state::GnssState;
-use crate::util::calc_correlation;
+use crate::util::calc_correlation_inplace;
 use crate::util::doppler_shift;
 use crate::util::doppler_shifted_carrier;
 use crate::util::get_max_with_idx;
@@ -48,6 +48,9 @@ const T_ACQ: f64 = 0.01; // 10msec acquisition time
 // searching altogether once this many GEOs track — every GEO of a system
 // broadcasts the same corrections, two covers redundancy.
 const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
+// MEO search half-width once the LO offset is known: ±5 kHz of physical
+// Doppler plus margin for LO drift since the measurement.
+const ACQ_SPREAD_LO_KNOWN_HZ: f64 = 6000.0;
 const T_IDLE_SBAS: f64 = 10.0;
 const SBAS_TRACKED_ENOUGH: usize = 2;
 // Tracking this long without one CRC-valid message marks a SBAS channel as a
@@ -179,9 +182,11 @@ pub struct Acquisition {
     // (36×) was ~8.6 GB and OOM'd. Sharing it avoids that and the sin/cos per
     // sample per bin on every acquisition step (the dominant search-time cost).
     carriers: Arc<Vec<Vec<Complex64>>>,
-    // Half-open bin range this attempt searches — the full sweep, except for
-    // SBAS GEOs once the LO offset is known (see `acquisition_init`).
+    // Half-open bin range this attempt searches — the full sweep until the
+    // front-end LO offset is known (see `acquisition_init`).
     bin_range: (usize, usize),
+    // Reused mix/correlation scratch (one code period of samples).
+    buf: Vec<Complex64>,
 }
 
 /// Bin range covering `center_hz ± spread_hz` of the fixed Doppler grid.
@@ -458,6 +463,7 @@ impl Channel {
                 sum_p: vec![vec![0.0; code_sp]; DOPPLER_SPREAD_BINS],
                 carriers,
                 bin_range: (0, DOPPLER_SPREAD_BINS),
+                buf: Vec::new(),
             },
         }
     }
@@ -528,31 +534,40 @@ impl Channel {
     }
 
     fn acquisition_init(&mut self) {
-        self.acq.sum_p = vec![vec![0.0; self.code_sp]; DOPPLER_SPREAD_BINS];
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
         self.num_trk_samples = 0;
-        // GEOs are geostationary: their physical Doppler is ±100 Hz-class, so
-        // the ±12 kHz sweep exists only for the front-end LO offset — which is
-        // common-mode, so any tracking channel's Doppler measures it. Once one
-        // is available, SBAS searches LO ± SBAS_DOPPLER_SPREAD_HZ (~4× fewer
-        // bins); until then (or for non-SBAS SVs) the full sweep stands.
+        // The ±12 kHz sweep exists for the *unknown front-end LO offset*, not
+        // for satellite dynamics — which is common-mode, so any tracking
+        // channel's Doppler measures it (median, against outliers). Once one
+        // is available, every search shrinks to LO ± the physical Doppler
+        // span: ±6 kHz for MEO satellites (±5 kHz orbital + margin), ±3 kHz
+        // for geostationary SBAS. Until then the full sweep stands.
         self.acq.bin_range = (0, DOPPLER_SPREAD_BINS);
-        if self.sv.constellation == Constellation::SBAS {
-            let dopplers: Vec<f64> = {
-                let st = self.pub_state.lock().unwrap();
-                st.channels
-                    .values()
-                    .filter(|cs| cs.state == State::Tracking)
-                    .map(|cs| cs.doppler_hz)
-                    .collect()
+        let dopplers: Vec<f64> = {
+            let st = self.pub_state.lock().unwrap();
+            st.channels
+                .values()
+                .filter(|cs| cs.state == State::Tracking)
+                .map(|cs| cs.doppler_hz)
+                .collect()
+        };
+        if !dopplers.is_empty() {
+            let mut d = dopplers;
+            d.sort_by(f64::total_cmp);
+            let lo_offset = d[d.len() / 2];
+            let spread = if self.sv.constellation == Constellation::SBAS {
+                SBAS_DOPPLER_SPREAD_HZ
+            } else {
+                ACQ_SPREAD_LO_KNOWN_HZ
             };
-            if !dopplers.is_empty() {
-                let mut d = dopplers;
-                d.sort_by(f64::total_cmp);
-                let lo_offset = d[d.len() / 2];
-                self.acq.bin_range = doppler_bin_range(lo_offset, SBAS_DOPPLER_SPREAD_HZ);
-            }
+            self.acq.bin_range = doppler_bin_range(lo_offset, spread);
+        }
+        // Zero (only) the rows this attempt integrates — replacing the old
+        // full reallocation, which at 50 Msps was a 60 MB alloc per attempt.
+        let (lo, hi) = self.acq.bin_range;
+        for row in &mut self.acq.sum_p[lo..hi] {
+            row.fill(0.0);
         }
     }
 
@@ -615,29 +630,6 @@ impl Channel {
         self.update_state_cn0();
     }
 
-    fn acquisition_integrate_correlation(
-        &mut self,
-        iq_vec_slice: &[Complex64],
-        bin: usize,
-    ) -> Vec<f64> {
-        let mut iq_vec = iq_vec_slice.to_vec();
-
-        assert_eq!(iq_vec.len(), self.acq.prn_code_fft.len());
-        self.stats.acq_corrs += 1;
-
-        // Apply the pre-computed carrier for this Doppler bin (was a per-sample
-        // sin/cos via doppler_shift on every call).
-        let carrier = &self.acq.carriers[bin];
-        for (s, c) in iq_vec.iter_mut().zip(carrier.iter()) {
-            *s *= *c;
-        }
-
-        let corr = calc_correlation(&mut self.fft_planner, &iq_vec, &self.acq.prn_code_fft);
-        let corr_vec: Vec<_> = corr.iter().map(|v| v.norm_sqr()).collect();
-
-        corr_vec
-    }
-
     fn update_all_plots(&mut self, force: bool) {
         if !force && self.ts_sec - self.hist.last_plot_ts <= 2.0 {
             return;
@@ -661,12 +653,18 @@ impl Channel {
         let (bin_lo, bin_hi) = self.acq.bin_range;
 
         for i in bin_lo..bin_hi {
-            let c_non_coherent = self.acquisition_integrate_correlation(iq_vec_slice, i);
-            assert_eq!(c_non_coherent.len(), self.code_sp);
-
-            #[allow(clippy::needless_range_loop)]
-            for j in 0..self.code_sp {
-                self.acq.sum_p[i][j] += c_non_coherent[j];
+            self.stats.acq_corrs += 1;
+            // Mix this bin's carrier into the reused scratch, correlate in
+            // place, integrate |·|² — no per-bin allocations.
+            let acq = &mut self.acq;
+            acq.buf.clear();
+            acq.buf.extend_from_slice(iq_vec_slice);
+            for (s, c) in acq.buf.iter_mut().zip(acq.carriers[i].iter()) {
+                *s *= *c;
+            }
+            calc_correlation_inplace(&mut self.fft_planner, &mut acq.buf, &acq.prn_code_fft);
+            for (p, v) in acq.sum_p[i].iter_mut().zip(acq.buf.iter()) {
+                *p += v.norm_sqr();
             }
         }
 
