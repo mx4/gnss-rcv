@@ -565,6 +565,19 @@ impl PositionSolver {
                 let lon = (pvt.lat_long_alt_deg_deg_m.1 + 180.0).rem_euclid(360.0) - 180.0;
                 let height_m = pvt.lat_long_alt_deg_deg_m.2;
 
+                // gnss-rtk 0.8.0 computes VDOP against a corrupted "up" axis: its
+                // ECEF->ENU rotation (DilutionOfPrecision::q_enu) puts sin(lon)
+                // where the up vector needs sin(lat), so `pvt.vdop` is wrong (it
+                // even comes out below HDOP, which is physically impossible for a
+                // ground receiver). GDOP (the matrix trace, rotation-invariant),
+                // HDOP and TDOP are correct, and the estimated state is just
+                // position+clock — verified at runtime that GDOP^2 == HDOP^2 +
+                // VDOP^2 + TDOP^2 holds with the value below — so recover the true
+                // VDOP from those. (A future multi-constellation solve would add an
+                // inter-system-bias state and this would over-estimate VDOP.)
+                let vdop = (pvt.gdop.powi(2) - pvt.hdop.powi(2) - pvt.tdop.powi(2))
+                    .max(0.0)
+                    .sqrt();
                 {
                     let mut st = self.pub_state.lock().unwrap();
                     st.latitude = lat;
@@ -573,16 +586,15 @@ impl PositionSolver {
                     // Fix precision: dilution-of-precision geometry factors and
                     // the count of satellites that contributed to this solve.
                     st.hdop = pvt.hdop;
-                    st.vdop = pvt.vdop;
+                    st.vdop = vdop;
                     st.fix_sv_count = pvt.sv.len();
                 }
 
                 log::warn!(
                     "{}",
                     format!(
-                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv  https://maps.google.com/?ll={lat},{lon}",
+                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={vdop:.1} {}sv  https://maps.google.com/?ll={lat},{lon}",
                         pvt.hdop,
-                        pvt.vdop,
                         pvt.sv.len()
                     )
                     .green()
