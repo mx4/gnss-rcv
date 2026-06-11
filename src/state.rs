@@ -17,6 +17,10 @@ pub struct ChannelState {
     pub code_idx: f64,
     pub phi: f64,
     pub has_eph: bool,
+    /// Ephemeris decode progress: distinct ephemeris-bearing messages collected
+    /// so far (Galileo I/NAV words 1-5, or GPS LNAV subframes 1-3). Full set =
+    /// `has_eph`. Shown per-SV in the diagnostics table.
+    pub eph_pages: u8,
     /// Galileo OSNMA: this SV's navigation data has been cryptographically
     /// authenticated (set by the receiver-level verifier; always false off OSNMA).
     pub osnma_verified: bool,
@@ -32,6 +36,7 @@ impl Default for ChannelState {
             code_idx: 0.0,
             phi: 0.0,
             has_eph: false,
+            eph_pages: 0,
             osnma_verified: false,
             elevation_deg: 0.0,
             azimuth_deg: 0.0,

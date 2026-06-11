@@ -50,6 +50,12 @@ pub struct Ephemeris {
     pub toc: u32, // Time of Clock
     pub toe: u32, // Reference Time Ephemeris
     pub fit: u32, // fit interval (h)
+    /// Decode-progress bitmask: bit *n* is set once ephemeris-bearing message
+    /// *n* has been parsed into this struct — Galileo I/NAV word types 1-5, or
+    /// GPS LNAV subframes 1-3. `pages()` (its `count_ones`) is how far the
+    /// broadcast ephemeris has been collected; a full set (5 Galileo / 3 GPS)
+    /// is a complete ephemeris. Surfaced to the UI as the per-SV progress.
+    pub eph_mask: u8,
 }
 
 impl Ephemeris {
@@ -75,6 +81,13 @@ impl Ephemeris {
             && self.ecc < 0.5        // sanity: real orbits have ecc << 1
             && self.i0 != 0.0        // inclination at reference time
             && self.omg_dot != 0.0 // rate of right ascension
+    }
+
+    /// Number of distinct ephemeris-bearing messages decoded so far — Galileo
+    /// I/NAV words 1-5 or GPS LNAV subframes 1-3. The UI's per-SV decode
+    /// progress; reaches 5 (Galileo) / 3 (GPS) when the ephemeris is complete.
+    pub fn pages(&self) -> u8 {
+        self.eph_mask.count_ones() as u8
     }
 }
 

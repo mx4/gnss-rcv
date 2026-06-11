@@ -303,7 +303,13 @@ impl Channel {
 
     fn update_state_cn0(&self) {
         let cn0 = self.trk.cn0;
-        self.publish(|cs| cs.cn0 = cn0);
+        // Piggyback the ephemeris decode progress on the frequent cn0 publish so
+        // the UI's per-SV "pages/needed" counter advances as words arrive.
+        let eph_pages = self.nav.eph.pages();
+        self.publish(|cs| {
+            cs.cn0 = cn0;
+            cs.eph_pages = eph_pages;
+        });
     }
 
     /// Build the per-Doppler-bin carrier replicas once, to be shared (cloned

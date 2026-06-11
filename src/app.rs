@@ -570,6 +570,7 @@ impl GnssRcvApp {
                 let doppler_hz = channel.unwrap().doppler_hz;
                 let code_idx = channel.unwrap().code_idx;
                 let has_eph = channel.unwrap().has_eph;
+                let eph_pages = channel.unwrap().eph_pages;
                 let osnma_verified = channel.unwrap().osnma_verified;
 
                 body.row(row_height, |mut row| {
@@ -604,8 +605,13 @@ impl GnssRcvApp {
                         });
                     });
                     row.col(|ui| {
+                        // Complete → green check; otherwise show collection
+                        // progress (Galileo needs 5 I/NAV words, GPS 3 subframes).
                         if has_eph {
-                            ui.label("✓");
+                            ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✓");
+                        } else {
+                            let needed = if is_galileo { 5 } else { 3 };
+                            ui.weak(format!("{eph_pages}/{needed}"));
                         }
                     });
                     if is_galileo {

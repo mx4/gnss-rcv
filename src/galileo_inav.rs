@@ -271,6 +271,11 @@ pub fn decode_ephemeris_word(eph: &mut Ephemeris, word: &InavWord) {
     let b = &word.bits[..];
     let u = |start: usize, len: usize| ubits(b, start - 1, len);
     let s = |start: usize, len: usize| sbits(b, start - 1, len) as f64;
+    // Track decode progress: word types 1-5 each carry a slice of the
+    // orbit/clock set (5 = complete). Word arrives only after its CRC passes.
+    if (1..=5).contains(&word.word_type) {
+        eph.eph_mask |= 1 << word.word_type;
+    }
     match word.word_type {
         1 => {
             eph.iode = u(7, 10); // IODnav

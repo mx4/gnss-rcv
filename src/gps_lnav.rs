@@ -587,6 +587,7 @@ pub(crate) fn test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
 
 /// Subframe 1: GPS week + clock (af0/af1/af2, tgd, toc).
 pub(crate) fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+    eph.eph_mask |= 1 << 1; // decode progress: subframe 1 of 3 (clock)
     eph.tow = getbitu(buf, 30, 17) * 6;
     // The broadcast week is mod-1024 (10 bits, IS-GPS-200 20.3.3.3.1.1); +2048
     // pins it to the third GPS-week epoch, i.e. weeks 2048..3071 = 2019-04-07
@@ -623,6 +624,7 @@ pub(crate) fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
 
 /// Subframe 2: orbit size/shape (M0, e, √A, Crs, Cuc, Cus, Δn, toe).
 pub(crate) fn decode_lnav_subframe2(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+    eph.eph_mask |= 1 << 2; // decode progress: subframe 2 of 3 (orbit size/shape)
     eph.tow = getbitu(buf, 30, 17) * 6;
     eph.iode = getbitu(buf, 60, 8);
     eph.crs = getbits(buf, 68, 16) as f64 * P2_5;
@@ -653,6 +655,7 @@ pub(crate) fn decode_lnav_subframe2(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
 
 /// Subframe 3: orientation (Ω0, i0, ω, ΩDOT, IDOT, Cic, Cis, Crc).
 pub(crate) fn decode_lnav_subframe3(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+    eph.eph_mask |= 1 << 3; // decode progress: subframe 3 of 3 (orientation)
     eph.tow = getbitu(buf, 30, 17) * 6;
     eph.cic = getbits(buf, 60, 16) as f64 * P2_29;
     eph.cis = getbits(buf, 120, 16) as f64 * P2_29;
