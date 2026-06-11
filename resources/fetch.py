@@ -101,7 +101,7 @@ RECORDINGS: List[Rec] = [
         "https://zenodo.org/records/15470143/files/clearsky_signal_C-1.bin?download=1",
         "clearsky_signal_C-1.bin", 0, "raw",
         "-t 2xi16-be --fs 50000000 --sig E1B --sats 2,10,11,14,25,30,34,36",
-        "Tampere Univ. Galileo E1 clear-sky 2025, 50 MHz zero-IF, ~150s (Tampere 61.45N 23.86E). The dataset labels it 32-bit float but it is int16 big-endian (2xi16-be). 8 E1B SVs acquire (E02/10/11/14/25/30/34/36, 35-45 dB-Hz); restrict --sats -- all 36 PRNs OOMs at 50 MHz (~13 GB of acquisition replicas)",
+        "Tampere Univ. Galileo E1 clear-sky 2025, 50 MHz zero-IF, ~150s. The dataset labels it 32-bit float but it is int16 big-endian (2xi16-be). 8 E1B SVs (E02/10/11/14/25/30/34/36) decode + give a Galileo-only fix at 61.4500, 23.8563 (Tampere, ~few m). Restrict --sats -- all 36 PRNs OOMs at 50 MHz (~13 GB of acquisition replicas)",
         ("galileo",)),
     Rec("fgi-osnma",
         "https://etsin.fairdata.fi/dataset/09dc5c1b-933d-4efd-aa66-be2c07fab3b3",
