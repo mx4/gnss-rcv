@@ -29,10 +29,9 @@ struct Options {
     hostname: String,
     #[structopt(
         long,
-        help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B) for a mixed session",
-        default_value = "L1CA"
+        help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B).                 Default: every family the bandwidth admits (L1CA always; +E1B at fs >= 4.092 MHz)"
     )]
-    sig: String,
+    sig: Option<String>,
     #[structopt(short = "d", long, help = "use rtl-sdr device")]
     use_device: bool,
     #[structopt(short = "l", long, help = "path to log file", default_value = "")]
@@ -159,19 +158,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opt.off_msec,
         opt.num_msec,
     );
-    let families: Vec<Signal> = opt
-        .sig
-        .split(',')
-        .map(|t| {
-            t.trim()
-                .parse::<Signal>()
-                .unwrap_or_else(|_| panic!("invalid signal: {t}"))
-        })
-        .collect();
+    let families: Vec<Signal> = match &opt.sig {
+        Some(list) => list
+            .split(',')
+            .map(|t| {
+                t.trim()
+                    .parse::<Signal>()
+                    .unwrap_or_else(|_| panic!("invalid signal: {t}"))
+            })
+            .collect(),
+        // All-signals default, gated by what the bandwidth can carry: the
+        // C/A family always fits; E1 BOC(1,1) needs its ±2.046 MHz main
+        // lobes (fs ≥ 4.092 Msps).
+        None => {
+            let mut f = vec![Signal::L1ca];
+            if opt.fs >= 4_092_000.0 {
+                f.push(Signal::GalileoE1b);
+            }
+            f
+        }
+    };
     let sig = families[0];
     log::warn!(
-        "gnss-rcv: using signal {} frequency: {:.1} MHz",
-        opt.sig,
+        "gnss-rcv: signal families {:?} (L1 band, {:.1} MHz)",
+        families.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
         sig.carrier_hz() / 1_000_000.0
     );
 

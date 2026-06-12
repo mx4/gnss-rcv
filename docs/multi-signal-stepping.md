@@ -1,5 +1,8 @@
 # Multi-signal stepping — design
 
+> **Status: COMPLETE** (M1-M6 landed 2026-06-12, cfa0fbc..). The mixed
+> GPS+Galileo+EGNOS fix is the validate_fix.py "Mixed fix" gate.
+
 Goal: one session runs every signal family the front end can carry — GPS/QZSS
 L1 C/A and SBAS L1 (1 ms code periods) together with Galileo E1 (4 ms) — so a
 single pass over the samples produces a mixed GPS+Galileo+EGNOS fix. This is

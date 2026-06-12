@@ -219,6 +219,44 @@ def validate_sbas_decode():
     return "PASS" if ok else "FAIL"
 
 
+# --- Mixed GPS+Galileo fix: the multi-signal stepping acceptance ------------
+
+# tuni2025: both constellations fix independently; the mixed session must
+# solve them in ONE pass (no --sig: the all-signals default picks L1CA+E1B
+# from the 50 MHz bandwidth). Site truth ~61.4500, 23.8566.
+MIXED_CANDIDATE = ("resources/clearsky_signal_C-1.bin",
+                   ["-t", "2xi16-be", "--fs", "50000000"], 60000)
+MIXED_MIN_SV = 12      # combined pool (GPS-only solves with ~13)
+MIXED_MIN_GAL = 3      # Galileo must actually contribute
+MIXED_GATE_DEG = 0.01  # ~1 km, coarse site gate
+
+
+def validate_mixed_fix():
+    """-> 'PASS' / 'FAIL' / 'SKIP'."""
+    print("\n=== Mixed GPS+Galileo fix (multi-signal stepping) ===")
+    path, fmt_args, num_msec = MIXED_CANDIDATE
+    if not os.path.isfile(path):
+        print("SKIP: tuni2025 not present -- fetch with ./resources/fetch.py tuni2025")
+        return "SKIP"
+    print(f"using {path} ({num_msec // 1000}s, families auto from bandwidth)")
+    summary, _ = run_json(["-f", path, *fmt_args, "--num-msec", str(num_msec)])
+    if summary is None or not summary.get("fix"):
+        print("FAIL: no fix / no JSON")
+        return "FAIL"
+    fix = summary["fix"]
+    gal_used = sum(1 for s in summary.get("sats", [])
+                   if s.get("sv", "").startswith("E") and s.get("used_in_fix"))
+    err_lat = abs(fix["lat"] - 61.4500)
+    err_lon = abs(fix["lon"] - 23.8566)
+    print(f"  fix: {fix['lat']:.6f}, {fix['lon']:.6f}  ({fix['n_sv']} SVs, "
+          f"{gal_used} Galileo used)")
+    ok = (fix["n_sv"] >= MIXED_MIN_SV and gal_used >= MIXED_MIN_GAL
+          and err_lat < MIXED_GATE_DEG and err_lon < MIXED_GATE_DEG)
+    print(f"  RESULT: {'PASS' if ok else 'FAIL'} (need >= {MIXED_MIN_SV} SVs, "
+          f">= {MIXED_MIN_GAL} Galileo, within {MIXED_GATE_DEG} deg)")
+    return "PASS" if ok else "FAIL"
+
+
 def main() -> int:
     root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if root.returncode != 0:
@@ -235,6 +273,7 @@ def main() -> int:
         "GPS fix": validate_gps_fix(),
         "Galileo I/NAV": validate_galileo_decode(),
         "SBAS L1": validate_sbas_decode(),
+        "Mixed fix": validate_mixed_fix(),
     }
 
     print("\n=== summary ===")
