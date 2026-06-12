@@ -118,8 +118,8 @@ pub enum State {
 
 #[derive(Default)]
 pub struct Tracking {
-    prn_code: Vec<Complex32>, // upsampled
-    sig_buf: Vec<Complex32>,  // reused scratch for the Doppler-mixed code period
+    prn_code: Vec<f32>,      // upsampled, real (±1): 2 mults/sample, not 4
+    sig_buf: Vec<Complex32>, // reused scratch for the Doppler-mixed code period
     doppler_hz: f64,
     code_off_sec: f64,
     code_rate_trim: f64,  // DLL integrator: residual code-rate error (s/s)
@@ -446,14 +446,17 @@ impl Channel {
         // Resample the PRN code to the actual samples-per-code-period (code_sp =
         // fs * code_sec), so any sampling rate works. (For fs = 2.046 MHz this is
         // exactly 2 samples/chip, matching the previous hardcoded duplication.)
-        let prn_code: Vec<Complex32> = (0..code_sp)
+        let prn_code: Vec<f32> = (0..code_sp)
             .map(|i| {
                 let chip = i * code_len / code_sp;
-                Complex32::new(code_buf[chip] as f32, 0.0)
+                code_buf[chip] as f32
             })
             .collect();
 
-        let mut prn_code_fft = prn_code.clone();
+        // Acquisition correlates by FFT, so it keeps a complex copy; tracking
+        // multiplies the real ±1 code directly (channel.rs correlation kernel).
+        let mut prn_code_fft: Vec<Complex32> =
+            prn_code.iter().map(|&c| Complex32::new(c, 0.0)).collect();
 
         let fft_fw = fft_planner.plan_fft_forward(prn_code_fft.len());
         fft_fw.process(&mut prn_code_fft);
@@ -840,11 +843,12 @@ impl Channel {
 
         // f64 accumulators: 50k f32 products summed in f32 would cost ~3
         // significant digits of the discriminator inputs. The multiplies (the
-        // SIMD-heavy part) stay f32.
+        // SIMD-heavy part) stay f32. The code is real (±1), so sig·code is two
+        // scalar multiplies (sig.re·c, sig.im·c), not a full complex product.
         #[inline]
-        fn acc(a: &mut Complex64, p: Complex32) {
-            a.re += p.re as f64;
-            a.im += p.im as f64;
+        fn acc(a: &mut Complex64, s: Complex32, c: f32) {
+            a.re += (s.re * c) as f64;
+            a.im += (s.im * c) as f64;
         }
         let mut corr_prompt = Complex64::default();
         let mut corr_early = Complex64::default();
@@ -857,13 +861,13 @@ impl Channel {
         for j in 0..len {
             let sj = sig[j];
             let cj = code[j];
-            acc(&mut corr_prompt, sj * cj);
+            acc(&mut corr_prompt, sj, cj);
             if j + pos < len {
-                acc(&mut corr_early, sj * code[j + pos]);
-                acc(&mut corr_late, sig[j + pos] * cj);
+                acc(&mut corr_early, sj, code[j + pos]);
+                acc(&mut corr_late, sig[j + pos], cj);
             }
             if j + pos_neutral < len {
-                acc(&mut corr_neutral, sj * code[j + pos_neutral]);
+                acc(&mut corr_neutral, sj, code[j + pos_neutral]);
             }
         }
 
