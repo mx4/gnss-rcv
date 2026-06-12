@@ -12,8 +12,8 @@ pub struct Measurement {
     /// Fractional code phase (s) paired with `trk_phase` (includes the DLL
     /// group-delay compensation; see channel.rs).
     pub code_off_sec: f64,
-    // Integer transmit-time in seconds since tracking start: num_trk_samples *
-    // code_sec. Because num_trk_samples counts *transmitted* code periods
+    // Integer transmit-time in seconds since tracking start: num_trk_periods *
+    // code_sec. Because num_trk_periods counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver
     // wall clock ts_sec. The absolute sub-ms code phase is kept in code_off_sec.
     pub trk_phase: f64, // current integer transmit-time

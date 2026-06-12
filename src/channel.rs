@@ -133,20 +133,20 @@ pub struct Tracking {
     prn_code: Vec<f32>, // upsampled real (±1) code; built on lock, freed on idle
     doppler_hz: f64,
     code_off_sec: f64,
-    code_rate_trim: f64,  // DLL integrator: residual code-rate error (s/s)
-    hot_disc_streak: u32, // consecutive DLL updates with the discriminator saturated
+    code_rate_trim: f64,        // DLL integrator: residual code-rate error (s/s)
+    disc_saturated_streak: u32, // consecutive DLL updates with the discriminator saturated
     cn0: f64,
-    adr: f64,
+    accum_doppler_cyc: f64,
     phi: f64,
     err_phase: f64,
     sum_corr_e: f64,
     sum_corr_l: f64,
     sum_corr_p: f64,
-    sum_corr_n: f64,
-    txp_ts0: f64,    // baseline rx time for the code-implied-Doppler slope (0 = unset)
-    txp0: f64,       // baseline transmit phase paired with txp_ts0
-    div_ema: f64,    // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
-    div_streak: u32, // consecutive windows the divergence exceeds the gate
+    sum_corr_noise: f64,
+    tx_phase_ref_ts: f64, // baseline rx time for the code-implied-Doppler slope (0 = unset)
+    tx_phase_ref: f64,    // baseline transmit phase paired with tx_phase_ref_ts
+    divergence_ema: f64,  // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
+    divergence_streak: u32, // consecutive windows the divergence exceeds the gate
 }
 
 // Rolling per-channel diagnostics. These are capped ring buffers: new samples
@@ -245,6 +245,19 @@ pub struct ChannelStats {
     pub used_in_fix: bool,   // contributed to at least one successful fix
 }
 
+/// The per-channel scalar parameters passed to [`Channel::new`] — signal
+/// identity, front-end rates, and diagnostics flags. Bundled so the
+/// constructor takes the config plus its two shared handles (state, carriers)
+/// rather than a long positional argument list.
+pub struct ChannelConfig {
+    pub sig: Signal,
+    pub sv: SV,
+    pub fs: f64,
+    pub fi: f64,
+    pub plots: bool,
+    pub diagnostics: bool,
+}
+
 pub struct Channel {
     pub pub_state: Arc<Mutex<GnssState>>,
     pub sv: SV,
@@ -268,15 +281,15 @@ pub struct Channel {
     state: State,
 
     pub ts_sec: f64, // current time
-    pub num_trk_samples: usize,
+    pub num_trk_periods: usize,
     // Continuous count of transmitted code periods since tracking start. Unlike
-    // `num_trk_samples` (whose +/-1 wraps are for correlation-buffer alignment),
+    // `num_trk_periods` (whose +/-1 wraps are for correlation-buffer alignment),
     // this advances by +1 per processed code period and is corrected at code-phase
     // wraps with the sign that keeps the *transmit phase* continuous. It is the
     // source for the pseudorange transmit-time and must not be reused for buffering.
     num_tx_codes: f64,
-    num_acq_samples: usize,
-    num_idl_samples: usize,
+    num_acq_periods: usize,
+    num_idl_periods: usize,
     // Consecutive failed acquisitions (reset on a successful lock); drives the
     // idle backoff for PRNs that are very likely not in view.
     num_acq_fails: u32,
@@ -425,15 +438,18 @@ impl Channel {
     }
 
     pub fn new(
-        sig: Signal,
-        sv: SV,
-        fs: f64,
-        fi: f64,
-        plots: bool,
-        diagnostics: bool,
+        config: ChannelConfig,
         pub_state: Arc<Mutex<GnssState>>,
         carriers: Arc<Vec<Vec<Complex32>>>,
     ) -> Self {
+        let ChannelConfig {
+            sig,
+            sv,
+            fs,
+            fi,
+            plots,
+            diagnostics,
+        } = config;
         let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
             panic!(
                 "no spreading code for {sig} PRN {} (Galileo E1 codes pending)",
@@ -492,12 +508,12 @@ impl Channel {
             code_sp,
             tau_dll,
 
-            num_acq_samples: 0,
-            num_idl_samples: 0,
+            num_acq_periods: 0,
+            num_idl_periods: 0,
             num_acq_fails: 0,
             subfr_at_lock: 0,
             acq_cn0: 0.0,
-            num_trk_samples: 0,
+            num_trk_periods: 0,
             num_tx_codes: 0.0,
 
             state: State::Acquisition,
@@ -536,7 +552,9 @@ impl Channel {
             .into_iter()
             .map(|c| Complex32::new(c, 0.0))
             .collect();
-        self.fft_planner.plan_fft_forward(fft.len()).process(&mut fft);
+        self.fft_planner
+            .plan_fft_forward(fft.len())
+            .process(&mut fft);
         fft
     }
 
@@ -568,13 +586,13 @@ impl Channel {
         }
 
         self.set_state(State::Idle);
-        self.num_idl_samples = 0;
-        self.num_trk_samples = 0;
-        self.num_acq_samples = 0;
+        self.num_idl_periods = 0;
+        self.num_trk_periods = 0;
+        self.num_acq_periods = 0;
     }
 
     fn idle_process(&mut self) {
-        self.num_idl_samples += 1;
+        self.num_idl_periods += 1;
         // Normal retry rate during the grace window; afterwards (PRN very likely
         // absent) grow the idle time linearly, capped, so the FFT search runs far
         // less often. A successful lock resets num_acq_fails, so a visible SV that
@@ -588,7 +606,7 @@ impl Channel {
         } else {
             (t_idle * (self.num_acq_fails - ACQ_FAIL_GRACE + 1) as f64).min(T_IDLE_MAX)
         };
-        if self.num_idl_samples as f64 * self.code_sec > idle {
+        if self.num_idl_periods as f64 * self.code_sec > idle {
             // Enough GEOs already track → their corrections are flowing; the
             // remaining SBAS PRNs stop burning the FFT search entirely.
             if is_sbas
@@ -604,7 +622,7 @@ impl Channel {
                     .count()
                     >= SBAS_TRACKED_ENOUGH
             {
-                self.num_idl_samples = 0;
+                self.num_idl_periods = 0;
                 return;
             }
             self.acquisition_start();
@@ -617,9 +635,9 @@ impl Channel {
         if self.acq.prn_code_fft.is_empty() {
             self.acq.prn_code_fft = self.build_acq_fft();
         }
-        self.num_acq_samples = 0;
-        self.num_idl_samples = 0;
-        self.num_trk_samples = 0;
+        self.num_acq_periods = 0;
+        self.num_idl_periods = 0;
+        self.num_trk_periods = 0;
         // The ±12 kHz sweep exists for the *unknown front-end LO offset*, not
         // for satellite dynamics — which is common-mode, so any tracking
         // channel's Doppler measures it (median, against outliers). Once one
@@ -673,26 +691,26 @@ impl Channel {
         self.trk.prn_code = self.build_prn_code();
         self.trk.doppler_hz = 0.0;
         self.trk.cn0 = 0.0;
-        self.trk.adr = 0.0;
+        self.trk.accum_doppler_cyc = 0.0;
         self.trk.code_off_sec = 0.0;
         // code_rate_trim deliberately survives re-locks: the rate it learns
         // (dominated by the front end's sample-clock vs LO skew, ~850 ns/s on
         // SJTU) is a receiver constant, not a per-pass quantity — re-winding
         // from zero leaves every re-lock a ~10 s biased tail. It is zeroed
         // only on a code-carrier divergence drop (known-bad loop state).
-        self.trk.hot_disc_streak = 0;
+        self.trk.disc_saturated_streak = 0;
         self.trk.err_phase = 0.0;
         self.trk.sum_corr_p = 0.0;
         self.trk.sum_corr_e = 0.0;
         self.trk.sum_corr_l = 0.0;
-        self.trk.sum_corr_n = 0.0;
-        self.trk.txp_ts0 = 0.0;
-        self.trk.txp0 = 0.0;
-        self.trk.div_ema = 0.0;
-        self.trk.div_streak = 0;
-        self.num_trk_samples = 0;
-        self.num_acq_samples = 0;
-        self.num_idl_samples = 0;
+        self.trk.sum_corr_noise = 0.0;
+        self.trk.tx_phase_ref_ts = 0.0;
+        self.trk.tx_phase_ref = 0.0;
+        self.trk.divergence_ema = 0.0;
+        self.trk.divergence_streak = 0;
+        self.num_trk_periods = 0;
+        self.num_acq_periods = 0;
+        self.num_idl_periods = 0;
         self.num_tx_codes = 0.0;
         self.subfr_at_lock = self.stats.subframes;
         self.nav.meas = crate::ephemeris::Measurement::default();
@@ -743,10 +761,10 @@ impl Channel {
         // Publish a history snapshot at 2-second cadence for the diagnostics tab.
         // Only the UI/plots consume it, and headless the History is trimmed to
         // HISTORY_MIN anyway — so skip the ~1.5 MB clone when nothing reads it.
-        if self.diagnostics {
-            if let Ok(mut st) = self.pub_state.lock() {
-                st.histories.insert(self.sv, self.hist.clone());
-            }
+        if self.diagnostics
+            && let Ok(mut st) = self.pub_state.lock()
+        {
+            st.histories.insert(self.sv, self.hist.clone());
         }
     }
 
@@ -790,14 +808,17 @@ impl Channel {
                     );
                 }
             }
-            for (p, v) in self.acq.sum_p[i - bin_lo].iter_mut().zip(self.scratch.iter()) {
+            for (p, v) in self.acq.sum_p[i - bin_lo]
+                .iter_mut()
+                .zip(self.scratch.iter())
+            {
                 *p += v.norm_sqr();
             }
         }
 
-        self.num_acq_samples += 1;
+        self.num_acq_periods += 1;
 
-        if self.num_acq_samples as f64 * self.code_sec >= T_ACQ {
+        if self.num_acq_periods as f64 * self.code_sec >= T_ACQ {
             let mut code_offset_idx = 0;
             let mut idx = 0;
             let mut p_peak = 0.0;
@@ -849,7 +870,7 @@ impl Channel {
 
     fn tracking_compute_correlation(
         &mut self,
-        iq_vec2: &[Complex32],
+        window: &[Complex32],
     ) -> (Complex64, Complex64, Complex64, Complex64) {
         let n = self.code_sp as i32;
         let code_idx = *self.hist.code_phase_offset.back().unwrap() as i32;
@@ -876,13 +897,13 @@ impl Channel {
         // destroys the prompt (fi=0 baseband recordings are unaffected).
         let (fc, phi, fs) = (self.fi + self.trk.doppler_hz, self.trk.phi, self.fs);
         self.scratch.clear();
-        self.scratch.extend_from_slice(&iq_vec2[lo_u..hi_u]);
+        self.scratch.extend_from_slice(&window[lo_u..hi_u]);
         doppler_shift(&mut self.scratch, fc, phi, fs);
 
         // Samples per code-unit (chip; BOC sub-chip for E1) at this sample rate.
         let sp_per_chip = self.code_sec * self.fs / self.code_len as f64;
         let pos = (SP_CORR * sp_per_chip) as usize;
-        let pos_neutral = (NEUTRAL_CORR * sp_per_chip) as usize;
+        let pos_noise = (NEUTRAL_CORR * sp_per_chip) as usize;
 
         let sig = &self.scratch;
         let code = &self.trk.prn_code;
@@ -900,10 +921,10 @@ impl Channel {
         let mut corr_prompt = Complex64::default();
         let mut corr_early = Complex64::default();
         let mut corr_late = Complex64::default();
-        let mut corr_neutral = Complex64::default();
+        let mut corr_noise = Complex64::default();
 
         // Single fused pass: prompt (full), early/late (offset by +/-pos) and
-        // neutral (offset by pos_neutral) accumulated together, reading sig[j]
+        // noise (offset by pos_noise) accumulated together, reading sig[j]
         // and code[j] once each instead of in four separate passes.
         for j in 0..len {
             let sj = sig[j];
@@ -913,21 +934,21 @@ impl Channel {
                 acc(&mut corr_early, sj, code[j + pos]);
                 acc(&mut corr_late, sig[j + pos], cj);
             }
-            if j + pos_neutral < len {
-                acc(&mut corr_neutral, sj, code[j + pos_neutral]);
+            if j + pos_noise < len {
+                acc(&mut corr_noise, sj, code[j + pos_noise]);
             }
         }
 
         corr_prompt /= len as f64;
         corr_early /= (len - pos) as f64;
         corr_late /= (len - pos) as f64;
-        corr_neutral /= (len - pos_neutral) as f64;
+        corr_noise /= (len - pos_noise) as f64;
 
-        (corr_prompt, corr_early, corr_late, corr_neutral)
+        (corr_prompt, corr_early, corr_late, corr_noise)
     }
 
     fn run_fll(&mut self) {
-        if self.num_trk_samples < 2 {
+        if self.num_trk_periods < 2 {
             return;
         }
         let len = self.hist.corr_p.len();
@@ -940,7 +961,7 @@ impl Channel {
             return;
         }
 
-        let b = if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN / 2.0 {
+        let b = if self.trk_elapsed_sec() < T_FPULLIN / 2.0 {
             B_FLL_WIDE
         } else {
             B_FLL_NARROW
@@ -952,11 +973,11 @@ impl Channel {
         self.update_state_doppler_hz();
     }
 
-    fn run_pll(&mut self, c_p: Complex64) {
-        if c_p.re == 0.0 {
+    fn run_pll(&mut self, corr_prompt: Complex64) {
+        if corr_prompt.re == 0.0 {
             return;
         }
-        let err_phase = (c_p.im / c_p.re).atan() / 2.0 / PI;
+        let err_phase = (corr_prompt.im / corr_prompt.re).atan() / 2.0 / PI;
         // Standard 2nd-order loop, damping ζ = 1/√2: Bn = ωn·(ζ + 1/(4ζ))/2 ≈
         // 0.53·ωn, hence ωn = B_PLL/0.53 (~18.9 rad/s) and 1.4 ≈ 2ζ. PI form:
         // 2ζωn on the error delta, ωn² integrating the error over one period.
@@ -968,12 +989,12 @@ impl Channel {
         self.hist.phi_error.push_back(err_phase * 2.0 * PI);
     }
 
-    fn run_dll(&mut self, c_e: Complex64, c_l: Complex64) {
+    fn run_dll(&mut self, corr_early: Complex64, corr_late: Complex64) {
         // DLL update cadence in code periods (10 for L1CA's 1 ms, 2 for E1's 4 ms).
         let n = usize::max(1, (T_DLL / self.code_sec) as usize);
-        self.trk.sum_corr_e += c_e.norm();
-        self.trk.sum_corr_l += c_l.norm();
-        if self.num_trk_samples.is_multiple_of(n) {
+        self.trk.sum_corr_e += corr_early.norm();
+        self.trk.sum_corr_l += corr_late.norm();
+        if self.num_trk_periods.is_multiple_of(n) {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
             let disc = (e - l) / (e + l);
@@ -981,7 +1002,7 @@ impl Channel {
             let t_u = self.code_sec * n as f64;
             // Loop forensics (GNSS_DLL_DEBUG=1): early/late balance, the loop
             // state and the rate trim, every ~100 ms.
-            if self.num_trk_samples.is_multiple_of(10 * n)
+            if self.num_trk_periods.is_multiple_of(10 * n)
                 && std::env::var("GNSS_DLL_DEBUG").is_ok()
             {
                 log::warn!(
@@ -1012,12 +1033,12 @@ impl Channel {
             // one-update outliers (|disc| up to ~0.9 at 53 dB-Hz, synth GEO
             // bench) that the linear gain absorbs as a ~9 ns blip but a
             // deadbeat kick would turn into a ~35 ns pseudorange glitch.
-            self.trk.hot_disc_streak = if disc.abs() > 0.5 {
-                self.trk.hot_disc_streak + 1
+            self.trk.disc_saturated_streak = if disc.abs() > 0.5 {
+                self.trk.disc_saturated_streak + 1
             } else {
                 0
             };
-            let pull_in = self.trk.hot_disc_streak >= 3;
+            let pull_in = self.trk.disc_saturated_streak >= 3;
             let gain = if pull_in {
                 0.5 * self.tau_dll / t_u
             } else {
@@ -1041,7 +1062,7 @@ impl Channel {
             // No learning during the FLL second — carrier transients there
             // are code-rate garbage it would faithfully memorize.
             let err_learn = disc.clamp(-0.3, 0.3) / 2.0 * self.code_sec / self.code_len as f64;
-            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN {
+            if self.trk_elapsed_sec() > T_FPULLIN {
                 self.trk.code_rate_trim -= 0.25 * B_DLL / self.tau_dll * err_learn * t_u;
             }
             self.trk.code_off_sec += self.trk.code_rate_trim * t_u;
@@ -1060,40 +1081,40 @@ impl Channel {
     /// strong signals, ~+3 dB near the lock floor — consistent, and the
     /// 35/29 dB-Hz gates are tuned with that bias in. The 0.5 update is a
     /// one-pole smoother per T_CN0 (1 s), settling in ~2-3 s.
-    fn update_cn0(&mut self, c_p: Complex64, c_n: Complex64) {
-        self.trk.sum_corr_p += c_p.norm_sqr();
-        self.trk.sum_corr_n += c_n.norm_sqr();
+    fn update_cn0(&mut self, corr_prompt: Complex64, corr_noise: Complex64) {
+        self.trk.sum_corr_p += corr_prompt.norm_sqr();
+        self.trk.sum_corr_noise += corr_noise.norm_sqr();
 
         if self
-            .num_trk_samples
+            .num_trk_periods
             .is_multiple_of((T_CN0 / self.code_sec) as usize)
         {
-            if self.trk.sum_corr_n > 0.0 {
+            if self.trk.sum_corr_noise > 0.0 {
                 let cn0 =
-                    10.0 * (self.trk.sum_corr_p / self.trk.sum_corr_n / self.code_sec).log10();
+                    10.0 * (self.trk.sum_corr_p / self.trk.sum_corr_noise / self.code_sec).log10();
                 self.trk.cn0 += 0.5 * (cn0 - self.trk.cn0);
                 self.update_state_cn0();
             }
-            self.trk.sum_corr_n = 0.0;
+            self.trk.sum_corr_noise = 0.0;
             self.trk.sum_corr_p = 0.0;
         }
     }
     fn get_code_and_carrier_phase(&mut self) {
         let tau = self.code_sec;
         let fc = self.fi + self.trk.doppler_hz;
-        self.trk.adr += self.trk.doppler_hz * tau; // accumulated Doppler
+        self.trk.accum_doppler_cyc += self.trk.doppler_hz * tau; // accumulated Doppler
         self.trk.code_off_sec -= self.trk.doppler_hz / self.fc * tau; // carrier-aided code offset
 
         // A code-period wrap shifts the transmit phase (num_tx_codes * code_sec +
-        // code_off), which always tracks; num_trk_samples instead tracks
+        // code_off), which always tracks; num_trk_periods instead tracks
         // corr_p-buffer alignment, so it only moves together with the pop/push.
         // On the very first tracking step corr_p is still empty (the push happens
-        // later in tracking_process), so leave the buffer/num_trk_samples alone.
+        // later in tracking_process), so leave the buffer/num_trk_periods alone.
         if self.trk.code_off_sec >= self.code_sec {
             // Positive wrap (receding SV: the received code slipped a whole
-            // period later). The transmit phase num_trk_samples·τ − code_off
+            // period later). The transmit phase num_trk_periods·τ − code_off
             // must stay continuous across the −τ jump in code_off, so
-            // num_trk_samples steps back — and because it also indexes the
+            // num_trk_periods steps back — and because it also indexes the
             // prompt history, the just-stored prompt is popped: the next
             // correlation re-correlates that same transmitted code period and
             // replaces it. (The LNAV and SBAS decoders mirror the same
@@ -1102,7 +1123,7 @@ impl Channel {
             self.trk.code_off_sec -= self.code_sec;
             self.num_tx_codes += 1.0;
             if self.hist.corr_p.pop_back().is_some() {
-                self.num_trk_samples -= 1;
+                self.num_trk_periods -= 1;
             }
             self.nav.lnav.wrap_drop();
             self.nav.sbas.wrap_drop();
@@ -1117,7 +1138,7 @@ impl Channel {
             self.num_tx_codes -= 1.0;
             if let Some(&v) = self.hist.corr_p.back() {
                 self.hist.corr_p.push_back(v);
-                self.num_trk_samples += 1;
+                self.num_trk_periods += 1;
             }
             self.nav.lnav.wrap_repeat();
             self.nav.sbas.wrap_repeat();
@@ -1131,11 +1152,11 @@ impl Channel {
         // used modulo one cycle, and the IF advance over whole periods is an
         // integer cycle count (every supported IF is a multiple of 1 kHz, so
         // fi·τ ∈ ℤ — the fi·τ term documents it and drops out mod 1). What
-        // remains is the Doppler-accumulated phase (adr = Σ fd·τ) plus the
+        // remains is the Doppler-accumulated phase (accum_doppler_cyc = Σ fd·τ) plus the
         // carrier phase across the window's fractional offset, code_off, at
         // the current carrier fc = fi + fd.
         let code_off = self.trk.code_off_sec * self.fs;
-        self.trk.phi = self.fi * tau + self.trk.adr + fc * code_off / self.fs;
+        self.trk.phi = self.fi * tau + self.trk.accum_doppler_cyc + fc * code_off / self.fs;
         self.update_state_phi();
 
         self.hist.code_phase_offset.push_back(code_off);
@@ -1177,27 +1198,27 @@ impl Channel {
     /// Galileo. The decoder ([`crate::galileo_inav`]) independently undoes the
     /// (−1)ⁿ flip, covering the few seconds before this correction engages.
     fn monitor_code_carrier_consistency(&mut self) {
-        let txp = self.num_trk_samples as f64 * self.code_sec - self.trk.code_off_sec;
+        let tx_phase = self.trk_elapsed_sec() - self.trk.code_off_sec;
         // Establish the baseline once past carrier pull-in AND the code-loop
         // rate-trim windup: the trim transient bends the early transmit-phase
         // slope, and a baseline taken across it mis-calibrates the healthy
         // divergence — on the synth GEO bench that poisoned baseline (−103 Hz
         // vs a true ~0) got a clean 52 dB-Hz channel dropped as divergent the
         // moment the trim settled.
-        if self.trk.txp0 == 0.0 {
-            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN + 4.0 {
-                self.trk.txp_ts0 = self.ts_sec;
-                self.trk.txp0 = txp;
+        if self.trk.tx_phase_ref == 0.0 {
+            if self.trk_elapsed_sec() > T_FPULLIN + 4.0 {
+                self.trk.tx_phase_ref_ts = self.ts_sec;
+                self.trk.tx_phase_ref = tx_phase;
             }
             return;
         }
-        let dt = self.ts_sec - self.trk.txp_ts0;
+        let dt = self.ts_sec - self.trk.tx_phase_ref_ts;
         if dt < HALF_RATE_WINDOW {
             return; // need a few seconds for a precise slope
         }
         // The transmit-phase slope gives the code-implied (true) Doppler; its gap
         // from the PLL's carrier Doppler is the code-carrier divergence.
-        let code_dopp = ((txp - self.trk.txp0) / dt - 1.0) * self.fc;
+        let code_dopp = ((tx_phase - self.trk.tx_phase_ref) / dt - 1.0) * self.fc;
         let div = code_dopp - self.trk.doppler_hz;
 
         match self.sv.constellation {
@@ -1239,16 +1260,16 @@ impl Channel {
             Constellation::GPS => {
                 const DIV_GATE_HZ: f64 = 100.0; // ~6x the healthy ±15 Hz scatter
                 const DIV_FAULT_WINDOWS: u32 = 2; // ~6 s of sustained divergence
-                if self.trk.div_ema == 0.0 {
-                    self.trk.div_ema = div; // first window sets the baseline
-                } else if (div - self.trk.div_ema).abs() > DIV_GATE_HZ {
-                    self.trk.div_streak += 1;
-                    if self.trk.div_streak >= DIV_FAULT_WINDOWS {
+                if self.trk.divergence_ema == 0.0 {
+                    self.trk.divergence_ema = div; // first window sets the baseline
+                } else if (div - self.trk.divergence_ema).abs() > DIV_GATE_HZ {
+                    self.trk.divergence_streak += 1;
+                    if self.trk.divergence_streak >= DIV_FAULT_WINDOWS {
                         log::warn!(
                             "{}: code-carrier divergence {:+.0} Hz (healthy {:+.0}) — dropping to re-acquire at ts={:.1}",
                             self.sv,
                             div,
-                            self.trk.div_ema,
+                            self.trk.divergence_ema,
                             self.ts_sec,
                         );
                         // The walk-off may have been steered by a bad learned
@@ -1258,22 +1279,28 @@ impl Channel {
                         return;
                     }
                 } else {
-                    self.trk.div_streak = 0;
-                    self.trk.div_ema += 0.05 * (div - self.trk.div_ema); // slow recal
+                    self.trk.divergence_streak = 0;
+                    self.trk.divergence_ema += 0.05 * (div - self.trk.divergence_ema); // slow recal
                 }
             }
             _ => {}
         }
         // Re-baseline so the next window measures the post-correction state.
-        self.trk.txp_ts0 = self.ts_sec;
-        self.trk.txp0 = txp;
+        self.trk.tx_phase_ref_ts = self.ts_sec;
+        self.trk.tx_phase_ref = tx_phase;
+    }
+
+    /// Elapsed tracking time (s) since lock — one code period per count.
+    fn trk_elapsed_sec(&self) -> f64 {
+        self.num_trk_periods as f64 * self.code_sec
     }
 
     fn tracking_process(&mut self, iq_vec: &[Complex32]) {
         self.get_code_and_carrier_phase();
-        let (c_p, c_e, c_l, c_n) = self.tracking_compute_correlation(iq_vec);
-        self.hist.corr_p.push_back(c_p);
-        self.num_trk_samples += 1;
+        let (corr_prompt, corr_early, corr_late, corr_noise) =
+            self.tracking_compute_correlation(iq_vec);
+        self.hist.corr_p.push_back(corr_prompt);
+        self.num_trk_periods += 1;
         self.num_tx_codes += 1.0;
         self.stats.trk_periods += 1;
         self.stats.trk_streak += 1;
@@ -1281,8 +1308,8 @@ impl Channel {
         self.stats.peak_cn0 = self.stats.peak_cn0.max(self.trk.cn0);
 
         // Integer part of the received-signal transmit-time. The continuous,
-        // correctly-signed transmit phase is num_trk_samples*code_sec - code_off:
-        //   - num_trk_samples advances at the *received* code rate (it gains an
+        // correctly-signed transmit phase is num_trk_periods*code_sec - code_off:
+        //   - num_trk_periods advances at the *received* code rate (it gains an
         //     extra period on a code_off<0 wrap, which is when Doppler is positive
         //     i.e. the SV is approaching), and
         //   - code_off is the *replica* offset, which moves opposite to the
@@ -1292,7 +1319,7 @@ impl Channel {
         // The earlier num_tx_codes*code_sec + code_off form had the opposite wrap
         // sign and +code_off, yielding 1 - doppler/fc (Doppler with the wrong sign,
         // so pseudoranges moved opposite to the true range).
-        self.nav.meas.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+        self.nav.meas.trk_phase = self.trk_elapsed_sec();
         self.nav.meas.ts_sec = self.ts_sec;
         // Snapshot the fractional code phase paired with trk_phase from the same
         // period. The solver forms the transmit phase as trk_phase - code_off; the
@@ -1310,23 +1337,26 @@ impl Channel {
         // signature of an epoch error, not of anything on the sampling grid.
         self.nav.meas.code_off_sec = self.trk.code_off_sec;
 
-        if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
+        if self.trk_elapsed_sec() < T_FPULLIN {
             self.run_fll();
         } else {
-            self.run_pll(c_p);
+            self.run_pll(corr_prompt);
         }
 
-        self.run_dll(c_e, c_l);
-        self.update_cn0(c_p, c_n);
+        self.run_dll(corr_early, corr_late);
+        self.update_cn0(corr_prompt, corr_noise);
 
-        if self.num_trk_samples as f64 * self.code_sec >= T_NPULLIN {
+        if self.trk_elapsed_sec() >= T_NPULLIN {
             self.nav_decode();
         }
 
         self.hist.cn0.push_back(self.trk.cn0);
         self.hist.doppler_hz.push_back(self.trk.doppler_hz);
-        self.hist
-            .trim(if self.diagnostics { HISTORY_NUM } else { HISTORY_MIN });
+        self.hist.trim(if self.diagnostics {
+            HISTORY_NUM
+        } else {
+            HISTORY_MIN
+        });
         self.update_all_plots(false);
         self.monitor_code_carrier_consistency();
         self.log_periodically();
@@ -1342,7 +1372,7 @@ impl Channel {
         // of the default-on SBAS block (+27% tracking periods on CTTC). Drop
         // them, with the fail counter pushed past grace so retries back off.
         if self.sv.constellation == Constellation::SBAS
-            && self.num_trk_samples as f64 * self.code_sec > SBAS_MSG_TIMEOUT_SEC
+            && self.trk_elapsed_sec() > SBAS_MSG_TIMEOUT_SEC
             && self.stats.subframes == self.subfr_at_lock
         {
             log::warn!(

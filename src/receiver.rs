@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::channel::{AcqFftCache, Channel};
+use crate::channel::{AcqFftCache, Channel, ChannelConfig};
 use crate::code::Signal;
 use crate::device::RtlSdrDevice;
 use crate::ephemeris::{Ephemeris as RxEphemeris, Measurement};
@@ -487,12 +487,14 @@ impl Receiver {
                 channels.insert(
                     sv,
                     Channel::new(
-                        fam_sig,
-                        sv,
-                        fs,
-                        cfg.fi,
-                        cfg.plots,
-                        cfg.diagnostics,
+                        ChannelConfig {
+                            sig: fam_sig,
+                            sv,
+                            fs,
+                            fi: cfg.fi,
+                            plots: cfg.plots,
+                            diagnostics: cfg.diagnostics,
+                        },
                         state.clone(),
                         carriers.clone(),
                     ),
