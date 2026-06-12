@@ -21,6 +21,7 @@ pub mod recordings;
 pub mod sbas_corr;
 pub mod sbas_iono;
 pub mod sbas_l1;
+pub mod scheduler;
 pub mod solver;
 pub mod state;
 pub mod synth;

@@ -18,6 +18,7 @@ use crate::network::RtlSdrTcp;
 use crate::osnma::OsnmaVerifier;
 use crate::recording::IQFileType;
 use crate::recording::IQRecording;
+use crate::scheduler::Scheduler;
 use crate::solver::PositionSolver;
 use crate::state::GnssState;
 use std::collections::HashSet;
@@ -101,12 +102,9 @@ impl Default for ReceiverConfig {
 
 pub struct Receiver {
     iq_feed: Box<dyn IQReader>,
-    period_sp: usize, // samples per code period (signal-dependent)
-    fs: f64,
     code_period_sec: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
     off_samples: usize,
-    cached_iq_vec: Vec<Complex32>,
-    cached_ts_sec_tail: f64,
+    scheduler: Scheduler,
     channels: HashMap<SV, Channel>,
     /// Shared UI/state handle, so the receiver can publish OSNMA verification
     /// status (the per-channel verifier status the SV table renders).
@@ -422,12 +420,9 @@ impl Receiver {
 
         Self {
             iq_feed,
-            period_sp,
-            fs: cfg.fs,
             code_period_sec,
             off_samples: cfg.off_msec * period_sp,
-            cached_iq_vec: Vec::<Complex32>::new(),
-            cached_ts_sec_tail: 0.0,
+            scheduler: Scheduler::new(cfg.fs, cfg.sig),
             channels,
             pub_state: state.clone(),
             solver: PositionSolver::new(state),
@@ -441,36 +436,6 @@ impl Receiver {
             osnma: None,
             osnma_authenticated: HashSet::new(),
         }
-    }
-
-    fn fetch_samples_msec(&mut self) -> Result<(Vec<Complex32>, f64), Box<dyn std::error::Error>> {
-        let num_samples = if self.cached_iq_vec.is_empty() {
-            2 * self.period_sp
-        } else {
-            self.period_sp
-        };
-
-        let mut iq_vec = self.iq_feed.get_iq_data(self.off_samples, num_samples)?;
-
-        self.off_samples += num_samples;
-        self.cached_iq_vec.append(&mut iq_vec);
-        self.cached_ts_sec_tail += num_samples as f64 / self.fs;
-
-        if self.cached_iq_vec.len() > 2 * self.period_sp {
-            let num_samples = self.period_sp;
-            let _ = self.cached_iq_vec.drain(0..num_samples);
-        }
-        let len = self.cached_iq_vec.len();
-
-        // we pass 2 code worth of iq data back
-        // the timestamp given corresponds to the beginning of the last code
-        // [...code...][...code...]
-        //             ^
-
-        Ok((
-            self.cached_iq_vec[len - 2 * self.period_sp..].to_vec(),
-            self.cached_ts_sec_tail - self.code_period_sec,
-        ))
     }
 
     fn compute_fix(&mut self, ts_sec: f64) {
@@ -520,8 +485,23 @@ impl Receiver {
         self.last_fix_sec = ts_sec;
     }
 
-    fn process_step(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let (iq_vec, ts_sec) = self.fetch_samples_msec()?;
+    /// Advance the stream by one 1 ms base block (the scheduler's grid).
+    /// Returns Ok(true) when the session's family stepped — its channels
+    /// processed a full code period — which is what `run_loop` counts (so
+    /// `--num-msec` keeps its historical per-period meaning).
+    fn process_step(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let block = self
+            .iq_feed
+            .get_iq_data(self.off_samples, self.scheduler.block_sp())?;
+        self.off_samples += self.scheduler.block_sp();
+        if !self.scheduler.ingest(block) {
+            return Ok(false);
+        }
+
+        let (window, ts_sec) = self.scheduler.window();
+        // Hand channels their own copy of the window (same cost as the old
+        // per-fetch to_vec); the ring itself stays with the scheduler.
+        let iq_vec = window.to_vec();
         self.stats.msec_processed += 1;
 
         self.channels
@@ -531,7 +511,7 @@ impl Receiver {
         self.compute_fix(ts_sec);
         self.feed_osnma();
 
-        Ok(())
+        Ok(true)
     }
 
     /// Feed every channel's freshly decoded I/NAV pages into the OSNMA verifier
@@ -618,9 +598,10 @@ impl Receiver {
             while self.paused.load(Ordering::SeqCst) && !self.exit_req.load(Ordering::SeqCst) {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            if self.process_step().is_err() {
-                break;
-            }
+            let stepped = match self.process_step() {
+                Ok(stepped) => stepped,
+                Err(_) => break,
+            };
             if self.exit_req.load(Ordering::SeqCst) {
                 log::info!("exit requested");
                 break;
@@ -628,6 +609,9 @@ impl Receiver {
             if self.exit_on_fix && self.solver.has_fix() {
                 log::warn!("position fix obtained, exiting");
                 break;
+            }
+            if !stepped {
+                continue;
             }
             n += 1;
             if num_msec != 0 && n >= num_msec {
