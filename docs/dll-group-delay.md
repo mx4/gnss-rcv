@@ -227,6 +227,48 @@ through automatically; only the discriminator gain is calibrated.
 - `src/solver.rs` — the `RESID` diagnostic (printed when `GNSS_TRUTH_ECEF` is set).
 - `scripts/validate_fix.py` — the GPS / Galileo fix-vs-truth regression checks.
 
+## Resolution (2026-06-12): the BPSK τ was the LNAV anchor's orbit-epoch error
+
+The "DLL group delay" compensation is now **removed**; the mechanism is
+closed. Three facts pinned it:
+
+1. **The loop holds no lag.** With carrier aiding plus the rate-trim
+   integrator (the DLL is a PI loop since 8b53dc5), both the discriminator
+   and the trim sit at zero across gpssim's ±3 kHz Doppler spread (trim
+   within ±15 ns/s) — yet the raw residual slope with the term off was still
+   −0.0293 m/Hz.
+2. **The raw slope is sample-rate independent.** Regenerating the gpssim
+   scenario at 2.046 / 2.6 / 3.069 / 4.092 / 6.138 / 8.184 / 12.276 Msps
+   (integer and non-integer samples-per-chip) gives −0.0292 ± 0.0002 m/Hz at
+   every rate. That rules out every sampling-grid story (replica ZOH
+   quantization, whole-sample correlator shifts) and is the signature of a
+   constant *epoch* error.
+3. **0.157 s ≈ 0.160 s = `LNAV_DECODE_LATENCY_SEC`.** The LNAV anchor paired
+   the broadcast TOW with the decode-moment phase *without* adding the 8
+   preamble bits (0.160 s) between them, leaving every GPS t_tx 0.160 s
+   early "by convention" (I/NAV was aligned to the same convention). The
+   time-of-day part of that offset does fold into the receiver clock bias —
+   but t_tx is also the epoch at which the solver evaluates the **SV
+   orbit**, and an orbit evaluated Δt early is displaced v_sv·Δt
+   along-track, whose line-of-sight projection is range-rate·Δt =
+   **λ·doppler·0.160 ≈ 0.030 m/Hz** — exactly the bias τ = 0.157 s was
+   nulling. Same algebra as the I/NAV 2.000 s story below. (The earlier
+   "correcting the latency degrades the fix 2.45 m → 184 m" experiment had
+   the dll_lag term still active — a double correction — which is also why
+   the epoch-sensitivity probe's minimum at the old convention was
+   misread as proof the offset was harmless.)
+
+The fix: both decoders anchor at their full structural latency (LNAV
+0.160 s, I/NAV 2.000 s), making t_tx absolutely correct, and the
+measurement-path `code_off += doppler/fc·τ` term is gone. On gpssim the raw
+slope is +0.001 m/Hz with no correction at all (σ 4 m, fix ~2 m, identical
+at 12.276 Msps); the tx-anchor truth instrument measures 0.000 s anchor
+delta; the CTTC first fix moves ~2 m (re-pinned 41.274836, 1.987583, σ
+1.0 m — slightly closer to the documented antenna). `DLL_DISC_GAIN_*`
+remain solely as loop-tuning constants (pull-in / rate-trim gears), and
+`GNSS_DLL_LAG` is retired. Everything above this section is the historical
+calibration trail of a correction that no longer exists.
+
 ## Correction (2026-06-11): the E1/BOC calibration was a mis-attribution
 
 The τ_E1 ≈ 1.95 s / `G_BOC = 0.256` calibration above is **wrong about the

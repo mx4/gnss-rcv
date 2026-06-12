@@ -2,18 +2,18 @@
 
 > **Status: LANDED** (8b53dc5, 2026-06-12). This document explains why the
 > code-tracking loop became proportional-integral, how each piece is sized,
-> and what the integrator experiment revealed about the `dll_lag`
-> measurement-path term. It partially supersedes the *attribution* in
-> [dll-group-delay.md](dll-group-delay.md) — the compensation described there
-> survives unchanged, but it is **not** loop group delay (see
+> and what the integrator experiment revealed about the then-present
+> `dll_lag` measurement-path term — the trim experiment here disproved the
+> group-delay attribution, and the mechanism hunt it opened has since
+> closed: the term compensated the LNAV anchor's 0.160 s orbit-epoch error
+> and is now **removed** (resolution in
+> [dll-group-delay.md](dll-group-delay.md); see
 > [§ What the trim revealed](#what-the-trim-revealed-about-dll_lag)).
 
 Code: `src/channel.rs` — `run_dll` (the loop), `Tracking::code_rate_trim` and
 `Tracking::hot_disc_streak` (the new state), `dll_tau()` (the time constant
-both new gains derive from), `monitor_code_carrier_consistency` (the
-divergence guard whose baseline timing changed), and the `code_off_sec`
-snapshot in `tracking_process` (the `dll_lag` term and its
-`GNSS_DLL_LAG=off` A/B knob).
+both new gains derive from), and `monitor_code_carrier_consistency` (the
+divergence guard whose baseline timing changed).
 
 ## Summary
 
@@ -179,8 +179,8 @@ windup at the D1 gain.
 
 ## What the trim revealed about `dll_lag`
 
-The measurement path adds a Doppler-proportional transmit-time correction
-(`dll_lag = doppler/fc · τ`, the subject of
+The measurement path used to add a Doppler-proportional transmit-time
+correction (`dll_lag = doppler/fc · τ`, the subject of
 [dll-group-delay.md](dll-group-delay.md)), historically attributed to the
 DLL's group delay: a first-order loop chasing the Doppler code-rate ramp
 should lag by `rate · τ`.
@@ -193,12 +193,20 @@ term still costs gpssim σ 1.6 m → 48 m. Therefore the 0.03 m/Hz slope it
 nulls originates **outside the loop**, behaving like a ~0.157 s epoch
 latency (λ·Δt ≈ 0.03 m/Hz — the same algebraic trap as the Galileo
 "τ = 1.95 s" story, which turned out to be the 2.000 s I/NAV anchor
-latency). It is also sample-rate dependent: present on 2.046 Msps gpssim
-and 4 Msps CTTC, **absent at SJTU's 25 Msps**, where the term *injects*
-±100 m per-SV bias (σ 37 → 73 m). `GNSS_DLL_LAG=off` disables it for
-per-capture A/B runs. The term stays — every validated capture needs it —
-but the open hunt is for its real mechanism, suspected to be a
-sampling-grid-dependent discriminator-zero bias.
+latency). At the time it also *appeared* sample-rate dependent: present on
+2.046 Msps gpssim and 4 Msps CTTC, seemingly absent at SJTU's 25 Msps,
+where the term degraded σ 37 → 73 m in a `GNSS_DLL_LAG=off` A/B.
+
+**Hunt closed (2026-06-12).** A gpssim regeneration sweep measured the raw
+slope *identical* (−0.0292 ± 0.0002 m/Hz) from 2.046 to 12.276 Msps — not
+sample-rate dependent at all, so not a sampling-grid effect. The source is
+the **orbit-epoch error of a t_tx anchored 0.160 s early** (the LNAV
+decode latency, once left uncorrected "by convention"; 0.157 ≈ 0.160 s).
+Both nav anchors now pin at their full structural latency, the `dll_lag`
+term and `GNSS_DLL_LAG` are removed, and the SJTU A/B is explained as
+confounded: with the root cause fixed, SJTU σ drops to **1–3 m** — better
+than either arm of that A/B by an order of magnitude. Resolution details:
+[dll-group-delay.md](dll-group-delay.md).
 
 ## Validation
 
@@ -213,8 +221,7 @@ sampling-grid-dependent discriminator-zero bias.
 
 ## Loose ends
 
-- **SJTU σ is still tens of metres**: no iono corrections apply there
-  (no usable SBAS grid; Klobuchar from LNAV subframe 4 not implemented),
-  and the `dll_lag` mis-calibration at 25 Msps adds per-SV bias on top.
-- **The `dll_lag` mechanism hunt** (above) — the fs-dependence is the
-  decisive lead.
+- ~~SJTU σ is still tens of metres~~ — resolved by the tx-anchor-latency
+  fix (σ 1–3 m; see "What the trim revealed" above).
+- ~~The `dll_lag` mechanism hunt~~ — closed: the LNAV anchor's 0.160 s
+  orbit-epoch error ([dll-group-delay.md](dll-group-delay.md)).

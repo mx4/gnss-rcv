@@ -66,9 +66,15 @@ const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 /// Effective early-late discriminator slope (normalized output per unit code
-/// error) that sets the code-loop time constant [`dll_tau`]; calibrated to
-/// null the residual Doppler slope (history in `docs/dll-group-delay.md`).
-/// - **BPSK** (L1CA / SBAS): calibrated on gpssim (τ ≈ 0.157 s).
+/// error) that sets the code-loop time constant [`dll_tau`] — a loop-tuning
+/// constant only (pull-in and rate-trim gears); it no longer carries any
+/// measurement-path role (history in `docs/dll-group-delay.md`).
+/// - **BPSK** (L1CA / SBAS): τ ≈ 0.157 s. Historical note: this value was
+///   originally calibrated to null a 0.03 m/Hz pseudorange-vs-Doppler slope
+///   believed to be DLL group delay; that slope was actually the orbit-epoch
+///   error of a t_tx anchored 0.160 s early (see `LNAV_DECODE_LATENCY_SEC`),
+///   which τ ≈ 0.157 ≈ 0.160 s mimicked. The loop tuning it set is validated
+///   and stands on its own.
 const DLL_DISC_GAIN_BPSK: f64 = 3.18;
 /// - **BOC(1,1)** (Galileo E1): the *same* value — the loop's effective gain
 ///   is shape-independent within measurement error (verified on ideal and
@@ -87,9 +93,8 @@ const DLL_DISC_GAIN_BOC: f64 = 3.18;
 /// Code-loop time constant τ = 1/(loop velocity gain): `run_dll` corrects
 /// `code_off` at rate `(B_DLL/0.25)·disc_gain` per unit code error. The loop's
 /// two derived gains follow from τ — the pull-in kick (τ/t_u is the deadbeat
-/// gain) and the rate-trim integrator (B_DLL/2τ, see its noise note) — and τ also
-/// scales the measurement-path Doppler-proportional correction (see the
-/// `code_off_sec` snapshot). Derived from B_DLL so all track any loop retune.
+/// gain) and the rate-trim integrator (B_DLL/2τ, see its noise note).
+/// Derived from B_DLL so both track any loop retune.
 fn dll_tau(disc_gain: f64) -> f64 {
     0.25 / (B_DLL * disc_gain)
 }
@@ -248,7 +253,7 @@ pub struct Channel {
     code_sec: f64,   // code duration in sec
     code_len: usize, // prn code len: e.g. 1023
     code_sp: usize,  // samples per upsampled code: e.g. 2046 for L1CA
-    tau_dll: f64,    // code-loop group delay for this signal (transmit-time lag comp)
+    tau_dll: f64,    // code-loop time constant (pull-in / rate-trim gains)
 
     fft_planner: FftPlanner<f32>,
     state: State,
@@ -424,16 +429,11 @@ impl Channel {
         let code_sec = sig.code_period_sec();
         let code_len = sig.code_len();
         let code_sp = (fs * code_sec) as usize;
-        // Per-signal transmit-time lag compensation: the code (DLL) loop's group
-        // delay depends on the correlation peak shape (BOC vs BPSK), see dll_tau.
+        // Per-signal code-loop time constant (sets the pull-in and rate-trim
+        // gains in run_dll); same gain for BPSK and BOC(1,1), see dll_tau.
         let tau_dll = dll_tau(if sig.is_boc11() {
-            // The BOC discriminator gain depends on the front-end shaping of
-            // the ±half-chip BOC peak: 0.256 was calibrated on the *filtered*
-            // ION LimeSDR capture (docs/dll-group-delay.md), while ideal
-            // unfiltered BOC (synthetic scenes) has a steep BPSK-like slope —
-            // using the filtered value there leaves a Doppler-proportional
-            // pseudorange bias (measured 1.5 km -> 4 m on the hermetic E1 fix
-            // test). GNSS_DLL_GAIN_BOC overrides the default for such sources.
+            // GNSS_DLL_GAIN_BOC overrides the BOC loop gain for experiments
+            // (history of the retired 0.256 value in docs/dll-group-delay.md).
             std::env::var("GNSS_DLL_GAIN_BOC")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1252,25 +1252,16 @@ impl Channel {
         // absolute code_off (common cross-SV reference from acquisition) carries the
         // sub-ms range and must NOT be differenced away at the anchor.
         //
-        // Doppler-proportional transmit-time correction, calibrated end-to-end
-        // to null the pseudoranges' residual-vs-Doppler slope (τ via
-        // DLL_DISC_GAIN_*, history in docs/dll-group-delay.md). Long
-        // attributed to DLL group delay, but the code loop holds no such lag:
-        // with the carrier aiding plus the rate-trim integrator, both the
-        // discriminator and the trim sit at zero across gpssim's ±3 kHz
-        // Doppler spread (trim within ±15 ns/s), yet removing this term still
-        // costs σ 1.6 m -> 48 m there. The slope's real source is therefore
-        // an epoch-latency-like bias elsewhere in the measurement path — a
-        // Δt of 0.157 s produces exactly λ·Δt ≈ 0.03 m/Hz, the calibrated
-        // value (compare the I/NAV 2.000 s anchor story at DLL_DISC_GAIN_BOC).
-        // Until that source is found, the calibrated correction stays.
-        // GNSS_DLL_LAG=off disables it for per-capture A/B calibration runs.
-        let dll_lag = if std::env::var("GNSS_DLL_LAG").is_ok_and(|v| v == "off") {
-            0.0
-        } else {
-            self.trk.doppler_hz / self.fc * self.tau_dll
-        };
-        self.nav.meas.code_off_sec = self.trk.code_off_sec + dll_lag;
+        // No Doppler-proportional correction belongs here: the code loop holds
+        // no Doppler lag (carrier aiding covers code Doppler, and the rate-trim
+        // integrator absorbs any residual rate — trim within ±15 ns/s across
+        // gpssim's ±3 kHz spread). The 0.03 m/Hz residual slope a calibrated
+        // `doppler/fc·τ` term used to null here (τ ≈ 0.157 s, long misattributed
+        // to DLL group delay) was the orbit-epoch error of a t_tx anchored
+        // 0.160 s early — fixed at the source (see LNAV_DECODE_LATENCY_SEC).
+        // The raw slope measured fs-independent from 2.046 to 12.276 Msps: the
+        // signature of an epoch error, not of anything on the sampling grid.
+        self.nav.meas.code_off_sec = self.trk.code_off_sec;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {
             self.run_fll();

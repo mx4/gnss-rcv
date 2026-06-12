@@ -455,7 +455,7 @@ At each tracking period, before calling the nav decoder:
 
 ```rust
 nav.eph.trk_phase   = num_trk_samples as f64 × code_sec
-nav.eph.code_off_sec = code_off_sec + dll_lag          // DLL lag compensated (§9)
+nav.eph.code_off_sec = code_off_sec                    // raw; no correction (§9)
 ```
 
 The solver reads `trk_phase − code_off_sec` as the fractional transmit time and
@@ -463,36 +463,30 @@ adds the integer TOW decoded from the navigation message.
 
 ---
 
-## 9  DLL group-delay compensation
+## 9  No measurement-path code-phase correction (history: "DLL group delay")
 
-The DLL's finite loop bandwidth means it cannot track an instantaneous code-phase
-step — it has a **group delay** `τ = 0.25 / (B_DLL × disc_gain)`.  Under a
-constant Doppler ramp (satellite moving at constant velocity), the tracked code
-phase lags the true code phase by `code_Doppler × τ`, where `code_Doppler =
-doppler_hz / fc`.
+The snapshot hands the solver the *raw* tracked code phase.  A
+`dll_lag = doppler/fc × τ` term used to be added here, calibrated (τ ≈ 0.157 s
+for L1CA via `disc_gain = 3.18`; at one point τ ≈ 1.95 s for BOC via 0.256) to
+null a Doppler-proportional pseudorange bias attributed to DLL group delay.
+Both attributions were wrong:
 
-For GPS L1 C/A (BPSK, `disc_gain = 3.18`):
-```
-τ ≈ 0.157 s   →   lag ≈ 0.157 × (doppler / 1.575×10⁹)   [s]
-  ≈ 0.03 m/Hz for a typical 3 km/s pass
-```
+- The code loop holds no Doppler-proportional lag: carrier aiding covers code
+  Doppler, and the rate-trim integrator (§5) absorbs any residual rate.
+- The BOC τ ≈ 1.95 s was compensating the I/NAV anchor's then-missing 2.000 s
+  decode latency.
+- The BPSK τ ≈ 0.157 s was compensating the **orbit-epoch error of a t_tx
+  anchored 0.160 s early** (the LNAV anchor's 8-preamble-bit decode latency,
+  once left uncorrected "by convention"): the solver evaluates each SV orbit
+  at t_tx, and 0.16 s early on the orbit = λ·doppler·0.16 ≈ 0.03 m/Hz on the
+  line of sight.  Pinned by the raw slope being identical from 2.046 to
+  12.276 Msps — an epoch error's signature, not the sampling grid's.
 
-For Galileo E1-B (BOC(1,1), `disc_gain = 0.256`):
-```
-τ ≈ 1.95 s    →   lag ≈ 0.19 m/Hz
-  ≈ 10× larger than L1 C/A
-```
-
-The compensation applied at every tracking period:
-
-```rust
-let dll_lag = trk.doppler_hz / fc × tau_dll;
-nav.eph.code_off_sec = trk.code_off_sec + dll_lag;
-```
-
-This adds back the lag so the solver sees the *true* code phase.  Without it, the
-Galileo pseudoranges have a per-SV bias of hundreds of metres correlated with
-Doppler, breaking the position fix.
+Both nav decoders now anchor at their full structural decode latency (LNAV
+0.160 s, I/NAV 2.000 s), t_tx is absolutely correct, and no correction is
+applied to the measured code phase.  `dll_tau` survives only as the loop's
+time constant (pull-in and rate-trim gears, §5).  Full history:
+[dll-group-delay.md](dll-group-delay.md).
 
 ---
 
@@ -622,7 +616,7 @@ Receiver::run_loop()  [1 ms master period]
             │
             ├─ push c_p → hist.corr_p,  num_trk_samples++
             ├─ nav.eph.trk_phase   = num_trk_samples × code_sec
-            ├─ nav.eph.code_off_sec = code_off + dll_lag         [DLL lag comp]
+            ├─ nav.eph.code_off_sec = code_off                   [raw, §9]
             │
             ├─ [FLL or PLL]   ← update doppler_hz
             ├─ run_dll()      ← update code_off_sec (every 10 periods)

@@ -59,17 +59,19 @@ const PERIODS_PER_BIT: usize = 20;
 /// Structural decode latency of the LNAV frame: the HOW TOW names the start of
 /// the *next* subframe, but the decoder emits a subframe only once that next
 /// subframe's 8-bit preamble is demodulated — 8 bits × 20 ms after the instant
-/// the TOW names. So the LNAV transmit-time anchor pairs the TOW with a phase
-/// 0.16 s late, leaving every GPS t_tx 0.16 s *early* in absolute terms
-/// (measured directly against synthetic truth by the tx-anchor test).
+/// the TOW names. The anchor pairs the decode-moment phase with `tow +` this
+/// latency, making t_tx absolutely correct (verified against synthetic truth
+/// by the tx-anchor test).
 ///
-/// This is deliberately NOT corrected: a common offset folds into the receiver
-/// clock bias within a constellation, and the whole validated pipeline —
-/// including gnss-rtk's epoch-sensitive frame handling — is self-consistent at
-/// this convention (correcting it was measured to *degrade* the synthetic fix
-/// 2.45 m → 184 m; see `INAV_DECODE_LATENCY_SEC` and AGENTS.md). What must
-/// hold for mixed GPS+Galileo solves is that every constellation uses the SAME
-/// convention: the I/NAV anchor is aligned to this one.
+/// An uncorrected latency is NOT harmless: only its time-of-day part folds
+/// into the receiver clock bias. t_tx is also the epoch at which the solver
+/// evaluates the SV *orbit*, and an orbit evaluated Δt early is displaced by
+/// v_sv·Δt along-track, whose line-of-sight projection is range-rate·Δt =
+/// λ·doppler·Δt — a per-SV, Doppler-proportional pseudorange bias (0.030 m/Hz
+/// for Δt = 0.16 s) that the position solve cannot absorb. That bias was
+/// long misattributed to DLL group delay and compensated by a calibrated
+/// `doppler/fc·τ` (τ ≈ 0.157 s ≈ this latency) term on the measured code
+/// phase; anchoring at the true latency removes the cause (and the term).
 pub(crate) const LNAV_DECODE_LATENCY_SEC: f64 = 8.0 * PERIODS_PER_BIT as f64 * 1e-3;
 /// Prompt window kept by the decoder: bit-edge detection reads 2·19 periods
 /// straddling a candidate edge (see `sync_bit`), plus slack for wrap repeats.
@@ -520,7 +522,7 @@ impl Channel {
                 self.nav.eph.tgd,
                 self.nav.eph.toe_gpst
             );
-            self.nav_anchor_tx(0.0); // the LNAV convention is the cross-constellation reference
+            self.nav_anchor_tx(LNAV_DECODE_LATENCY_SEC);
         }
     }
 

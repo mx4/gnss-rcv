@@ -477,12 +477,13 @@ fn anchor_deltas(
 fn tx_anchor_latency_measured_against_synthetic_truth() {
     let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
 
-    // The pipeline's reference convention: every decoder leaves t_tx early
-    // by the LNAV decode latency (0.160 s) — deliberately uncorrected (see
-    // LNAV_DECODE_LATENCY_SEC). What the GPS+Galileo merge requires is that
-    // both decoders sit at the SAME offset; the I/NAV anchor is aligned to
-    // LNAV by INAV_DECODE_LATENCY_SEC (= 2.000 − 0.160 s).
-    let expect = crate::gps_lnav::LNAV_DECODE_LATENCY_SEC;
+    // Every decoder anchors at its full structural decode latency (LNAV
+    // 0.160 s, I/NAV 2.000 s), so t_tx is absolutely correct: the measured
+    // anchor delta vs synthetic truth must be zero. An absolute offset is
+    // not harmless — its orbit-epoch part puts a λ·doppler·Δt per-SV bias
+    // on every pseudorange (see LNAV_DECODE_LATENCY_SEC) — and the
+    // GPS+Galileo merge additionally requires both decoders to agree.
+    let expect = 0.0;
 
     let gps = pick_geo_constellation(truth, 2348, 36_000, 5);
     let dg = anchor_deltas(&gps, truth, Signal::L1ca, 2_046_000.0, 30_000);
@@ -525,13 +526,14 @@ fn tx_anchor_latency_measured_against_synthetic_truth() {
 //  2. The sensitivity itself is plain orbital physics: ~700 m of fix
 //     error per second of common anchor-epoch offset (per-SV range-rate
 //     spread), identical in both solvers.
-//  3. The error minimum sits exactly at the anchor convention (shift 0) —
-//     the generator+decoder+solver system is self-consistent there. The
-//     tx-anchor truth instrument labels that point "true − 0.16 s"; that
-//     ±0.16 s is a bookkeeping question confined to the *instrument's*
-//     reference (trk_phase/code_off pairing semantics), not a production
-//     error: all fixes operate at the consistent point, and the
-//     cross-constellation alignment measures 0.0000 s on real SIS.
+//  3. The error minimum sits at shift 0, which — since the anchors pin at
+//     the decoders' full structural latencies — is the true epoch (the
+//     tx-anchor truth instrument measures the anchor delta as 0.000 s).
+//     Historical note: when the anchors sat 0.16 s early "by convention",
+//     this same minimum-at-zero was read as proof the offset was harmless
+//     bookkeeping; it was actually the then-active doppler/fc·τ
+//     measurement-path term (τ ≈ 0.16 s) cancelling the convention's
+//     orbit-epoch bias at exactly that point.
 #[test]
 #[ignore] // ~7 s — runs via `just test-all` / `cargo test -- --ignored`
 fn epoch_sensitivity_probe() {
@@ -570,8 +572,8 @@ fn epoch_sensitivity_probe() {
     let err3 = |p: [f64; 3]| {
         ((p[0] - truth[0]).powi(2) + (p[1] - truth[1]).powi(2) + (p[2] - truth[2]).powi(2)).sqrt()
     };
-    // Anchors sit at the LNAV convention; the tx-anchor instrument labels
-    // that point "true − 0.160 s" (see finding 3 above).
+    // Anchors pin at the decoders' full structural latencies, so shift 0
+    // is the true epoch (see finding 3 above).
     let mut results: Vec<(f64, f64, Option<f64>)> = Vec::new();
     for shift in [-0.16, 0.0, 0.08, 0.16, 0.24, 0.32] {
         let mut e2 = ephs.clone();

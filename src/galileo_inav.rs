@@ -99,18 +99,17 @@ pub fn deinterleave(input: &[u8]) -> Vec<u8> {
 const PREAMBLE: [u8; 10] = [0, 1, 0, 1, 1, 0, 0, 0, 0, 0];
 /// Each page part is 250 symbols: the preamble then 240 FEC symbols.
 const PAGE_PART_SYMBOLS: usize = 250;
-/// I/NAV transmit-time anchor alignment. The word-5 WN/TOW names the GST at
-/// the start of the 2 s page carrying it (OS SIS ICD), and [`InavDecoder`]
-/// emits the word at the page's last symbol — a 2.000 s structural decode
-/// latency (measured directly against synthetic truth). The LNAV decoder has
-/// the same kind of latency, 0.160 s (8 preamble bits), which is the
-/// pipeline's *reference convention* and is deliberately left uncorrected
-/// (see `gps_lnav::LNAV_DECODE_LATENCY_SEC`). For mixed GPS+Galileo solves
-/// the constellations must agree, so the I/NAV anchor adds the *difference*:
-/// 2.000 − 0.160 = 1.840 s — exactly the inter-constellation offset the
-/// two-pass ION LimeSDR merge measured before this correction.
-pub(crate) const INAV_DECODE_LATENCY_SEC: f64 =
-    2.0 * PAGE_PART_SYMBOLS as f64 * 4e-3 - crate::gps_lnav::LNAV_DECODE_LATENCY_SEC;
+/// I/NAV structural decode latency. The word-5 WN/TOW names the GST at the
+/// start of the 2 s page carrying it (OS SIS ICD), and [`InavDecoder`] emits
+/// the word at the page's last symbol — 2.000 s after the instant the TOW
+/// names. Anchoring at the full latency makes t_tx absolutely correct, the
+/// same convention as LNAV (see `gps_lnav::LNAV_DECODE_LATENCY_SEC` for why
+/// an uncorrected latency is a real error — the orbit-epoch part of it does
+/// not fold into the receiver clock bias). Verified against synthetic truth
+/// by the tx-anchor test; a mismatch between the constellations shows up as
+/// an inter-system bias in mixed solves (1.840 s measured on the two-pass
+/// ION LimeSDR merge when I/NAV was anchored with no latency at all).
+pub(crate) const INAV_DECODE_LATENCY_SEC: f64 = 2.0 * PAGE_PART_SYMBOLS as f64 * 4e-3;
 
 /// A decoded, CRC-valid I/NAV word: its 6-bit word type, 128 data bits, and the
 /// 40-bit OSNMA field. The OSNMA field is the odd page's "Reserved 1"
