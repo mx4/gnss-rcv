@@ -28,7 +28,7 @@ impl Drop for RtlSdrDevice {
 }
 
 impl IQReader for RtlSdrDevice {
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         _off_samples: usize,
         num_samples: usize,

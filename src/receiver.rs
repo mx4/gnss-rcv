@@ -24,7 +24,7 @@ use crate::state::GnssState;
 use std::collections::HashSet;
 
 pub trait IQReader {
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         off_samples: usize,
         num_samples: usize,
@@ -51,7 +51,7 @@ impl MockIQReader {
 }
 
 impl IQReader for MockIQReader {
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         off_samples: usize,
         num_samples: usize,
@@ -588,7 +588,7 @@ impl Receiver {
     fn process_step(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
         let block = self
             .iq_feed
-            .get_iq_data(self.off_samples, self.scheduler.block_sp())?;
+            .read_iq_block(self.off_samples, self.scheduler.block_sp())?;
         self.off_samples += self.scheduler.block_sp();
         let due = self.scheduler.ingest(block);
         if due.is_empty() {

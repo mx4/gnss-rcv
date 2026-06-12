@@ -82,7 +82,7 @@ impl IQReader for DecimatingReader {
     /// Output sample `n` is the filter evaluated at input sample `n·k`; each
     /// call re-reads the (taps−1)-sample overlap, which is noise next to the
     /// block itself. The start of the stream is zero-padded.
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         off_samples: usize,
         num_samples: usize,
@@ -92,7 +92,7 @@ impl IQReader for DecimatingReader {
         let in_start = in_first.max(0) as usize;
         let pad = (in_start as i64 - in_first) as usize;
         let in_len = num_samples * self.k + (t - 1) - pad;
-        let input = self.inner.get_iq_data(in_start, in_len)?;
+        let input = self.inner.read_iq_block(in_start, in_len)?;
 
         let mut out = Vec::with_capacity(num_samples);
         for n in 0..num_samples {
@@ -144,7 +144,7 @@ mod tests {
             })
             .collect();
         let mut d = DecimatingReader::new(Box::new(MockIQReader::new(samples)), 2);
-        let out = d.get_iq_data(1000, 8000).unwrap();
+        let out = d.read_iq_block(1000, 8000).unwrap();
         // Correlate against the expected tone at the output rate.
         let fs_out = fs / 2.0;
         let mut acc = (0.0f64, 0.0f64);
@@ -171,7 +171,7 @@ mod tests {
             })
             .collect();
         let mut d = DecimatingReader::new(Box::new(MockIQReader::new(samples)), 2);
-        let out = d.get_iq_data(1000, 8000).unwrap();
+        let out = d.read_iq_block(1000, 8000).unwrap();
         let pwr: f64 = out.iter().map(|s| s.norm_sqr() as f64).sum::<f64>() / out.len() as f64;
         assert!(pwr < 0.01, "stopband power {pwr}");
     }

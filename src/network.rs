@@ -38,7 +38,7 @@ impl Drop for RtlSdrTcp {
 }
 
 impl IQReader for RtlSdrTcp {
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         _off_samples: usize,
         num_samples: usize,

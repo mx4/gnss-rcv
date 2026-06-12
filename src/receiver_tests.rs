@@ -18,15 +18,15 @@ fn mock_reader_serves_slices_and_eof() {
     let samples: Vec<Complex32> = (0..100).map(|i| Complex32::new(i as f32, 0.0)).collect();
     let mut r = MockIQReader::new(samples);
 
-    let a = r.get_iq_data(0, 10).unwrap();
+    let a = r.read_iq_block(0, 10).unwrap();
     assert_eq!(a.len(), 10);
     assert_eq!(a[0], Complex32::new(0.0, 0.0));
 
-    let b = r.get_iq_data(10, 10).unwrap();
+    let b = r.read_iq_block(10, 10).unwrap();
     assert_eq!(b[0], Complex32::new(10.0, 0.0));
 
     assert!(
-        r.get_iq_data(95, 10).is_err(),
+        r.read_iq_block(95, 10).is_err(),
         "reading past the end is EOF"
     );
 }

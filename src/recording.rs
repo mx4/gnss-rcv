@@ -95,7 +95,7 @@ impl IQReader for IQRecording {
         Some(self.total_sec)
     }
 
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         off_samples: usize,
         num_samples: usize,

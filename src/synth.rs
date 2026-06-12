@@ -524,7 +524,7 @@ impl GeoFeed {
 }
 
 impl IQReader for GeoFeed {
-    fn get_iq_data(
+    fn read_iq_block(
         &mut self,
         off_samples: usize,
         num_samples: usize,
@@ -728,11 +728,11 @@ mod tests {
         let ephs = pick_geo_constellation(truth, 2348, 36_000, 4);
         let mut a = GeoFeed::new(&ephs, truth, 2_046_000.0, 0.0, 20, 45.0, Some(3));
         let mut b = GeoFeed::new(&ephs, truth, 2_046_000.0, 0.0, 20, 45.0, Some(3));
-        let xa = a.get_iq_data(1000, 4092).unwrap();
-        let xb = b.get_iq_data(1000, 4092).unwrap();
+        let xa = a.read_iq_block(1000, 4092).unwrap();
+        let xb = b.read_iq_block(1000, 4092).unwrap();
         assert_eq!(xa, xb, "same scene + seed must reproduce the same samples");
         assert_eq!(xa.len(), 4092);
-        assert!(a.get_iq_data(0, 21 * 2046).is_err(), "EOF past the end");
+        assert!(a.read_iq_block(0, 21 * 2046).is_err(), "EOF past the end");
     }
 
     #[test]
