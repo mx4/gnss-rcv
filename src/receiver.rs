@@ -153,6 +153,10 @@ struct RunStats {
     fix_ok: usize,
     fix_fail: usize,
     xcorr_rejections: usize, // duplicate-ephemeris SVs dropped before solving
+    /// Time-to-first-fix in *data* time (seconds of signal consumed before the
+    /// first successful solve), latched once. The receiver-performance number —
+    /// independent of how fast we replay the file. None until the first fix.
+    ttff_sec: Option<f64>,
 }
 
 impl Default for RunStats {
@@ -164,6 +168,7 @@ impl Default for RunStats {
             fix_ok: 0,
             fix_fail: 0,
             xcorr_rejections: 0,
+            ttff_sec: None,
         }
     }
 }
@@ -207,6 +212,8 @@ struct JsonStats {
     fix_ok: usize,
     fix_fail: usize,
     xcorr_rejected: usize,
+    /// Data-time seconds to the first fix; None if no fix was solved.
+    ttff_sec: Option<f64>,
     acq_attempts: u64,
     acq_correlations: u64,
     tracking_periods: u64,
@@ -553,6 +560,8 @@ impl Receiver {
         self.stats.fix_attempts += 1;
         if self.solver.compute_position(ts_sec, &ephs) {
             self.stats.fix_ok += 1;
+            // Time-to-first-fix: the data-time of the first solve that succeeds.
+            self.stats.ttff_sec.get_or_insert(ts_sec);
             for (_, eph) in &ephs {
                 if let Some(ch) = self.channels.get_mut(&eph.sv) {
                     ch.stats.used_in_fix = true;
@@ -846,6 +855,7 @@ impl Receiver {
                 fix_ok: s.fix_ok,
                 fix_fail: s.fix_fail,
                 xcorr_rejected: s.xcorr_rejections,
+                ttff_sec: s.ttff_sec,
                 acq_attempts: sum(|c| c.stats.acq_attempts),
                 acq_correlations: sum(|c| c.stats.acq_corrs),
                 tracking_periods: sum(|c| c.stats.trk_periods),
@@ -870,8 +880,12 @@ fn print_summary(sum: &RunSummary) {
         "funnel: searched {} -> acquired {} -> tracked {} -> ephemeris {} -> used-in-fix {}",
         f.searched, f.acquired, f.tracked, f.ephemeris, f.used_in_fix
     );
+    let ttff = st
+        .ttff_sec
+        .map(|v| format!("{v:.1}s"))
+        .unwrap_or_else(|| "-".to_string());
     println!(
-        "fixes: {} attempts, {} ok, {} failed   xcorr-rejected {}",
+        "fixes: {} attempts, {} ok, {} failed   xcorr-rejected {}   ttff {ttff}",
         st.fix_attempts, st.fix_ok, st.fix_fail, st.xcorr_rejected
     );
     println!(
