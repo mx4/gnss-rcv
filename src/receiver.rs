@@ -427,7 +427,12 @@ impl Receiver {
             let fam_sp = (fam_sig.code_period_sec() * cfg.fs) as usize;
             let carriers = Channel::build_carriers(cfg.fs, cfg.fi, fam_sp);
             fam_carriers.push(carriers.clone());
-            for sv in get_sat_list(&cfg.sats, fam_sig, cfg.sbas, cfg.qzss) {
+            // SBAS/QZSS are C/A-family blocks: offer them only to that
+            // family's list — handing them to the E1 pass just made its
+            // guard drop them with a spurious "not decodable" warning while
+            // the GEOs were alive in the session via the C/A family.
+            let ca = !fam_sig.is_boc11();
+            for sv in get_sat_list(&cfg.sats, fam_sig, cfg.sbas && ca, cfg.qzss && ca) {
                 // In a mixed session each family contributes only its own
                 // constellations (get_sat_list is per-signal).
                 if families.len() > 1 {
