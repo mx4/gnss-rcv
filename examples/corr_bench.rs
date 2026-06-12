@@ -47,8 +47,40 @@ fn corr_complex(
     (cp, ce, cl, cn)
 }
 
-/// Optimization #1: replica is real f32; products are real*complex (half the
-/// multiplies, branch split out so the main region auto-vectorizes).
+/// Optimization #1 ALONE: real f32 replica, but the SAME branchy structure and
+/// f64 accumulation as corr_complex -- isolates the halved-multiply effect from
+/// the vectorization that the branch-split (corr_real) additionally unlocks.
+#[inline(never)]
+fn corr_real_only(
+    sig: &[Complex32],
+    code: &[f32],
+) -> (Complex64, Complex64, Complex64, Complex64) {
+    let len = sig.len();
+    let (pos, pos_neutral) = (POS, POS_NEUTRAL);
+    let mut cp = Complex64::default();
+    let mut ce = Complex64::default();
+    let mut cl = Complex64::default();
+    let mut cn = Complex64::default();
+    for j in 0..len {
+        let sj = sig[j];
+        let cj = code[j];
+        acc(&mut cp, Complex32::new(sj.re * cj, sj.im * cj));
+        if j + pos < len {
+            let ec = code[j + pos];
+            acc(&mut ce, Complex32::new(sj.re * ec, sj.im * ec));
+            let sl = sig[j + pos];
+            acc(&mut cl, Complex32::new(sl.re * cj, sl.im * cj));
+        }
+        if j + pos_neutral < len {
+            let nc = code[j + pos_neutral];
+            acc(&mut cn, Complex32::new(sj.re * nc, sj.im * nc));
+        }
+    }
+    (cp, ce, cl, cn)
+}
+
+/// Optimization #1+#2: real f32 replica; products are real*complex (half the
+/// multiplies), branch split out so the main region auto-vectorizes.
 #[inline(never)]
 fn corr_real(
     sig: &[Complex32],
@@ -103,6 +135,20 @@ fn corr_real(
     (cp, ce, cl, cn)
 }
 
+/// Faithful copy of util::doppler_shift -- the carrier mix run once per tracking
+/// step, over the same code_sp samples, before the correlation. Unchanged by #1,
+/// so timing it gives the realistic per-step composition.
+#[inline(never)]
+fn doppler_shift(iq: &mut [Complex32], doppler_hz: f64, phi: f64, fs: f64) {
+    const PI: f64 = std::f64::consts::PI;
+    let step = Complex64::from_polar(1.0, -2.0 * PI * doppler_hz / fs);
+    let mut c = Complex64::from_polar(1.0, -2.0 * PI * phi);
+    for s in iq.iter_mut() {
+        *s *= Complex32::new(c.re as f32, c.im as f32);
+        c *= step;
+    }
+}
+
 fn main() {
     // Deterministic pseudo-random signal and a +/-1 code (splitmix64).
     let mut s: u64 = 0x1234_5678_9abc_def0;
@@ -150,15 +196,47 @@ fn main() {
     }
     let dur_real = t1.elapsed();
 
+    let t2 = Instant::now();
+    for _ in 0..ITERS {
+        let r = corr_real_only(&sig, &code_real);
+        sink += r.0 + r.1 + r.2 + r.3;
+    }
+    let dur_real_only = t2.elapsed();
+
+    let mut dop_buf = sig.clone();
+    let t3 = Instant::now();
+    for _ in 0..ITERS {
+        doppler_shift(&mut dop_buf, 1234.0, 0.1, 2_046_000.0);
+    }
+    let dur_dopp = t3.elapsed();
+    std::hint::black_box(&dop_buf);
+
     let ns_complex = dur_complex.as_secs_f64() * 1e9 / ITERS as f64;
     let ns_real = dur_real.as_secs_f64() * 1e9 / ITERS as f64;
+    let ns_real_only = dur_real_only.as_secs_f64() * 1e9 / ITERS as f64;
+    let ns_dopp = dur_dopp.as_secs_f64() * 1e9 / ITERS as f64;
     println!("(sink guard: {:.3})", sink.norm().fract());
     println!("code_sp={CODE_SP} pos={POS} pos_neutral={POS_NEUTRAL} iters={ITERS}");
-    println!("complex replica (current): {ns_complex:8.1} ns / code period");
-    println!("real replica    (opt #1) : {ns_real:8.1} ns / code period");
+    println!("complex replica (current)      : {ns_complex:8.1} ns / code period");
+    println!("real replica, same structure(#1): {ns_real_only:8.1} ns / code period");
+    println!("real replica, vectorized (#1+#2): {ns_real:8.1} ns / code period");
     println!(
-        "speedup: {:.2}x  ({:.0}% faster)",
+        "speedup #1 alone : {:.2}x  ({:.0}% faster)",
+        ns_complex / ns_real_only,
+        (ns_complex / ns_real_only - 1.0) * 100.0
+    );
+    println!(
+        "speedup #1+#2    : {:.2}x  ({:.0}% faster)",
         ns_complex / ns_real,
         (ns_complex / ns_real - 1.0) * 100.0
     );
+    println!("--- per-tracking-step composition (carrier mix is unchanged by #1) ---");
+    println!("doppler_shift (carrier mix)    : {ns_dopp:8.1} ns / code period");
+    // A tracking step's DSP cost ~= carrier mix + correlation (loop math is O(1)).
+    let step_cur = ns_dopp + ns_complex;
+    let step_1 = ns_dopp + ns_real_only;
+    let step_12 = ns_dopp + ns_real;
+    println!("step (mix+corr) current        : {step_cur:8.1} ns");
+    println!("step (mix+corr) #1             : {step_1:8.1} ns  -> {:.2}x", step_cur / step_1);
+    println!("step (mix+corr) #1+#2          : {step_12:8.1} ns  -> {:.2}x", step_cur / step_12);
 }
