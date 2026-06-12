@@ -225,6 +225,42 @@ impl PositionSolver {
 
     /// Returns true if a position was resolved this call.
     pub fn compute_position(&mut self, ts_sec: f64, snaps: &[(Measurement, RxEphemeris)]) -> bool {
+        // Mixed-pool week rebase: the LNAV week is 10 bits, pinned +2048 into
+        // the modern era at decode — right for post-2019 captures, 1024 weeks
+        // late for older ones (ion-lime 2017 -> "2037"). Galileo's 12-bit GST
+        // week is unambiguous, so when both constellations are present, snap
+        // each GPS-family SV's timeline onto Galileo's by the nearest
+        // 1024-week multiple (epochs and anchor shift together, so orbit/
+        // clock evaluation and phase pairing are untouched). Without this the
+        // pool spans 19.6 years and the solve is garbage.
+        let mut snaps: Vec<(Measurement, RxEphemeris)> = snaps.to_vec();
+        if let Some(gal_ref) = snaps
+            .iter()
+            .find(|(_, e)| e.sv.constellation == Constellation::Galileo)
+            .map(|(_, e)| e.tow_gpst)
+        {
+            const WEEK: f64 = 604_800.0;
+            for (m, e) in snaps.iter_mut() {
+                if e.sv.constellation == Constellation::Galileo {
+                    continue;
+                }
+                let dw = ((e.tow_gpst - gal_ref).to_seconds() / WEEK / 1024.0).round() * 1024.0;
+                if dw != 0.0 {
+                    let shift = Duration::from_seconds(dw * WEEK);
+                    log::warn!(
+                        "{}: rebasing GPS week by {:+.0} weeks onto the Galileo timeline                          (LNAV 10-bit week rollover)",
+                        e.sv,
+                        -dw
+                    );
+                    e.tow_gpst -= shift;
+                    e.toe_gpst -= shift;
+                    e.toc_gpst -= shift;
+                    m.tx_tow_gpst -= shift;
+                }
+            }
+        }
+        let snaps = &snaps[..];
+
         // Refresh this solver's epoch store; the gnss-rtk callback objects
         // read it if the fallback path runs.
         *self.ephs.lock().unwrap() = snaps.iter().map(|(_, e)| *e).collect();
@@ -533,6 +569,14 @@ impl PositionSolver {
             }
             Ok(pvt) => {
                 let pos = Vector3::new(pvt.pos_m.0, pvt.pos_m.1, pvt.pos_m.2);
+                // Same terrestrial plausibility gate as the WLS path: a
+                // converged-but-garbage solution (e.g. an inconsistent mixed
+                // pool) must not be published or seed the next epoch.
+                let r = pos.norm();
+                if !(6.25e6..6.5e6).contains(&r) {
+                    log::warn!("gnss-rtk solution off-Earth (|pos|={:.3e} m); rejecting", r);
+                    return false;
+                }
                 self.last_fix_ecef = Some(pos);
 
                 let lat = pvt.lat_long_alt_deg_deg_m.0;
