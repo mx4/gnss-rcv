@@ -53,6 +53,11 @@ pub struct GnssRcvApp {
     fs: f64,
     fi: f64,
     sig: Signal,
+    /// Enabled signal families (the M6 model: a set, bandwidth-gated). `gps`
+    /// is the L1 C/A family (GPS + the SBAS/QZSS blocks); `gal` is Galileo
+    /// E1, selectable only when fs carries BOC(1,1) (>= 4.092 MHz).
+    gps: bool,
+    gal: bool,
     plots: bool,
     /// Also search the SBAS L1 block (PRN 120-138, EGNOS/WAAS GEOs) — same
     /// C/A machinery as GPS; decoded messages show in the log, the GEOs in
@@ -78,6 +83,8 @@ impl Default for GnssRcvApp {
             fs: 2_046_000.0,
             fi: 0.0,
             sig: Signal::L1ca,
+            gps: true,
+            gal: false,
             plots: false,
             sbas: false,
             qzss: false,
@@ -122,14 +129,6 @@ fn async_receive(
 
     active.store(false, Ordering::SeqCst);
     log::info!("start_receiving: done");
-}
-
-fn sig_label(sig: Signal) -> &'static str {
-    match sig {
-        Signal::L1ca => "L1CA",
-        Signal::GalileoE1b => "E1B",
-        Signal::GalileoE1c => "E1C",
-    }
 }
 
 /// Colour for the SV label in the tracking table, by constellation — the
@@ -216,6 +215,10 @@ impl GnssRcvApp {
         self.fs = self.recordings[i].fs;
         self.fi = self.recordings[i].fi;
         self.sig = self.recordings[i].sig;
+        // Seed the family set: C/A always; Galileo when the recording is E1
+        // or the bandwidth admits it (the all-signals default).
+        self.gps = true;
+        self.gal = self.sig.is_boc11() || self.fs >= 4_092_000.0;
     }
 
     fn stop_async(&mut self) {
@@ -244,12 +247,20 @@ impl GnssRcvApp {
             .unwrap()
             .set_update_func(Box::new(update_func.clone()));
 
+        let mut families = Vec::new();
+        if self.gps {
+            families.push(Signal::L1ca);
+        }
+        if self.gal {
+            families.push(Signal::GalileoE1b);
+        }
         let config = ReceiverConfig {
             file: PathBuf::from(&self.iq_file),
             iq_file_type: self.iq_file_type.clone(),
             fs: self.fs,
             fi: self.fi,
-            sig: self.sig,
+            sig: families[0],
+            families,
             plots: self.plots,
             sbas: self.sbas,
             qzss: self.qzss,
@@ -333,15 +344,39 @@ impl GnssRcvApp {
             });
     }
 
+    /// Signal-family selection. Families are a *set* (the receiver runs every
+    /// checked one on its own scheduler grid), so checkboxes — not a
+    /// dropdown: L1CA and E1 combine into a mixed GPS+Galileo session. The
+    /// E1 box is greyed out when the sample rate cannot carry BOC(1,1); SBAS
+    /// and QZSS ride the C/A family, so they grey out without it.
     fn update_sig_type(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_id_salt("signal")
-            .width(FIELD_W)
-            .selected_text(sig_label(self.sig))
-            .show_ui(ui, |ui| {
-                for s in [Signal::L1ca, Signal::GalileoE1b, Signal::GalileoE1c] {
-                    ui.selectable_value(&mut self.sig, s, sig_label(s));
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.gps, "L1CA")
+                    .on_hover_text("GPS L1 C/A family (also carries the SBAS/QZSS blocks)");
+                let e1_ok = self.fs >= 4_092_000.0;
+                if !e1_ok {
+                    self.gal = false;
+                }
+                ui.add_enabled(e1_ok, egui::Checkbox::new(&mut self.gal, "E1"))
+                    .on_hover_text("Galileo E1-B, on its own 4 ms grid")
+                    .on_disabled_hover_text(
+                        "Galileo E1 BOC(1,1) needs its ±2.046 MHz main lobes: fs ≥ 4.092 MHz",
+                    );
+                // A session needs at least one family.
+                if !self.gps && !self.gal {
+                    self.gps = true;
                 }
             });
+            ui.horizontal(|ui| {
+                ui.add_enabled(self.gps, egui::Checkbox::new(&mut self.sbas, "SBAS"))
+                    .on_hover_text(
+                        "EGNOS/WAAS GEOs (PRN 120-138): iono grid + fast/long-term                          corrections applied to the fix",
+                    );
+                ui.add_enabled(self.gps, egui::Checkbox::new(&mut self.qzss, "QZSS"))
+                    .on_hover_text("QZSS L1 block (PRN 193-202)");
+            });
+        });
     }
 
     /// The recording / format / signal settings as one `label | dropdown | label |
@@ -695,7 +730,7 @@ impl GnssRcvApp {
 
     fn table_ui(&mut self, ui: &mut egui::Ui) {
         let available_height = ui.available_height();
-        let is_galileo = self.sig.is_boc11();
+        let is_galileo = self.gal;
 
         // Make the alternating stripe visible on a dark background.
         ui.visuals_mut().faint_bg_color = egui::Color32::from_rgba_premultiplied(30, 36, 58, 220);
@@ -814,7 +849,11 @@ impl GnssRcvApp {
                         // The fraction stays muted at every stage (0/3 reads the
                         // same as 3/3); the only green element is the check that
                         // appears once the full set is decoded.
-                        let needed = if is_galileo { 5 } else { 3 };
+                        let needed = if sv.constellation == Constellation::Galileo {
+                            5
+                        } else {
+                            3
+                        };
                         ui.horizontal(|ui| {
                             ui.weak(format!("{eph_pages}/{needed}"));
                             if eph_pages >= needed {
