@@ -22,63 +22,23 @@ cargo test --release -- --ignored
 ```
 
 - **`cargo test --release`** — unit tests (incl. the hermetic synthetic-signal
-  acquire/track tests `synthetic_signal_acquires_and_tracks` and
-  `synthetic_noisy_multi_sv_acquires_and_tracks`, which synthesize their own IQ
-  via [`synth.rs`](src/synth.rs) and need no recording) + the fast integration
-  test `acquires_and_tracks_gpssim` (~0.6 s). Run this after any change.
-- **`cargo test --release -- --ignored`** — also runs the heavy tests:
-  `synthetic_geometry_solves_to_truth` + `…_in_noise` (~7 s, **hermetic** — see
-  below), `computes_position_fix_gpssim` (~3 s; pipeline until the first fix,
-  via `-x`/`--exit-on-fix`) and `generates_and_solves_gpssim` (see below). CI
-  runs this tier too: the recording-based tests skip there, the hermetic ones run.
+  acquire/track tests, which synthesize their own IQ via [`synth.rs`](src/synth.rs)
+  and need no recording) + the fast integration test `acquires_and_tracks_gpssim`
+  (~0.6 s). Run this after any change.
+- **`cargo test --release -- --ignored`** — adds the heavy tier: the **hermetic
+  exact-truth positioning regressions** (synthetic GeoFeed scenes — clean, noisy,
+  Galileo E1, anchor-latency, SBAS-corrections; the positioning gate CI runs on
+  every push), `computes_position_fix_gpssim`, and `generates_and_solves_gpssim`
+  (end-to-end via gps-sdr-sim + network; skips cleanly when those are missing).
+- Every test **skips cleanly** (prints `skipping…` and passes) when its input
+  recording is absent, so `cargo test` is always safe to run. Recordings are
+  large, gitignored, and not in CI — the hermetic tests are what CI runs.
 - Unit-testing the receiver without a recording: `MockIQReader`
-  ([receiver.rs](src/receiver.rs)) feeds a `Vec<Complex64>`; build a `Receiver`
-  with `Receiver::with_feed(...)`.
+  ([receiver.rs](src/receiver.rs)) + `Receiver::with_feed(...)`.
 
-**The hermetic end-to-end positioning regression** is
-`synthetic_geometry_solves_to_truth` ([receiver.rs](src/receiver.rs)):
-`synth::GeoFeed` renders a multi-SV L1CA scene whose per-SV code phase, code
-rate, Doppler and LNAV bit timing all derive from the true ranges between a
-truth position and orbits the scene also *broadcasts* (full LNAV streams via
-`gps_lnav::encode_lnav_subframe_source`; the generator flies the LSB-quantized
-ephemeris the receiver will decode, see `quantize_via_lnav`). The full real
-pipeline — acquisition → tracking → bit/frame sync → ephemeris decode → tx
-anchor → gnss-rtk solve — must produce a fix within 15 m of the truth
-(measured ~2.5 m). Needs no recording, no gps-sdr-sim, no network; **this is
-the positioning regression CI runs on every push**. Constellation geometry
-comes from `synth::pick_geo_constellation` (one near-zenith SV + a ~30° ring;
-all-ring geometry was measured at 28 m error, 27.9 m of it vertical). Its
-noisy twin `synthetic_geometry_solves_to_truth_in_noise` runs the same scene
-in seeded AWGN at a realistic 44 dB-Hz (gate 30 m, measured ~10 m): the clean
-test pins the systematic error, the noisy one locks noise robustness — a
-tracking-loop regression that only hurts in noise shows up there.
-
-The Galileo twin is `synthetic_e1_geometry_solves_to_truth` (`GeoFeed::new_e1`:
-BOC(1,1) codes + full I/NAV pages with ICD-convention word-5 TOWs, GST-built
-epochs; measured ~4 m). And
-`tx_anchor_latency_measured_against_synthetic_truth` measures both decoders'
-TOW→phase anchor conventions *directly* against generator truth, per SV,
-solver-free — it locks the cross-constellation anchor alignment (LNAV = I/NAV
-convention, difference < 5 ms) that mixed GPS+Galileo solves require.
-
-The integration tests live in [tests/gpssim.rs](tests/gpssim.rs) and drive the
-**full pipeline** against a gps-sdr-sim recording at a known location:
-- `acquires_and_tracks_gpssim` (fast) — ≥4 SVs reach tracking.
-- `computes_position_fix_gpssim` (ignored) — fix within 0.02° of the simulated
-  location, on the pre-existing `resources/gpssim_2xi16`.
-- `generates_and_solves_gpssim` (ignored) — **end-to-end**: runs
-  [resources/gen_gpssim.sh](resources/gen_gpssim.sh) to pick a date+location,
-  download the matching broadcast ephemeris (ESA GSSC, auth-free FTP), and run
-  gps-sdr-sim, then verifies the receiver recovers that location. Needs
-  `gps-sdr-sim` (`$GPS_SDR_SIM`, or `~/git/gps-sdr-sim/gps-sdr-sim`, or PATH)
-  plus network; **skips cleanly when those are missing**. The script caches by
-  scenario, so reruns skip regeneration.
-
-> The recordings are large, gitignored, and not in CI. Every test **skips
-> cleanly (prints `skipping…` and passes)** when its input recording (or, for
-> the generated test, gps-sdr-sim/network) is absent, so `cargo test` is always
-> safe to run. `gpssim_2xi16` is generated with gps-sdr-sim (see
-> [resources/README.md](resources/README.md)), not downloaded.
+What each tier proves — the GeoFeed exact-truth architecture, the gpssim
+integration tests, the generator — is documented in
+[docs/testing.md](docs/testing.md).
 
 **When you change anything in the DSP/receiver path** (`channel.rs`,
 `navigation.rs`/`gps_lnav.rs`/`galileo_inav.rs`, `ephemeris.rs`, `solver.rs`,
@@ -89,36 +49,20 @@ to-end receiver still acquires, tracks, decodes, and solves.
 ### Validating a positioning change
 
 The `gpssim_2xi16` fixture has known ground truth (Geneva, Jet d'Eau: lat
-46.2075, lon 6.1557; antenna ECEF `4396463.3, 474169.7, 4581510.0` — from the
-gps-sdr-sim run, see [resources/README.md](resources/README.md)). Use it to
-check pseudorange / transmit-time / solver changes:
+46.2075, lon 6.1557; antenna ECEF `4396463.3, 474169.7, 4581510.0`). Set
+`GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0"` to turn on the per-SV
+`RESID` diagnostic in [solver.rs](src/solver.rs): each SV's `resid` should be
+≈ a *common constant* (the receiver clock bias); the **spread** across SVs is
+the geometry error (sub-km when timing is right, 100s of km when it isn't).
+The end-of-run stats funnel
+(`searched → acquired → tracked → ephemeris → used-in-fix`) shows where SVs
+drop out. Methodology and how to read the residuals:
+[docs/testing.md](docs/testing.md).
 
-- Set `GNSS_TRUTH_ECEF="4396463.3,474169.7,4581510.0"` to turn on the per-SV
-  `RESID` diagnostic in [solver.rs](src/solver.rs). Each SV's `resid` should be
-  ≈ a *common constant* (the receiver clock bias); the spread across SVs is the
-  geometry error (sub-km when timing is right, 100s of km when it isn't).
-- The end-of-run stats funnel
-  (`searched → acquired → tracked → ephemeris → used-in-fix`) shows where SVs
-  drop out.
-
-[`scripts/validate_fix.py`](scripts/validate_fix.py) wraps this into one command.
-It builds release and runs three `--json`-driven checks, each **skipping cleanly**
-(exit 0) when its recording is absent, failing (non-zero) only if a *present*
-recording's check fails:
-
-- **GPS fix** (gpssim fixture): runs to the first fix with `GNSS_TRUTH_ECEF` on,
-  and prints the residual spread (from the `RESID` stderr diagnostic) + the fix
-  error vs truth with a **PASS/FAIL** verdict (gate ~2 km). Read it as: `resid`
-  per SV ≈ a common constant (the rx clock bias); the **spread** is the geometry
-  error (sub-km good, 100s of km means transmit-time/pseudorange is wrong).
-- **Galileo E1-B I/NAV decode + fix** (every present recording): asserts Galileo
-  SVs track and decode CRC-valid I/NAV words; on a recording long enough to
-  complete ≥4 ephemerides (ION LimeSDR, 60 s) it also asserts a real Galileo-only
-  position fix (~110 m from the 52.177, 4.488 site truth). Short recordings
-  (PocketSDR ~30 s) assert only the decode chain.
-- **SBAS L1 decode** (a capture with an SBAS GEO overhead — CTTC Spain → EGNOS):
-  asserts a floor of CRC-valid SBAS messages from ≥1 GEO. On CTTC, S120 + S126
-  decode ~32 messages (types 0/1/2/3/4/24/25/26/27).
+[`scripts/validate_fix.py`](scripts/validate_fix.py) wraps the GPS / Galileo
+/ SBAS / Mixed-fix acceptance checks into one command, each **skipping
+cleanly** (exit 0) when its recording is absent, failing (non-zero) only if
+a *present* recording's check fails.
 
 Baseline (2026-06-12, pre multi-signal-stepping; after the WLS+ISB live
 solver, SBAS corrections/weights, retroactive anchor, f32 DSP and lazy
@@ -228,47 +172,15 @@ guesses. Tackle roughly top-to-bottom.
   `..Default::default()` instead of a dozen positional args.
 - ~~SBAS PRNs in `get_sat_list`~~: constellation-aware tagging (PRN ≥ 120 → SBAS)
   + a `--sbas` sweep, replacing the dead `use_sbas` flag.
-- ~~**SBAS L1 message decode**~~: [`sbas_l1.rs`](src/sbas_l1.rs) — 2 ms symbols
-  (2 C/A periods) → continuous K=7 Viterbi → 250-bit messages framed on the
-  0x53/9A/C6 preamble → CRC-24Q. Shares the FEC code + CRC with Galileo via
-  [`fec.rs`](src/fec.rs). The 2-periods-per-symbol grid survives code-phase
-  wraps via `wrap_drop`/`wrap_repeat` (mirroring `LnavState`) plus a stall
-  watchdog that re-opens the hypothesis search if the locked alignment dies —
-  that bookkeeping took CTTC from ~30% to ~97% message yield (32 → 194 msgs
-  in 100 s from EGNOS S120+S126, MT 0/1/2/3/4/7/9/10/12/17/18/24/25/26/27).
-- ~~**SBAS ionospheric grid (MT18 + MT26)**~~: [`sbas_iono.rs`](src/sbas_iono.rs) —
-  IGP band geometry (DO-229 Annex A, bands 0-8), MT18 masks + MT26 vertical
-  delays assembled into a live grid in `GnssState`; the solver prefers it over
-  Klobuchar (pierce point at 350 km → 4-point bilinear → obliquity). MT26s
-  arriving before their band's mask are buffered and replayed (the real-capture
-  order: MT26 every few s, MT18 only every ~300 s). Exercised end to end on
-  CTTC: 5 MT18 + 21 MT26 → 75-78 IGPs, the solver applies 2.5-3.7 m slant per
-  GPS SV — the first iono correction this receiver applies on a real capture
-  (Klobuchar's page 18 never arrives in ≤100 s). Net fix delta there is small
-  (~0.4 m horizontal): a calm morning iono is mostly common-mode and the clock
-  bias absorbs it. Open: bands 9-10 (|lat|>55°), the 3-point interpolation
-  fallback, GIVEI-weighted use.
-- ~~**SBAS fast + long-term corrections (MT1-5/24/25)**~~:
-  [`sbas_corr.rs`](src/sbas_corr.rs) — MT1 PRN mask (IODP-versioned), MT2-5/24
-  fast PRCs (30 s freshness bound; UDREI≥14 and PRC 0x800 clear the slot; MT0
-  parsed as MT2 per the EGNOS test-mode convention), MT24/25 long-term δpos/
-  δclock halves (velocity codes 0 and 1, IODE-gated against the flown
-  ephemeris). Applied per GPS SV at the pseudorange level in the solver:
-  `pr += PRC + c·δclk − û·δpos` (LOS projection; bit layouts cross-checked
-  against RTKLIB sbas.c). CTTC: 13 fast + 14 long-term assembled, per-SV
-  corrections −0.4..−2.6 m with ~2 m differential spread. The fix moves by a
-  couple of metres; CTTC's truth (its own single-frequency NMEA solution) is
-  too coarse to certify the improvement — the certifying judge is the
-  hermetic regression `sbas_fast_corrections_recover_broadcast_clock_errors`
-  (receiver.rs): `GeoFeed::new_diverged` broadcasts ±10 m per-SV clock errors
-  the signal doesn't have (fix corrupts to 14.26 m), synthetic MT1+MT2 with
-  PRC = −c·ε through the production path recover **1.81 m** — sign and
-  magnitude locked against exact truth. EGNOS coverage now spans three
-  captures: CTTC S120+S126, nov3 S136 (54 msgs/60 s incl. MT1/2/3/4 +
-  MT18/26), ION LimeSDR S120+S123 (171 msgs/60 s) — the pre-fix probes that
-  found "no SBAS" were the broken symbol pairing making tracked GEOs look
-  dead. MT9 GEO positions feed the sky plot (el/az vs the current fix;
-  EGNOS GEOs stay out of the fix pool — flagged do-not-use-for-ranging).
+- ~~**SBAS L1 message decode**~~, ~~**iono grid (MT18/26)**~~ and
+  ~~**fast + long-term corrections (MT1-5/24/25)**~~: decoded
+  ([`sbas_l1.rs`](src/sbas_l1.rs)) and applied live in the solver
+  ([`sbas_corr.rs`](src/sbas_corr.rs), [`sbas_iono.rs`](src/sbas_iono.rs));
+  certified against exact truth by the hermetic
+  `sbas_fast_corrections_recover_broadcast_clock_errors` bench (bit layouts
+  cross-checked against RTKLIB sbas.c during bring-up). The wrap bookkeeping,
+  EGNOS test-mode conventions, buffering and the per-capture yield numbers:
+  [docs/sbas.md](docs/sbas.md).
 - **CTTC height drift (open observation)**: every CTTC run slides h ~45 → 17 m
   and ~10 m east over 95 s, SBAS on or off. Truth-residual analysis
   (GNSS_TRUTH_ECEF + RESID trends): the common-mode residual ramps 3.3 m/s
@@ -389,146 +301,30 @@ Without these gnss-rcv cannot integrate with any external tool:
 | Item | Status |
 |---|---|
 | **Troposphere model** (Saastamoinen) | ✅ Done — standard-atmosphere ZHD+ZWD, slant-mapped, applied per SV in `solver.rs`. |
-| **Per-SV pseudorange bias** | ✅ Fixed — it was the **DLL code-loop group delay** (the tracked code phase lags the true one by code-Doppler × τ), so the residual was *linear in Doppler* (−0.03 m/Hz, ~170 m, instantaneous). Compensated by `code_off += doppler/fc·τ` in `channel.rs`, τ = `0.25/(B_DLL·DLL_DISC_GAIN)` per signal (gpssim 165 m→4 m; CTTC real GPS ~20 m). **Correction (2026-06-11):** the earlier "E1's BOC peak needs τ≈1.95 s" finding was a mis-attribution — that calibration (0.381 vs 0.371 m/Hz, 2.5% apart) was compensating the then-undiagnosed 2.000 s I/NAV anchor latency, not a DLL property. With the anchor fixed, the BOC loop gain equals BPSK's (3.18, τ≈0.157 s; verified on ideal + noisy synthetic BOC and on LimeSDR, where it took Galileo-only 502→148 m and the Galileo residual spread 1554→8 m). Full write-up + correction: [docs/dll-group-delay.md](docs/dll-group-delay.md). |
-| **Combined GPS + Galileo fix** | Open; **solver side + anchor timing de-risked**. The two-pass merge experiment (`combined_gps_galileo_fix_from_two_passes`, receiver.rs, ION LimeSDR) proves gnss-rtk solves a mixed 15-SV GPST+GST pool with no special config (~300 m vs the ~100 m-precise site). It exposed two timing blockers, both now handled: (1) the **GPS week rollover** (next row) puts pre-2019 captures 1024 weeks off the GST timeline (the test rebases; a date-anchored resolver is still the proper fix); (2) the LNAV and I/NAV **TOW→phase anchors disagreed by exactly 1.8400 s** — both decoders pair the broadcast TOW with the decode-completion phase, each late by its structural latency (LNAV 0.16 s = 8 next-preamble bits; I/NAV 2.0 s = the page carrying word 5). Measured *directly* against synthetic ground truth (`tx_anchor_latency_measured_against_synthetic_truth`, solver-free, per-SV) and aligned in `nav_anchor_tx`: LNAV stays the reference convention (deliberately uncorrected — the whole validated pipeline incl. gnss-rtk's epoch-sensitive frame handling is self-consistent at it; making t_tx absolutely true was *measured to degrade* the synth fix 2.45 m → 184 m, an open gnss-rtk frame-semantics question), I/NAV adds the 1.840 s difference. The merge now measures a **0.0000 s native inter-constellation offset**. **Weighting + ISB proven** (`wls_fix`, receiver.rs tests): gnss-rtk 0.8 weights every pseudorange equally (its measurement sigma is literally `1.0 // TODO`) and has a single clock state, so the merged solve degraded to 300 m (vs GPS-only 140 m) — the 5 Galileo measurements are ~50× noisier on this capture (self-calibrated σ: GPS 14 m, GAL 721 m) and their ~−125 m common bias leaked into position. A small weighted Gauss-Newton with an inter-system-bias state (per-constellation σ self-calibrated from residual RMS) recovers **145 m from the full mixed pool** and cross-checks gnss-rtk exactly on GPS-only (140 m = 140 m). Remaining for live dual decode: the receiver-side multi-signal stepping — **design pinned in [docs/multi-signal-stepping.md](docs/multi-signal-stepping.md)** (1 ms ring buffer, fixed per-family grids, `scheduler.rs`, shared acquisition FFTs, M1-M6 migration plan with the pinned baselines as gates). Weighting+ISB is **already live** (`wls_solve` is the production solver, with SBAS UDRE/GIVE priors per SV; GNSS_SOLVER=rtk selects gnss-rtk, which also remains the fallback). The epoch-sensitivity question is **settled** (`epoch_sensitivity_probe`, receiver.rs): gnss-rtk is exonerated — the frame-free `wls_fix` matches it to the decimetre at every common anchor-epoch shift, so there is no EARTH_J2000 coordinate/frame integration issue (ranges are computed from our raw ECEF; the only ANISE transform feeds el/az into disabled bias models). The sensitivity is plain orbital physics (~700 m per second of common epoch offset, per-SV range-rate spread), and the whole system — generator, decoders, both solvers, and real gps-sdr-sim data — is self-consistent exactly at the anchor convention (2.6 m at the minimum). The tx-anchor truth instrument labels that point "true − 0.16 s": a bookkeeping question confined to the instrument's reference (trk_phase/code_off pairing semantics), with no production effect. **The Galileo noise itself is solved**: the σ_GAL = 721 m was the old BOC DLL gain (0.256) double-compensating the fixed anchor — with the corrected gain (3.18, see DLL_DISC_GAIN_BOC) the LimeSDR pool measures σ GPS 6 m / GAL 3 m, GAL-only 148 m, combined = GPS-only = 140 m, and the residual inter-system bias is **+9 ns — actual GGTO/hardware class**. **Word-10 GGTO decoded** (galileo_inav `decode_ephemeris_word` arm 10 + `ggto_at`; offsets vs gnss-sdr, round-trip tested): on the 2017 LimeSDR SIS all 5 SVs broadcast A0G +2.71 ns / A1G −9.8e-15, evaluating to **+2.92 ns** at the capture epoch — so the measured −10.4 ns ISB decomposes into GGTO (+2.9 ns) and a **−7.5 ns receiver inter-signal (BPSK vs BOC path) hardware delay**; the merged test prints the decomposition. **Galileo iono inputs decoded** (word-5 ai0/ai1/ai2 + storm flags → `eph.ai*`/`GnssState.gal_iono_az`; 2017 LimeSDR SIS reads ai0 = 51.25 sfu, quiet): the Klobuchar correction already applies to *all* SVs when GPS page-18 coefficients are present (RTKLIB-style), so mixed runs are covered; Galileo-only runs still have no model — the **NeQuick-G port** (ESA reference ~4k lines + CCIR tables) is the sized remaining item, its broadcast inputs now ready. Note: page 18 arrives once per 12.5-min master frame, so short captures (≤60 s) never see Klobuchar coefficients either — iono matters for long runs/live. Remaining open item: the anchor-instrument 0.16 s reference bookkeeping (cosmetic). **Best live test data: `tuni2025`** (Tampere 2025, 50 MHz) carries both — 8 Galileo E1B SVs and 16 GPS L1CA SVs, each fixing independently at 61.450, 23.856 — so it's the ideal modern, rollover-free capture to validate a real dual-constellation solve. |
-
-| **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers 2019-2038 and breaks pre-2019 captures; needs a date-anchored resolver. **Now actively bites**: it puts the GPS pass 1024 weeks off the Galileo (12-bit GST week) timeline on 2017 captures, breaking the GPS+Galileo merge (see Combined fix row). |
-| **Sustained nav bit-sync on marginal recordings** | ✅ Improved (sync), open (deep). The brittle LNAV recovery is fixed (`gps_lnav.rs`): bit sync now rides out brief weak-bit runs (`WEAK_BIT_LIMIT`, keeping the 300-bit alignment) and a frame-sync slip keeps bit sync — so the 3 consecutive clean subframes an ephemeris needs line up. On the **FGI 2023 recording** GPS went from 3 ephemerides / no fix → a **fix** (54 subframes, 1 lock loss; matches that capture's Galileo fix to ~30 m). gpssim unchanged. Still open for **deeply marginal** captures (HackRF). **SJTU resolved (2026-06-12)**: the ~23 s sawtooth (lock at 50 dB-Hz, prompt slides off the peak, divergence guard as coroner, re-lock, repeat) was the front end's **sample-clock vs LO skew (~850 ns/s ≈ 0.85 ppm**, the same quantity div_ema's +1.3–1.4 kHz healthy baseline measures): the first-order DLL's maximum linear slew is ~±490 ns/s, so the discriminator pegged at ~0.87 (= 850/980, measured 0.85) and the loop walked off. GEOs survived only because their *net* required rate fit inside the linear authority. Fixed in `run_dll` by making the loop PI — a `code_rate_trim` integrator (gain B_DLL/4τ; learns from the clamped-linear discriminator, not during the FLL second; survives re-locks since the skew is a receiver constant; zeroed on divergence drops) plus a persistence-gated half-deadbeat pull-in gear (3 consecutive updates of |disc| > 0.5; persistence because the discriminator throws isolated one-update outliers that a deadbeat kick would turn into ~35 ns glitches). The divergence-guard baseline now waits out the trim windup (T_FPULLIN + 4 s) — a baseline taken across the transient got a clean 52 dB-Hz channel dropped on the synth GEO bench. Validated: SJTU 60 s unbroken locks, 6 ephemerides, 17/17 fixes at SJTU Minhang (first fix ever on this capture); synth GEO bench 1.2–2.4 m (baseline 1.5); gpssim fix 1.6 m; CTTC re-pinned (~1 m shift). **Two opens**: (a) SJTU σ is tens of m — no iono corrections there, and (b) the `dll_lag` Doppler-proportional measurement correction *hurts* SJTU (σ 37→73 m, A/B via `GNSS_DLL_LAG=off`) while being load-bearing on gpssim/CTTC (σ 1.6→48 m without it) — and the trim experiment proved it is **not** DLL group delay (trim ≈ 0 across gpssim's ±3 kHz with the integrator active): its true source behaves like a ~0.157 s epoch latency (λ·Δt ≈ 0.03 m/Hz) present at 2–4 Msps but absent at 25 Msps, suggesting a sampling-grid-dependent discriminator-zero bias. Mechanism hunt open. |
+| **Per-SV pseudorange bias** | ✅ Fixed — a Doppler-proportional transmit-time bias (−0.03 m/Hz, ~170 m on gpssim), nulled by `code_off += doppler/fc·τ` in `channel.rs`, τ per signal via `dll_tau` (gpssim 165 m→4 m; the early "BOC needs τ≈1.95 s" was a mis-attribution of the 2.000 s I/NAV anchor latency — both gains are 3.18). **Attribution revised 2026-06-12**: the loop holds no such lag (rate-trim experiment) — the term corrects an epoch-latency-like source elsewhere in the measurement path, present at 2–4 Msps, absent (bias-injecting) at 25 Msps; `GNSS_DLL_LAG=off` A/Bs it. Calibration history: [docs/dll-group-delay.md](docs/dll-group-delay.md); re-attribution + open mechanism hunt: [docs/dll-pi-loop.md](docs/dll-pi-loop.md). |
+| **Combined GPS + Galileo fix** | ✅ **Live** — a flag-less run solves the mixed GPS+Galileo(+EGNOS) pool through the production WLS with per-constellation weighting and an inter-system-bias state (`wls_solve`; `GNSS_SOLVER=rtk` selects the gnss-rtk fallback); the receiver-side single-pass architecture is [docs/multi-signal-stepping.md](docs/multi-signal-stepping.md) and the mixed gate is pinned in validate_fix.py (tuni2025). The full de-risking trail — week rebase, the 1.840 s LNAV/I-NAV anchor alignment, the epoch-sensitivity exoneration, weighting+ISB, GGTO decode and the ISB decomposition (+2.9 ns GGTO / −7.5 ns hardware) — is [docs/gps-galileo-timing.md](docs/gps-galileo-timing.md). Open there: NeQuick-G for Galileo-only iono; the anchor-instrument 0.16 s bookkeeping (cosmetic). |
+| **GPS week rollover** | `week = getbitu(…,10) + 2048` only covers 2019-2038. **Mixed pools are fixed** — the solver live-rebases each GPS SV's epochs onto the GST timeline by the nearest 1024-week multiple. Remaining: GPS-only pre-2019 captures show the un-rebased week (cosmetic); a date-anchored resolver is still the proper fix. |
+| **Sustained nav bit-sync on marginal recordings** | ✅ Improved (sync), open (deep). The brittle LNAV recovery is fixed (`gps_lnav.rs`): bit sync rides out brief weak-bit runs (`WEAK_BIT_LIMIT`, keeping the 300-bit alignment) and a frame-sync slip keeps bit sync. On the **FGI 2023 recording** GPS went from 3 ephemerides / no fix → a **fix** (54 subframes; matches that capture's Galileo fix to ~30 m); gpssim unchanged. **SJTU resolved (2026-06-12)**: the ~23 s lock sawtooth was the front end's ~850 ns/s sample-clock vs LO skew outrunning the first-order DLL's authority — fixed by making the code loop PI (rate-trim integrator + persistence-gated pull-in gear; divergence-guard baseline delayed past the windup) → 60 s unbroken locks, 6 ephemerides, **first fix ever** (17/17, SJTU Minhang). Full analysis: [docs/dll-pi-loop.md](docs/dll-pi-loop.md). Opens: SJTU σ is tens of m (no iono there; `dll_lag` mis-calibrates at 25 Msps — see the per-SV-bias row); deeply marginal captures (HackRF). |
 
 ### C. Constellation & frequency gaps
 
 | Item | Notes |
 |---|---|
-| **Galileo E1** | BOC(1,1) correlator, 4092-chip memory codes, I/NAV FEC decoder. Highest ROI after GPS. See detailed plan below. |
+| **Galileo E1** | ✅ Done — acquires, tracks, decodes, fixes. See [docs/galileo-e1.md](docs/galileo-e1.md). |
 | **Galileo OSNMA** | ✅ **done — full nav-data authentication, live.** Wired automatically on any E1B run: I/NAV → 40-bit field (`page[132..172]`) → one shared verifier over the [`galileo-osnma`](https://github.com/daniestevez/galileo-osnma) crate ([`osnma.rs`](src/osnma.rs)), GST per page from the word-5 anchor; 2023/2024/2025 trust anchors built in, auto-selected by decoded GST week. On **`tuni2025`** (clean 2025, 8 E1B SVs) the whole chain closes: DSM-KROOT (NB=8) reassembled → ECDSA-verified against the built-in 2024 PKID-1 key → TESLA chain validated → **7 SVs authenticated** (E02/10/11/25/30/34/36). On the FGI 2023 captures it reaches the DSM-PKR (clean, decode byte-perfect) / a KROOT-minus-one-block (jammertest) but not full auth — those windows lack a complete KROOT. Full write-up: [docs/osnma.md](docs/osnma.md). |
 | **GPS L2C / L5** | Dual-frequency → ionosphere-free combination; opens the door to PPP. |
 | **GLONASS L1** | FDMA (per-SV carrier); breaks single-IF assumption end-to-end. Hard. |
 | **BeiDou B1** | Completes global coverage. |
 
-#### Galileo E1 — implementation plan
+#### Galileo E1 — implementation notes
 
-**Progress — E1-B acquires, tracks, decodes, and *fixes*.** `code::Signal`
-replaced the `"L1CA"` string; the E1-B/E1-C primary memory codes are embedded
-([`galileo_e1_codes.rs`](src/galileo_e1_codes.rs)) and BOC(1,1)-modulated
-(`code::boc11()`); the receiver steps the signal's 4 ms code period; and
-`get_sat_list` tags Galileo PRNs from the signal. On the ION LimeSDR capture
-`--sig E1B` locks **E01/E04/E09/E11/E19** and holds a **60 s lock at 37–49 dB-Hz**.
-The **I/NAV page decoder** ([`galileo_inav.rs`](src/galileo_inav.rs)) is in and
-**decodes real, CRC-valid words**: per-4 ms symbols → preamble sync (with polarity
-*and the (−1)ⁿ half-rate ambiguity*) → de-interleave → Viterbi → even/odd page
-assembly → CRC-24Q → 128-bit word. The **ephemeris extraction** from word types
-1–5 (`galileo_inav::decode_ephemeris_word`, Steps 4–5) and the **time + solver
-wiring** (Step 6 — GST week+TOW → absolute epochs, constellation-aware µ, shared
-transmit-time anchor) are both in. **All 5 SVs now complete a physically valid
-orbit** (GST week 947 ≈ Oct 2017, a≈29 600 km) and feed gnss-rtk to produce a
-**Galileo-only fix ~110 m from the 52.177, 4.488 site truth** (after the signal-
-aware DLL group-delay compensation — E1's BOC peak needs a much larger τ than
-L1CA, see the per-SV-bias backlog entry).
-
-The earlier "only 2 SVs (E09/E11) complete an ephemeris" was **not** a data
-limitation — it was a decode bug. E01/E04/E19 held a strong continuous lock
-(E01 the *strongest* at 47.8 dB-Hz) yet decoded zero CRC-valid words because
-their carrier had settled into a **Costas-loop false lock at half the symbol
-rate** (±125 Hz = 250 sym/s ÷ 2): a π/symbol rotation that the `atan(Q/I)`
-prompt discriminator and the `atan(cross/dot)` FLL both fold to zero error, so
-tracking is happy while every symbol is multiplied by (−1)ⁿ — deterministic per
-SV, independent of C/N0. (GPS L1 C/A is immune: its PLL updates 20× per data bit,
-so its discriminator is not data-ambiguous at the bit rate. The hazard is
-specific to E1-B's one-symbol-per-code-period layout.)
-
-It is fixed at **two layers**: (1) the decoder resolves the ambiguity at frame
-sync (`InavDecoder::match_preamble` tries the de-alternated stream alongside the
-polarity hypotheses), and (2) the **root cause** in tracking —
-`Channel::correct_half_rate_false_lock` (channel.rs) compares the PLL Doppler to
-the *code-implied* Doppler from the transmit-phase slope (`d(t_tx)/d(t_rx) =
-1 + dopp/fc`; the code/DLL loop is immune to the carrier aliasing) and snaps the
-carrier onto the nearest half-rate step, pulling it onto the true lock within
-~5 s. Layer (1) covers the seconds before (2) engages and any transient slip;
-(2) makes the carrier Doppler itself correct (needed for velocity / carrier-phase,
-not just for the pseudorange-only fix). Verified on LimeSDR: E01/E04/E19 each
-correct exactly once (+125 Hz) with no lock loss, and the PLL vs code-implied
-Doppler gap drops from ~−125 Hz to ~0 (`GAL_DOPP_CHECK=1` logs the comparison).
-
-Key differences from GPS L1 C/A that drive every change:
-
-| Property | GPS L1 C/A | Galileo E1-B |
-|---|---|---|
-| Modulation | BPSK | BOC(1,1) — code × square-wave subcarrier at 1.023 MHz |
-| Code length | 1023 chips | 4092 chips (memory codes, not Gold codes) |
-| Code period | 1 ms | 4 ms |
-| Carrier | 1575.42 MHz | 1575.42 MHz (same — no RF changes) |
-| Nav data rate | 50 bps | 250 bps (before FEC) |
-| FEC | None (Hamming parity per word) | Rate-1/2 conv (K=7, G1=171₈, G2=133₈) + 8×30 block interleaver |
-| Frame check | 6-bit Hamming parity | CRC-24Q per page |
-| Full ephemeris | Subframes 1–3 (~60 s) | Word types 1–4 (~8 pages ≈ 16 s) |
-
-**Implementation order** (each step is independently testable):
-
-**Step 1 — `src/code.rs`: E1-B/E1-C memory codes** ✅ DONE
-- The 4092-chip E1-B/E1-C primary memory codes are embedded as hex in
-  [`galileo_e1_codes.rs`](src/galileo_e1_codes.rs) (OS SIS ICD Annex C, 50 PRNs);
-  `e1_primary_code` decodes them to ±1, `spreading_code()` wraps them in `boc11()`.
-- Tested: `e1_primary_codes_are_valid` (bipolar, balanced, strong autocorr peak).
-
-**Step 2 — `src/channel.rs`: BOC(1,1) correlator** ✅ acquires + tracks
-- `code::boc11()` produces the `[+code, −code]` per-chip replica, returned by
-  `spreading_code()`, so `Channel::new`'s resampling already consumes it — E1-B
-  acquires *and* tracks as-is (the GPS-only DLL assertion `n == 10` was removed;
-  the loops are otherwise period-generic — all 5 LimeSDR SVs hold a 60 s lock).
-- Left: `nav_decode()` routing — branch on `Constellation::Galileo` before the
-  LNAV path, feeding the I/NAV symbol (sign of prompt-I, one per 4 ms code
-  period) to a `nav_decode_inav()` built on [`galileo_inav.rs`](src/galileo_inav.rs).
-
-**Step 3 — receiver wiring** ✅ DONE
-- No separate `--galileo` flag: selecting the signal (`--sig E1B`) drives it.
-  `get_sat_list` tags every selected PRN `Constellation::Galileo` when the signal
-  is Galileo (E1 PRNs 1–36 overlap GPS, so the *signal*, not the number, decides).
-  The receiver steps the signal's 4 ms code period. Stats / xcorr rejection are
-  already generic.
-
-**Step 4 — `src/ephemeris.rs`: Galileo fields** ✅ DONE
-- `Ephemeris` is constellation-agnostic (the GPS LNAV parsers moved to
-  `gps_lnav.rs`); the Keplerian/clock fields are shared as-is. BGD(E1,E5a) is
-  stored in the existing `tgd` field (the E1 group delay for E1-only reception);
-  separate `bgd_*` fields can come later if E5 is added.
-- `is_valid()` is constellation-agnostic — it gates on `week != 0` (no GPS week
-  range) plus an orbit-size bound that passes both GPS and Galileo MEO.
-
-**Step 5 — `src/galileo_inav.rs`: I/NAV ephemeris extraction** ✅ DONE
-The page decoder (sync → FEC → CRC → CRC-valid 128-bit word) and the ephemeris
-extraction are both in. `decode_ephemeris_word(&mut Ephemeris, &InavWord)` fills
-the orbit/clock per word type, `ubits`/`sbits` reading the ICD bit layout
-(offsets + scales cross-checked vs gnss-sdr's `Galileo_INAV.h`):
-- **Word 1**: IODnav, t0e (60 s LSB), M0, e, √a
-- **Word 2**: Ω0, i0, ω, i_dot
-- **Word 3**: Ω_dot, Δn, C_uc/C_us/C_rc/C_rs
-- **Word 4**: C_ic/C_is, t0c (60 s LSB), a_f0/a_f1/a_f2 (2^-34/-46/-59)
-- **Word 5**: BGD(E1,E5a)→`tgd`, **GST week** (the only page carrying it), GST TOW
-
-Tested by `decodes_inav_words_into_a_valid_ephemeris` (hermetic — locks every
-offset, scale, the 60 s LSBs, and signedness) and confirmed on the LimeSDR
-capture (all 5 SVs' orbits complete, is_valid). The Viterbi decoder (rate-1/2 K=7)
-was the hardest single piece. Reference: Galileo OS SIS ICD (ESA GSC), Tables 4
-and 24–29.
-
-**Step 6 — `src/solver.rs` + `src/constants.rs`: GST and BGD** ✅ DONE — fix lands
-- `EARTH_MU_GAL = 3.986004418e14` added; `solver::earth_mu(sv)` picks GTRF vs WGS-84
-  µ in the Kepler solve and the relativistic clock term (~1 mm difference).
-- BGD: `group_delay` already returns `eph.tgd`, which the I/NAV decoder fills with
-  BGD(E1,E5a) — the E1-only group delay — so no Galileo-specific branch is needed.
-- Time: absolute toe/toc/tow epochs are built from the GST week+TOW via
-  `Epoch::from_time_of_week(week, .., TimeScale::GST)` (hifitime carries the GST↔GPST
-  offset, so the solver's absolute-duration math is correct without a manual GGTO).
-  The transmit anchor is shared with GPS (`Channel::nav_anchor_tx`), pinned on a
-  word-type-5 page so the TOW and code-period count are captured together.
-- Carrier::L1 already covers Galileo E1 (1575.42 MHz) in gnss-rtk — no change needed.
-- **A real Galileo-only fix lands.** Once the half-rate false-lock decode bug was
-  fixed (see the progress note above), the 61 s LimeSDR capture completes **all 5
-  Galileo ephemerides** (E01/E04/E09/E11/E19) and `validate_fix.py` asserts a fix
-  **~110 m** from the 52.177, 4.488 site truth. Also covered by solver unit tests
-  (`earth_mu_is_constellation_specific`, `galileo_ephemeris_computes_a_meo_position`).
-  The per-SV DLL-group-delay bias is compensated via (doppler/fc)·τ_dll; the BOC gain equals BPSK's after the 2026-06-11 correction (see the per-SV-bias backlog entry).157 s), which
-  took the Galileo fix 3.4 km → ~110 m (see the per-SV-bias backlog entry).
+✅ **Complete** — E1-B acquires, tracks, decodes I/NAV, and fixes
+(Galileo-only and mixed). The implementation story — embedded memory codes,
+BOC(1,1) correlator, the I/NAV FEC/decoder and per-word ephemeris
+extraction, GST/BGD solver wiring, and the half-symbol-rate Costas false
+lock (root cause + two-layer fix) — is in
+[docs/galileo-e1.md](docs/galileo-e1.md). (I/NAV bit layouts were
+cross-checked against gnss-sdr's Galileo_INAV.h during bring-up.)
 
 ### D. Developer experience
 
@@ -539,7 +335,7 @@ and 24–29.
 | **Interactive time-series in UI** | Live scrolling CN0/Doppler/code-phase in the egui window; more useful than `--plots` PNGs. |
 | **NTRIP client** | Fetch DGNSS/RTK corrections from a public caster (IGS, EUREF) for differential positioning. |
 | **SoapySDR abstraction** | Cover USRP, HackRF, LimeSDR, BladeRF live; currently only RTL-SDR. |
-| **Apply SBAS corrections** | `--sbas` now *decodes* the L1 messages ([`sbas_l1.rs`](src/sbas_l1.rs)); parsing MT2–5/24/25 (fast + long-term) and MT18/26 (iono grid) and applying them in the solver would bring single-frequency accuracy to ~1 m. The SBAS GEO can also serve as an extra ranging source (MT9 ephemeris). |
+| **Apply SBAS corrections** | ✅ Done — MT2-5/24/25 + MT18/26 decoded and applied live in the solver ([docs/sbas.md](docs/sbas.md)). |
 
 ### E. Library & API surface
 
