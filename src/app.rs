@@ -198,6 +198,39 @@ fn dop_color(dop: f64) -> egui::Color32 {
     }
 }
 
+/// C/N0 quality band: 0 = green (strong, ≥40 dB-Hz), 1 = yellow (≥35), 2 = red.
+/// Drives both the dB-Hz cell colour and the table's strong-first row order, so
+/// the two never disagree.
+fn cn0_band(cn0: f64) -> u8 {
+    if cn0 >= 40.0 {
+        0
+    } else if cn0 >= 35.0 {
+        1
+    } else {
+        2
+    }
+}
+
+fn cn0_color(cn0: f64) -> egui::Color32 {
+    match cn0_band(cn0) {
+        0 => egui::Color32::from_rgb(80, 200, 100), // green
+        1 => egui::Color32::from_rgb(220, 190, 50), // yellow
+        _ => egui::Color32::from_rgb(220, 80, 60),  // red
+    }
+}
+
+/// A fixed-width, left-aligned label for a status row, so the values after it line
+/// up down the column (the position row, which has none, sits flush left instead).
+fn status_label(ui: &mut egui::Ui, text: &str, h: f32) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(LABEL_W, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.label(text);
+        },
+    );
+}
+
 impl GnssRcvApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, plots: bool, sbas: bool, qzss: bool) -> Self {
         Self {
@@ -497,10 +530,7 @@ impl GnssRcvApp {
             let tow_text = format!("{:?}", st.tow_gpst);
             let (pos_text, pos_url) = if st.longitude != 0.0 {
                 (
-                    format!(
-                        "lat={:.4}  lon={:.4}  alt={:.1} m",
-                        st.latitude, st.longitude, st.height
-                    ),
+                    format!("{:.4} {:.4} {:.0}m", st.latitude, st.longitude, st.height),
                     Some(format!(
                         "https://maps.google.com/?ll={},{}",
                         st.latitude, st.longitude
@@ -551,67 +581,70 @@ impl GnssRcvApp {
                                     (ui.available_width() - btn_area_w - GRID_GAP_X).max(240.0);
                                 let status = ui.scope(|ui| {
                                     ui.set_width(status_w);
-                                    egui::Grid::new("status_grid")
-                                        .num_columns(2)
-                                        .spacing([GRID_GAP_X, 6.0])
-                                        .show(ui, |ui| {
-                                            ui.label("time");
-                                            ui.horizontal(|ui| {
-                                                ui.monospace(&tow_text);
-                                                if has_ion {
-                                                    ui.separator();
-                                                    ui.monospace("ion");
-                                                }
-                                                if has_utc {
-                                                    ui.separator();
-                                                    ui.monospace("utc");
-                                                }
-                                                // EGNOS corrections are live and
-                                                // feeding the solver — SBAS-orange.
-                                                let (n_igp, n_fast, n_long) = egnos;
-                                                if n_igp + n_fast + n_long > 0 {
-                                                    ui.separator();
-                                                    ui.colored_label(
-                                                        constellation_color(Constellation::SBAS),
-                                                        "EGNOS",
-                                                    )
-                                                    .on_hover_text(format!(
-                                                        "SBAS corrections applied to the fix: \
+                                    // The scope inherits the outer row's horizontal
+                                    // layout; stack the headline + grid explicitly.
+                                    ui.vertical(|ui| {
+                                        let h = ui.spacing().interact_size.y;
+                                        // 1. GPST (+ live correction flags).
+                                        ui.horizontal(|ui| {
+                                            status_label(ui, "GPST", h);
+                                            ui.monospace(&tow_text);
+                                            if has_ion {
+                                                ui.separator();
+                                                ui.monospace("ion");
+                                            }
+                                            if has_utc {
+                                                ui.separator();
+                                                ui.monospace("utc");
+                                            }
+                                            // EGNOS corrections are live and feeding
+                                            // the solver — SBAS-orange.
+                                            let (n_igp, n_fast, n_long) = egnos;
+                                            if n_igp + n_fast + n_long > 0 {
+                                                ui.separator();
+                                                ui.colored_label(
+                                                    constellation_color(Constellation::SBAS),
+                                                    "EGNOS",
+                                                )
+                                                .on_hover_text(format!(
+                                                    "SBAS corrections applied to the fix: \
                                                          iono grid {n_igp} IGPs · {n_fast} fast \
                                                          + {n_long} long-term corrections"
-                                                    ));
-                                                }
-                                            });
-                                            ui.end_row();
-
-                                            ui.label("position");
-                                            if let Some(url) = &pos_url {
-                                                ui.hyperlink_to(&pos_text, url);
-                                            } else {
-                                                ui.monospace(&pos_text);
+                                                ));
                                             }
-                                            ui.end_row();
-
+                                        });
+                                        // 2. Position — bare (no label, no prefixes).
+                                        if let Some(url) = &pos_url {
+                                            ui.hyperlink_to(&pos_text, url);
+                                        } else {
+                                            ui.monospace(&pos_text);
+                                        }
+                                        // 3. Precision (HDOP/VDOP), no label. Always keep the
+                                        // row — blank until the first fix (allocate_space
+                                        // reserves its height) — so the box doesn't grow when
+                                        // a fix appears.
+                                        let prec = ui.horizontal(|ui| {
                                             if let Some((hdop, vdop, nsv)) = dop {
-                                                ui.label("precision");
-                                                ui.horizontal(|ui| {
-                                                    ui.colored_label(
-                                                        dop_color(hdop),
-                                                        format!("HDOP {hdop:.1}"),
-                                                    );
-                                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
-                                                })
-                                                .response
-                                                .on_hover_text(
-                                                    "Dilution of precision (lower is better — \
-                                                     <2 excellent, 2-5 good). VDOP is vertical, \
-                                                     then the SV count used in the fix.",
+                                                ui.colored_label(
+                                                    dop_color(hdop),
+                                                    format!("HDOP {hdop:.1}"),
                                                 );
-                                                ui.end_row();
+                                                ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                                            } else {
+                                                ui.allocate_space(egui::vec2(0.0, h));
                                             }
-
-                                            if let Some((got, total)) = osnma_kroot {
-                                                ui.label("KROOT");
+                                        });
+                                        if dop.is_some() {
+                                            prec.response.on_hover_text(
+                                                "Dilution of precision (lower is better — \
+                                                 <2 excellent, 2-5 good). VDOP is vertical, \
+                                                 then the SV count used in the fix.",
+                                            );
+                                        }
+                                        // OSNMA DSM-KROOT assembly progress.
+                                        if let Some((got, total)) = osnma_kroot {
+                                            ui.horizontal(|ui| {
+                                                status_label(ui, "KROOT", h);
                                                 let fill = if got >= total {
                                                     egui::Color32::from_rgb(80, 200, 100)
                                                 } else {
@@ -627,12 +660,12 @@ impl GnssRcvApp {
                                                 )
                                                 .on_hover_text(
                                                     "OSNMA TESLA root key (DSM-KROOT): blocks \
-                                                     assembled / needed before nav data is \
-                                                     authenticated",
+                                                         assembled / needed before nav data is \
+                                                         authenticated",
                                                 );
-                                                ui.end_row();
-                                            }
-                                        });
+                                            });
+                                        }
+                                    });
                                 });
                                 let box_h = status.response.rect.height();
                                 self.update_start_stop(ui, ctx, box_h, btn_area_w);
@@ -684,7 +717,10 @@ impl GnssRcvApp {
                 .map(|(sv, cs)| (*sv, cs.cn0))
                 .collect()
         };
+        // Same strong-first stable ordering as the dashboard table: a deterministic
+        // PRN base order, then a stable sort by C/N0 colour band.
         tracked_svs.sort_by_key(|(sv, _)| *sv);
+        tracked_svs.sort_by_key(|(_, cn0)| cn0_band(*cn0));
 
         egui::SidePanel::left("diag_sv_list")
             .resizable(false)
@@ -692,14 +728,7 @@ impl GnssRcvApp {
             .show_inside(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (sv, cn0) in &tracked_svs {
-                        let color = if *cn0 >= 40.0 {
-                            egui::Color32::from_rgb(80, 200, 100)
-                        } else if *cn0 >= 35.0 {
-                            egui::Color32::from_rgb(220, 190, 50)
-                        } else {
-                            egui::Color32::from_rgb(220, 80, 60)
-                        };
-                        let label = egui::RichText::new(format!("{sv}")).color(color);
+                        let label = egui::RichText::new(format!("{sv}")).color(cn0_color(*cn0));
                         if ui
                             .selectable_label(self.diag_sv == Some(*sv), label)
                             .clicked()
@@ -757,14 +786,20 @@ impl GnssRcvApp {
         // hide S/J satellites even while they tracked).
         let tracked: Vec<SV> = {
             let st = self.pub_state.lock().unwrap();
-            let mut v: Vec<SV> = st
+            let mut v: Vec<(SV, f64)> = st
                 .channels
                 .iter()
                 .filter(|(_, cs)| cs.state == State::Tracking)
-                .map(|(sv, _)| *sv)
+                .map(|(sv, cs)| (*sv, cs.cn0))
                 .collect();
-            v.sort();
-            v
+            // Strong-first, but stable: a deterministic PRN base order (HashMap
+            // iteration is unordered), then a *stable* sort by C/N0 colour band
+            // (green ≥40, yellow ≥35, red below). Rows keep their place within a
+            // band and only move when an SV actually changes band — so a wobbling
+            // C/N0 doesn't reshuffle the table.
+            v.sort_by_key(|(sv, _)| *sv);
+            v.sort_by_key(|(_, cn0)| cn0_band(*cn0));
+            v.into_iter().map(|(sv, _)| sv).collect()
         };
 
         tb.header(20.0, |mut header| {
@@ -812,15 +847,8 @@ impl GnssRcvApp {
                             .on_hover_text(sv_hover_text(sv));
                     });
                     row.col(|ui| {
-                        let color = if cn0 >= 40.0 {
-                            egui::Color32::from_rgb(80, 200, 100)
-                        } else if cn0 >= 35.0 {
-                            egui::Color32::from_rgb(220, 190, 50)
-                        } else {
-                            egui::Color32::from_rgb(220, 80, 60)
-                        };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.colored_label(color, format!("{:.1}", cn0));
+                            ui.colored_label(cn0_color(cn0), format!("{:.1}", cn0));
                         });
                     });
                     row.col(|ui| {
