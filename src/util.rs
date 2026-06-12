@@ -63,8 +63,21 @@ pub fn calc_correlation_inplace(
     buf: &mut [Complex32],
     prn_code_fft: &[Complex32],
 ) {
-    assert_eq!(buf.len(), prn_code_fft.len());
     fft_planner.plan_fft_forward(buf.len()).process(buf);
+    finish_correlation_inplace(fft_planner, buf, prn_code_fft);
+}
+
+/// The PRN-specific tail of the FFT correlation: `buf` enters holding the
+/// *frequency-domain* (carrier-mixed, forward-FFT'd) samples — which are
+/// PRN-independent and therefore shareable across every channel searching the
+/// same block (see the scheduler's acquisition FFT cache) — and leaves
+/// holding the complex correlation against `prn_code_fft`.
+pub fn finish_correlation_inplace(
+    fft_planner: &mut FftPlanner<f32>,
+    buf: &mut [Complex32],
+    prn_code_fft: &[Complex32],
+) {
+    assert_eq!(buf.len(), prn_code_fft.len());
     for (s, c) in buf.iter_mut().zip(prn_code_fft) {
         *s *= c.conj();
     }

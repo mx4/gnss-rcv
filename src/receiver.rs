@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::channel::Channel;
+use crate::channel::{AcqFftCache, Channel};
 use crate::code::Signal;
 use crate::device::RtlSdrDevice;
 use crate::ephemeris::{Ephemeris as RxEphemeris, Measurement};
@@ -109,6 +109,9 @@ pub struct Receiver {
     iq_feed: Box<dyn IQReader>,
     /// The session's signal families, in scheduler registration order.
     families: Vec<Signal>,
+    /// Each family's shared acquisition carrier replicas (same order).
+    fam_carriers: Vec<std::sync::Arc<Vec<Vec<Complex32>>>>,
+    fft_planner: rustfft::FftPlanner<f32>,
     code_period_sec: f64, // family-0 code period (the data-time stat unit)
     off_samples: usize,
     scheduler: Scheduler,
@@ -419,9 +422,11 @@ impl Receiver {
         // family — duplicating it per channel was the 50 MHz OOM), and the
         // channels of the constellations that family carries.
         let mut channels = HashMap::<SV, Channel>::new();
+        let mut fam_carriers = Vec::new();
         for &fam_sig in &families {
             let fam_sp = (fam_sig.code_period_sec() * cfg.fs) as usize;
             let carriers = Channel::build_carriers(cfg.fs, cfg.fi, fam_sp);
+            fam_carriers.push(carriers.clone());
             for sv in get_sat_list(&cfg.sats, fam_sig, cfg.sbas, cfg.qzss) {
                 // In a mixed session each family contributes only its own
                 // constellations (get_sat_list is per-signal).
@@ -452,6 +457,8 @@ impl Receiver {
             off_samples: cfg.off_msec * period_sp,
             scheduler: Scheduler::new(cfg.fs, &families),
             families,
+            fam_carriers,
+            fft_planner: rustfft::FftPlanner::new(),
             channels,
             pub_state: state.clone(),
             solver: PositionSolver::new(state),
@@ -541,10 +548,42 @@ impl Receiver {
             // their code period.
             let iq_vec = window.to_vec();
             let fam_period = self.families[fam].code_period_sec();
+
+            // Shared acquisition FFT cache: the per-bin carrier-mixed forward
+            // FFT is PRN-independent, so compute each searched bin once per
+            // family step and let every searching channel reuse it. The
+            // searched range is the union over this family's searchers.
+            let range = self
+                .channels
+                .values()
+                .filter(|ch| ch.code_period_sec() == fam_period)
+                .filter_map(|ch| ch.acq_search_range())
+                .fold(None::<(usize, usize)>, |acc, (lo, hi)| {
+                    Some(acc.map_or((lo, hi), |(alo, ahi)| (alo.min(lo), ahi.max(hi))))
+                });
+            let cache = range.map(|(lo, hi)| {
+                let half = iq_vec.len() / 2;
+                let slice = &iq_vec[half..];
+                let carriers = &self.fam_carriers[fam];
+                let fft = self.fft_planner.plan_fft_forward(slice.len());
+                let mut bins: Vec<Option<Vec<Complex32>>> = vec![None; carriers.len()];
+                bins[lo..hi].par_iter_mut().enumerate().for_each(|(k, b)| {
+                    let mut buf: Vec<Complex32> = slice.to_vec();
+                    for (s, c) in buf.iter_mut().zip(carriers[lo + k].iter()) {
+                        *s *= *c;
+                    }
+                    fft.process(&mut buf);
+                    *b = Some(buf);
+                });
+                AcqFftCache { bins }
+            });
+
             self.channels
                 .par_iter_mut()
                 .filter(|(_, ch)| ch.code_period_sec() == fam_period)
-                .for_each(|(_id, channel)| channel.process_samples(&iq_vec, ts_sec));
+                .for_each(|(_id, channel)| {
+                    channel.process_samples_cached(&iq_vec, ts_sec, cache.as_ref())
+                });
             latest_ts = latest_ts.max(ts_sec);
         }
         self.stats.msec_processed += 1;

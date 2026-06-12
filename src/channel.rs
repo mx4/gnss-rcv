@@ -14,10 +14,10 @@ use crate::navigation::Navigation;
 use crate::plots::plot_channel;
 use crate::state::ChannelState;
 use crate::state::GnssState;
-use crate::util::calc_correlation_inplace;
 use crate::util::doppler_shift;
 use crate::util::doppler_shifted_carrier;
 use crate::util::get_max_with_idx;
+use crate::util::{calc_correlation_inplace, finish_correlation_inplace};
 
 /// Early/late correlator spacing, in chips (prompt ± half a chip). The
 /// early-late discriminator's slope — and through it the DLL group delay —
@@ -195,6 +195,15 @@ pub struct Acquisition {
     buf: Vec<Complex32>,
 }
 
+/// Per-block acquisition FFT cache: for each Doppler bin, the carrier-mixed,
+/// forward-FFT'd window — PRN-independent, so the receiver computes each bin
+/// once per family step and every searching channel reuses it (the per-PRN
+/// remainder is multiply + IFFT; see `finish_correlation_inplace`). Bins
+/// outside the cached range fall back to the channel's own mix+FFT.
+pub struct AcqFftCache {
+    pub bins: Vec<Option<Vec<Complex32>>>,
+}
+
 /// Bin range covering `center_hz ± spread_hz` of the fixed Doppler grid.
 fn doppler_bin_range(center_hz: f64, spread_hz: f64) -> (usize, usize) {
     let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
@@ -364,6 +373,24 @@ impl Channel {
     /// Build the per-Doppler-bin carrier replicas once, to be shared (cloned
     /// `Arc`) across every channel — they depend only on `fs`/`fi`/`code_sp`, not
     /// the PRN. See [`Acquisition::carriers`].
+    /// The Doppler bin range this channel's *next* acquisition pass will
+    /// search, if it is searching — the receiver unions these to size the
+    /// shared FFT cache.
+    pub fn acq_search_range(&self) -> Option<(usize, usize)> {
+        if self.state != State::Acquisition {
+            return None;
+        }
+        Some(
+            if self.acq.sum_p.len() == self.acq.bin_range.1 - self.acq.bin_range.0 {
+                self.acq.bin_range
+            } else {
+                // First pass after being born in Acquisition: the lazy init
+                // will pick the full sweep (or the LO window) when it runs.
+                (0, DOPPLER_SPREAD_BINS)
+            },
+        )
+    }
+
     pub fn build_carriers(fs: f64, fi: f64, code_sp: usize) -> Arc<Vec<Vec<Complex32>>> {
         let step_hz = 2.0 * DOPPLER_SPREAD_HZ / DOPPLER_SPREAD_BINS as f64;
         Arc::new(
@@ -663,7 +690,7 @@ impl Channel {
         }
     }
 
-    fn acquisition_process(&mut self, iq_vec: &[Complex32]) {
+    fn acquisition_process(&mut self, iq_vec: &[Complex32], cache: Option<&AcqFftCache>) {
         // Channels are *born* in Acquisition without passing through
         // acquisition_start (which sizes the grid for the attempt) — set up
         // here on the first pass.
@@ -677,15 +704,33 @@ impl Channel {
 
         for i in bin_lo..bin_hi {
             self.stats.acq_corrs += 1;
-            // Mix this bin's carrier into the reused scratch, correlate in
-            // place, integrate |·|² — no per-bin allocations.
             let acq = &mut self.acq;
             acq.buf.clear();
-            acq.buf.extend_from_slice(iq_vec_slice);
-            for (s, c) in acq.buf.iter_mut().zip(acq.carriers[i].iter()) {
-                *s *= *c;
+            // The bin's carrier-mixed forward FFT is PRN-independent: take it
+            // from the shared per-block cache when present (every searching
+            // channel reuses it; only multiply+IFFT remain per PRN), else
+            // mix + FFT locally.
+            match cache.and_then(|c| c.bins.get(i)).and_then(|b| b.as_ref()) {
+                Some(fft) => {
+                    acq.buf.extend_from_slice(fft);
+                    finish_correlation_inplace(
+                        &mut self.fft_planner,
+                        &mut acq.buf,
+                        &acq.prn_code_fft,
+                    );
+                }
+                None => {
+                    acq.buf.extend_from_slice(iq_vec_slice);
+                    for (s, c) in acq.buf.iter_mut().zip(acq.carriers[i].iter()) {
+                        *s *= *c;
+                    }
+                    calc_correlation_inplace(
+                        &mut self.fft_planner,
+                        &mut acq.buf,
+                        &acq.prn_code_fft,
+                    );
+                }
             }
-            calc_correlation_inplace(&mut self.fft_planner, &mut acq.buf, &acq.prn_code_fft);
             for (p, v) in acq.sum_p[i - bin_lo].iter_mut().zip(acq.buf.iter()) {
                 *p += v.norm_sqr();
             }
@@ -1177,10 +1222,21 @@ impl Channel {
     }
 
     pub fn process_samples(&mut self, iq_vec: &[Complex32], ts_sec: f64) {
+        self.process_samples_cached(iq_vec, ts_sec, None);
+    }
+
+    /// [`process_samples`](Self::process_samples) with the receiver's shared
+    /// per-block acquisition FFT cache.
+    pub fn process_samples_cached(
+        &mut self,
+        iq_vec: &[Complex32],
+        ts_sec: f64,
+        cache: Option<&AcqFftCache>,
+    ) {
         self.ts_sec = ts_sec;
 
         match self.state {
-            State::Acquisition => self.acquisition_process(iq_vec),
+            State::Acquisition => self.acquisition_process(iq_vec, cache),
             State::Tracking => self.tracking_process(iq_vec),
             State::Idle => self.idle_process(),
         }
