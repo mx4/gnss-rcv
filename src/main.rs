@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use structopt::StructOpt;
+use clap::Parser;
 
 use gnss_rcv::code::Signal;
 use gnss_rcv::plots::{plot_generate_html, plot_remove_old_graph};
@@ -16,75 +16,74 @@ use gnss_rcv::receiver::{Receiver, ReceiverConfig};
 use gnss_rcv::recording::IQFileType;
 use gnss_rcv::state::GnssState;
 
-#[derive(StructOpt)]
-#[structopt(name = "gnss-rcv", about = "gnss-rcv: GNSS receiver")]
+#[derive(Parser)]
+#[command(name = "gnss-rcv", about = "gnss-rcv: GNSS receiver")]
 struct Options {
-    #[structopt(
-        short = "f",
-        long,
-        default_value = "resources/nov_3_time_18_48_st_ives"
-    )]
+    #[arg(short = 'f', long, default_value = "resources/nov_3_time_18_48_st_ives")]
     file: PathBuf,
-    #[structopt(short = "s", long, help = "host for rtl-sdr-tcp", default_value = "")]
+    #[arg(short = 's', long, help = "host for rtl-sdr-tcp", default_value = "")]
     hostname: String,
-    #[structopt(
+    #[arg(
         long,
         help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B).                 Default: every family the bandwidth admits (L1CA always; +E1B at fs >= 4.092 MHz)"
     )]
     sig: Option<String>,
-    #[structopt(short = "d", long, help = "use rtl-sdr device")]
+    #[arg(short = 'd', long, help = "use rtl-sdr device")]
     use_device: bool,
-    #[structopt(short = "l", long, help = "path to log file", default_value = "")]
+    #[arg(short = 'l', long, help = "path to log file", default_value = "")]
     log_file: PathBuf,
-    #[structopt(short = "t", long, help = "type of IQ file", default_value = "2xf32")]
+    #[arg(
+        short = 't',
+        long,
+        help = "type of IQ file",
+        default_value = "2xf32",
+        value_parser = parse_iq_file_type
+    )]
     iq_file_type: IQFileType,
-    #[structopt(
+    #[arg(
         long,
         help = "sampling frequency, e.g. 10M / 2.046M / 2046000",
-        parse(try_from_str = parse_freq),
+        value_parser = parse_freq,
         default_value = "2046000"
     )]
     fs: f64,
-    #[structopt(
+    #[arg(
         long,
         help = "intermediate frequency, e.g. 420K / 0",
-        parse(try_from_str = parse_freq),
+        value_parser = parse_freq,
         default_value = "0"
     )]
     fi: f64,
-    #[structopt(long, help = "offset in file", default_value = "0")]
+    #[arg(long, help = "offset in file", default_value = "0")]
     off_msec: usize,
-    #[structopt(long, help = "duration of sample", default_value = "0")]
+    #[arg(long, help = "duration of sample", default_value = "0")]
     num_msec: usize,
-    #[structopt(
+    #[arg(
         long,
         help = "satellites to search: prefixed (G3,E11,J193) or bare PRN (3,11; constellation inferred from --sig)",
         default_value = ""
     )]
     sats: String,
-    #[structopt(
+    #[arg(
         long,
         help = "search the SBAS L1 block (PRN 120-138) — on by default; kept for compatibility"
     )]
     sbas: bool,
-    #[structopt(long, help = "disable the SBAS L1 search")]
+    #[arg(long, help = "disable the SBAS L1 search")]
     no_sbas: bool,
-    #[structopt(long, help = "also search the QZSS L1 block (PRN 193-202)")]
+    #[arg(long, help = "also search the QZSS L1 block (PRN 193-202)")]
     qzss: bool,
-    #[structopt(short = "-u", long, help = "use ui")]
+    #[arg(short = 'u', long, help = "use ui")]
     use_ui: bool,
-    #[structopt(short = "-p", long, help = "write diagnostic plots to plots/")]
+    #[arg(short = 'p', long, help = "write diagnostic plots to plots/")]
     plots: bool,
-    #[structopt(
-        short = "-x",
+    #[arg(
+        short = 'x',
         long,
         help = "stop as soon as the first position fix is computed"
     )]
     exit_on_fix: bool,
-    #[structopt(
-        long,
-        help = "write an end-of-run JSON summary to <path> ('-' = stdout)"
-    )]
+    #[arg(long, help = "write an end-of-run JSON summary to <path> ('-' = stdout)")]
     json: Option<PathBuf>,
 }
 
@@ -140,8 +139,15 @@ fn parse_freq(s: &str) -> Result<f64, String> {
         .map_err(|_| format!("invalid frequency '{s}' (use e.g. 10M, 420K, 2046000)"))
 }
 
+/// clap value parser for `--iq-file-type`: defers to `IQFileType`'s `FromStr`
+/// but flattens its `Box<dyn Error>` (not `Send + Sync`) into a `String`, the
+/// error type clap's derive requires.
+fn parse_iq_file_type(s: &str) -> Result<IQFileType, String> {
+    s.parse::<IQFileType>().map_err(|e| e.to_string())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let opt = Options::from_args();
+    let opt = Options::parse();
     let exit_req = Arc::new(AtomicBool::new(false));
 
     init_logging(&opt.log_file);

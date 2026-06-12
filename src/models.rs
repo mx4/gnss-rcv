@@ -5,7 +5,7 @@
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{Epoch, Vector3};
-use map_3d::{Ellipsoid, ecef2geodetic};
+use map_3d::{Ellipsoid, ecef2aer, ecef2geodetic};
 
 use crate::constants::{
     EARTH_MU_GAL, EARTH_MU_GPS, EARTH_ROTATION_RATE, HALF_WEEK_SECONDS, SECONDS_PER_WEEK,
@@ -124,20 +124,14 @@ pub(crate) fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64
 }
 
 pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, f64) {
-    let (lat, lon, _) = ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
-    let (dx, dy, dz) = (
-        sat_ecef.0 - rx_ecef[0],
-        sat_ecef.1 - rx_ecef[1],
-        sat_ecef.2 - rx_ecef[2],
+    let (lat, lon, h) = ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
+    let (az, elev, _range) = ecef2aer(
+        sat_ecef.0, sat_ecef.1, sat_ecef.2, lat, lon, h, Ellipsoid::WGS84,
     );
-    let (sl, cl) = (lat.sin(), lat.cos());
-    let (so, co) = (lon.sin(), lon.cos());
-    let east = -so * dx + co * dy;
-    let north = -sl * co * dx - sl * so * dy + cl * dz;
-    let up = cl * co * dx + cl * so * dy + sl * dz;
-    let range = (east * east + north * north + up * up).sqrt();
-    let elev = (up / range).asin();
-    let azim = east.atan2(north);
+    // ecef2aer reports azimuth in [0, 2π); fold to (−π, π] — the convention the
+    // rest of the receiver assumes (synth's azimuth-sector binning, the signed
+    // sky-plot azimuth_deg).
+    let azim = if az > PI { az - 2.0 * PI } else { az };
     (elev, azim)
 }
 
