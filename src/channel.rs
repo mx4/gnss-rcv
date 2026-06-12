@@ -130,8 +130,7 @@ pub enum State {
 
 #[derive(Default)]
 pub struct Tracking {
-    prn_code: Vec<f32>,      // upsampled, real (±1): 2 mults/sample, not 4
-    sig_buf: Vec<Complex32>, // reused scratch for the Doppler-mixed code period
+    prn_code: Vec<f32>, // upsampled real (±1) code; built on lock, freed on idle
     doppler_hz: f64,
     code_off_sec: f64,
     code_rate_trim: f64,  // DLL integrator: residual code-rate error (s/s)
@@ -206,8 +205,6 @@ pub struct Acquisition {
     // Half-open bin range this attempt searches — the full sweep until the
     // front-end LO offset is known (see `acquisition_init`).
     bin_range: (usize, usize),
-    // Reused mix/correlation scratch (one code period of samples).
-    buf: Vec<Complex32>,
 }
 
 /// Per-block acquisition FFT cache: for each Doppler bin, the carrier-mixed,
@@ -251,6 +248,7 @@ pub struct ChannelStats {
 pub struct Channel {
     pub pub_state: Arc<Mutex<GnssState>>,
     pub sv: SV,
+    sig: Signal, // kept so the tracking code / acq FFT can be rebuilt on demand
     pub stats: ChannelStats,
     plots: bool,
     // Diagnostics consumer present (--plots or the egui tab): keep the full
@@ -292,6 +290,10 @@ pub struct Channel {
 
     pub hist: History,
     pub nav: Navigation,
+    // One mix/correlation scratch (one code period). A channel is in exactly one
+    // state, so acquisition and tracking never need their scratch at once — they
+    // share this buffer instead of holding one each. Freed on idle.
+    scratch: Vec<Complex32>,
     trk: Tracking,
     acq: Acquisition,
 }
@@ -455,20 +457,14 @@ impl Channel {
         });
         let mut fft_planner = FftPlanner::new();
 
-        // Resample the PRN code to the actual samples-per-code-period (code_sp =
-        // fs * code_sec), so any sampling rate works. (For fs = 2.046 MHz this is
-        // exactly 2 samples/chip, matching the previous hardcoded duplication.)
-        let prn_code: Vec<f32> = (0..code_sp)
-            .map(|i| {
-                let chip = i * code_len / code_sp;
-                code_buf[chip] as f32
-            })
+        // Acquisition's complex FFT replica, resampled to the actual samples-per-
+        // code-period (code_sp = fs * code_sec) so any sampling rate works (for
+        // fs = 2.046 MHz this is exactly 2 samples/chip). The real tracking code
+        // is *not* built here — it is built on lock (build_prn_code) so an
+        // un-acquired channel carries none of it.
+        let mut prn_code_fft: Vec<Complex32> = (0..code_sp)
+            .map(|i| Complex32::new(code_buf[i * code_len / code_sp] as f32, 0.0))
             .collect();
-
-        // Acquisition correlates by FFT, so it keeps a complex copy; tracking
-        // multiplies the real ±1 code directly (channel.rs correlation kernel).
-        let mut prn_code_fft: Vec<Complex32> =
-            prn_code.iter().map(|&c| Complex32::new(c, 0.0)).collect();
 
         let fft_fw = fft_planner.plan_fft_forward(prn_code_fft.len());
         fft_fw.process(&mut prn_code_fft);
@@ -482,6 +478,7 @@ impl Channel {
         Self {
             pub_state: pub_state.clone(),
             sv,
+            sig,
             stats: ChannelStats::default(),
             plots,
             diagnostics,
@@ -506,24 +503,50 @@ impl Channel {
             state: State::Acquisition,
             nav: Navigation::new(sv),
             hist: History::default(),
-            trk: Tracking {
-                prn_code,
-                ..Default::default()
-            },
+            scratch: Vec::new(),
+            trk: Tracking::default(),
             acq: Acquisition {
                 prn_code_fft,
                 sum_p: Vec::new(),
                 carriers,
                 bin_range: (0, DOPPLER_SPREAD_BINS),
-                buf: Vec::new(),
             },
         }
     }
 
+    /// Resample the spreading code to `code_sp` real (±1) samples for the
+    /// tracking correlator. Cheap (one resample, no FFT); built on lock so an
+    /// un-acquired channel holds none of it.
+    fn build_prn_code(&self) -> Vec<f32> {
+        let code_buf = self
+            .sig
+            .spreading_code(self.sv.prn)
+            .expect("spreading code present (constructed in Channel::new)");
+        (0..self.code_sp)
+            .map(|i| code_buf[i * self.code_len / self.code_sp] as f32)
+            .collect()
+    }
+
+    /// The forward-FFT'd complex code replica for FFT acquisition. Rebuilt when a
+    /// channel re-enters acquisition after a lock freed it (built in `new` for a
+    /// freshly-born channel). Bit-identical to that original.
+    fn build_acq_fft(&mut self) -> Vec<Complex32> {
+        let mut fft: Vec<Complex32> = self
+            .build_prn_code()
+            .into_iter()
+            .map(|c| Complex32::new(c, 0.0))
+            .collect();
+        self.fft_planner.plan_fft_forward(fft.len()).process(&mut fft);
+        fft
+    }
+
     fn idle_start(&mut self) {
-        // Idle (and tracking) channels hold no search state.
+        // Idle channels hold no search state, no mix scratch, and no tracking
+        // code (rebuilt on the next lock). The acq FFT is kept: an idle channel
+        // re-acquires, and dropping it from a tracking channel happens on lock.
         self.acq.sum_p = Vec::new();
-        self.acq.buf = Vec::new();
+        self.scratch = Vec::new();
+        self.trk.prn_code = Vec::new();
         if self.state == State::Tracking {
             self.stats.lock_losses += 1;
             log::warn!(
@@ -589,6 +612,11 @@ impl Channel {
     }
 
     fn acquisition_init(&mut self) {
+        // Rebuild the acq FFT if a prior lock freed it (a freshly-born channel
+        // already has it from `new`); tracking-only channels carry none.
+        if self.acq.prn_code_fft.is_empty() {
+            self.acq.prn_code_fft = self.build_acq_fft();
+        }
         self.num_acq_samples = 0;
         self.num_idl_samples = 0;
         self.num_trk_samples = 0;
@@ -637,9 +665,12 @@ impl Channel {
 
     fn tracking_init(&mut self) {
         // A locked channel holds no search state (sum_p was 30 MB/channel
-        // full-width at 50 Msps).
+        // full-width at 50 Msps) and no acquisition FFT — it builds the real
+        // tracking code instead. The acq FFT is rebuilt if the lock is later
+        // lost and the channel re-enters acquisition (acquisition_init).
         self.acq.sum_p = Vec::new();
-        self.acq.buf = Vec::new();
+        self.acq.prn_code_fft = Vec::new();
+        self.trk.prn_code = self.build_prn_code();
         self.trk.doppler_hz = 0.0;
         self.trk.cn0 = 0.0;
         self.trk.adr = 0.0;
@@ -733,34 +764,33 @@ impl Channel {
 
         for i in bin_lo..bin_hi {
             self.stats.acq_corrs += 1;
-            let acq = &mut self.acq;
-            acq.buf.clear();
+            self.scratch.clear();
             // The bin's carrier-mixed forward FFT is PRN-independent: take it
             // from the shared per-block cache when present (every searching
             // channel reuses it; only multiply+IFFT remain per PRN), else
-            // mix + FFT locally.
+            // mix + FFT locally. (scratch, fft_planner, acq are disjoint fields.)
             match cache.and_then(|c| c.bins.get(i)).and_then(|b| b.as_ref()) {
                 Some(fft) => {
-                    acq.buf.extend_from_slice(fft);
+                    self.scratch.extend_from_slice(fft);
                     finish_correlation_inplace(
                         &mut self.fft_planner,
-                        &mut acq.buf,
-                        &acq.prn_code_fft,
+                        &mut self.scratch,
+                        &self.acq.prn_code_fft,
                     );
                 }
                 None => {
-                    acq.buf.extend_from_slice(iq_vec_slice);
-                    for (s, c) in acq.buf.iter_mut().zip(acq.carriers[i].iter()) {
+                    self.scratch.extend_from_slice(iq_vec_slice);
+                    for (s, c) in self.scratch.iter_mut().zip(self.acq.carriers[i].iter()) {
                         *s *= *c;
                     }
                     calc_correlation_inplace(
                         &mut self.fft_planner,
-                        &mut acq.buf,
-                        &acq.prn_code_fft,
+                        &mut self.scratch,
+                        &self.acq.prn_code_fft,
                     );
                 }
             }
-            for (p, v) in acq.sum_p[i - bin_lo].iter_mut().zip(acq.buf.iter()) {
+            for (p, v) in self.acq.sum_p[i - bin_lo].iter_mut().zip(self.scratch.iter()) {
                 *p += v.norm_sqr();
             }
         }
@@ -845,16 +875,16 @@ impl Channel {
         // fi + doppler, so mixing by doppler alone leaves an fi residual that
         // destroys the prompt (fi=0 baseband recordings are unaffected).
         let (fc, phi, fs) = (self.fi + self.trk.doppler_hz, self.trk.phi, self.fs);
-        self.trk.sig_buf.clear();
-        self.trk.sig_buf.extend_from_slice(&iq_vec2[lo_u..hi_u]);
-        doppler_shift(&mut self.trk.sig_buf, fc, phi, fs);
+        self.scratch.clear();
+        self.scratch.extend_from_slice(&iq_vec2[lo_u..hi_u]);
+        doppler_shift(&mut self.scratch, fc, phi, fs);
 
         // Samples per code-unit (chip; BOC sub-chip for E1) at this sample rate.
         let sp_per_chip = self.code_sec * self.fs / self.code_len as f64;
         let pos = (SP_CORR * sp_per_chip) as usize;
         let pos_neutral = (NEUTRAL_CORR * sp_per_chip) as usize;
 
-        let sig = &self.trk.sig_buf;
+        let sig = &self.scratch;
         let code = &self.trk.prn_code;
         let len = sig.len();
 
