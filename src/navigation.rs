@@ -230,13 +230,14 @@ impl Channel {
         // timestamped yet (no week/tow), so they are skipped.
         if let Some((anchor_tow, anchor_ts)) = self.nav.osnma_anchor {
             let off = (self.ts_sec - anchor_ts).round() as i64;
+            let week_secs = crate::constants::SECONDS_PER_WEEK as i64;
             let (mut week, mut tow) = (self.nav.eph.week as i64, anchor_tow as i64 + off);
-            while tow >= 604800 {
-                tow -= 604800;
+            while tow >= week_secs {
+                tow -= week_secs;
                 week += 1;
             }
             while tow < 0 {
-                tow += 604800;
+                tow += week_secs;
                 week -= 1;
             }
             self.nav.osnma_pages.push(OsnmaPage {

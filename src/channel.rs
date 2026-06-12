@@ -16,7 +16,7 @@ use crate::state::ChannelState;
 use crate::state::GnssState;
 use crate::util::doppler_shift;
 use crate::util::doppler_shifted_carrier;
-use crate::util::get_max_with_idx;
+use crate::util::max_with_idx;
 use crate::util::{calc_correlation_inplace, finish_correlation_inplace};
 
 /// Early/late correlator spacing, in chips (prompt ± half a chip). The
@@ -331,7 +331,7 @@ impl Channel {
         self.stats.max_trk_streak as f64 * self.code_sec
     }
 
-    pub fn get_cn0(&self) -> f64 {
+    pub fn cn0(&self) -> f64 {
         if self.state != State::Tracking {
             return 0.0;
         }
@@ -833,7 +833,7 @@ impl Channel {
             // near 0 Hz and misses the real auto-correlation peak.
             for i in bin_lo..bin_hi {
                 let row = &self.acq.sum_p[i - bin_lo];
-                let (j_peak, v_peak) = get_max_with_idx(row);
+                let (j_peak, v_peak) = max_with_idx(row);
                 if v_peak > p_peak {
                     idx = i;
                     p_peak = v_peak;
@@ -1099,7 +1099,7 @@ impl Channel {
             self.trk.sum_corr_p = 0.0;
         }
     }
-    fn get_code_and_carrier_phase(&mut self) {
+    fn advance_code_and_carrier_phase(&mut self) {
         let tau = self.code_sec;
         let fc = self.fi + self.trk.doppler_hz;
         self.trk.accum_doppler_cyc += self.trk.doppler_hz * tau; // accumulated Doppler
@@ -1296,7 +1296,7 @@ impl Channel {
     }
 
     fn tracking_process(&mut self, iq_vec: &[Complex32]) {
-        self.get_code_and_carrier_phase();
+        self.advance_code_and_carrier_phase();
         let (corr_prompt, corr_early, corr_late, corr_noise) =
             self.tracking_compute_correlation(iq_vec);
         self.hist.corr_p.push_back(corr_prompt);

@@ -7,7 +7,10 @@ use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{Epoch, Vector3};
 use map_3d::{Ellipsoid, ecef2geodetic};
 
-use crate::constants::{EARTH_MU_GAL, EARTH_MU_GPS, EARTH_ROTATION_RATE, SPEED_OF_LIGHT};
+use crate::constants::{
+    EARTH_MU_GAL, EARTH_MU_GPS, EARTH_ROTATION_RATE, HALF_WEEK_SECONDS, SECONDS_PER_WEEK,
+    SPEED_OF_LIGHT,
+};
 use crate::ephemeris::Ephemeris as RxEphemeris;
 
 const PI: f64 = std::f64::consts::PI;
@@ -22,22 +25,22 @@ fn earth_mu(sv: SV) -> f64 {
     }
 }
 
-fn get_eccentric_anomaly(eph: &RxEphemeris, t_k: f64) -> f64 {
+fn eccentric_anomaly(eph: &RxEphemeris, t_k: f64) -> f64 {
     let n0 = (earth_mu(eph.sv) / eph.a.powi(3)).sqrt();
     let n = n0 + eph.deln;
     let mk = eph.m0 + n * t_k;
 
-    let mut e = mk;
-    let mut e_k = 0.0;
+    let mut ek = mk;
+    let mut ek_prev = 0.0;
     let mut n_iter = 0;
 
     // Newton's method on Kepler's equation; GNSS orbits are near-circular
     // (ecc < 0.03), so this converges in a handful of iterations. Hitting the
     // cap means it did NOT converge (corrupt ephemeris) — fail loudly below
     // rather than letting garbage flow into the SV position.
-    while (e - e_k).abs() > 1e-14 && n_iter < 30 {
-        e_k = e;
-        e = e + (mk - e + eph.ecc * e.sin()) / (1.0 - eph.ecc * e.cos());
+    while (ek - ek_prev).abs() > 1e-14 && n_iter < 30 {
+        ek_prev = ek;
+        ek = ek + (mk - ek + eph.ecc * ek.sin()) / (1.0 - eph.ecc * ek.cos());
         n_iter += 1;
     }
     assert!(
@@ -46,24 +49,25 @@ fn get_eccentric_anomaly(eph: &RxEphemeris, t_k: f64) -> f64 {
         eph.ecc
     );
 
-    e
+    ek
 }
 
 fn normalize_week_seconds(mut dt: f64) -> f64 {
-    if dt > 302400.0 {
-        dt -= 604800.0;
+    let week = SECONDS_PER_WEEK as f64;
+    if dt > HALF_WEEK_SECONDS {
+        dt -= week;
     }
-    if dt < -302400.0 {
-        dt += 604800.0;
+    if dt < -HALF_WEEK_SECONDS {
+        dt += week;
     }
     dt
 }
 
-pub(crate) fn get_sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
+pub(crate) fn sv_clock_correction(eph: &RxEphemeris, t: Epoch) -> f64 {
     let f_rel = -2.0 * earth_mu(eph.sv).sqrt() / SPEED_OF_LIGHT.powi(2);
 
     let dte = normalize_week_seconds((t - eph.toe_gpst).to_seconds());
-    let ecc_anomaly = get_eccentric_anomaly(eph, dte);
+    let ecc_anomaly = eccentric_anomaly(eph, dte);
     let dtr = f_rel * eph.ecc * eph.a.sqrt() * ecc_anomaly.sin();
 
     let dtc = normalize_week_seconds((t - eph.toc_gpst).to_seconds());
@@ -77,7 +81,7 @@ pub(crate) fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64
     log::debug!("{}: ---- now={t:?}", eph.sv);
     log::debug!("{}: ---- toe={:?} delta-t={dte} ", eph.sv, eph.toe_gpst);
 
-    let ecc_anomaly = get_eccentric_anomaly(eph, dte);
+    let ecc_anomaly = eccentric_anomaly(eph, dte);
     let v_k =
         ((1.0 - eph.ecc.powi(2)).sqrt() * ecc_anomaly.sin()).atan2(ecc_anomaly.cos() - eph.ecc);
 
@@ -137,7 +141,6 @@ pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)
     (elev, azim)
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Saastamoinen troposphere slant delay (metres) using a standard atmosphere.
 ///
 /// Computes the zenith hydrostatic delay (ZHD) from standard-atmosphere

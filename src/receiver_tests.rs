@@ -64,9 +64,9 @@ fn synthetic_signal_acquires_and_tracks() {
         "synthetic clean signal for {sv} should reach Tracking"
     );
     assert!(
-        ch.get_cn0() > 45.0,
+        ch.cn0() > 45.0,
         "a noiseless signal should track at very high C/N0, got {:.1}",
-        ch.get_cn0()
+        ch.cn0()
     );
 }
 
@@ -107,9 +107,9 @@ fn synthetic_noisy_multi_sv_acquires_and_tracks() {
             s.cn0_dbhz
         );
         assert!(
-            ch.get_cn0() > 35.0,
+            ch.cn0() > 35.0,
             "{sv} C/N0 {:.1} should be above the lock threshold",
-            ch.get_cn0()
+            ch.cn0()
         );
     }
 }
@@ -147,9 +147,9 @@ fn synthetic_e1_acquires_and_tracks() {
         "synthetic E1 signal for {sv} should reach Tracking"
     );
     assert!(
-        ch.get_cn0() > 45.0,
+        ch.cn0() > 45.0,
         "a noiseless E1 signal should track at very high C/N0, got {:.1}",
-        ch.get_cn0()
+        ch.cn0()
     );
 }
 
@@ -701,7 +701,7 @@ fn wls_fix(ephs: &[Snap], x0: [f64; 3]) -> ([f64; 3], f64, f64, HashMap<Constell
     let (mut meas, mut svp, mut gal) = (Vec::new(), Vec::new(), Vec::new());
     for ((_, e), t_tx) in ephs.iter().zip(&tx) {
         let pr_sec = (now - *t_tx).to_seconds();
-        let clk = crate::models::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
+        let clk = crate::models::sv_clock_correction(e, now) * SPEED_OF_LIGHT;
         let s = crate::models::compute_sv_position_ecef(e, *t_tx);
         let w = EARTH_ROTATION_RATE * pr_sec;
         let (cw, sw) = (w.cos(), w.sin());
@@ -739,7 +739,7 @@ fn residuals(ephs: &[Snap], rx: [f64; 3]) -> Vec<(SV, f64)> {
         .map(|((_, e), t_tx)| {
             let pr_sec = (now - *t_tx).to_seconds();
             let pr = pr_sec * SPEED_OF_LIGHT;
-            let clk = crate::models::get_sv_clock_correction(e, now) * SPEED_OF_LIGHT;
+            let clk = crate::models::sv_clock_correction(e, now) * SPEED_OF_LIGHT;
             let s = crate::models::compute_sv_position_ecef(e, *t_tx);
             let w = EARTH_ROTATION_RATE * pr_sec;
             let (cw, sw) = (w.cos(), w.sin());
@@ -807,7 +807,7 @@ fn combined_gps_galileo_fix_from_two_passes() {
     let dw = gps[0].1.week as i64 - (gal[0].1.week as i64 + 1024);
     if dw != 0 {
         eprintln!("rebasing GPS week by {dw} weeks (LNAV 10-bit week rollover)");
-        let shift = Duration::from_seconds(dw as f64 * 604_800.0);
+        let shift = Duration::from_seconds(dw as f64 * crate::constants::SECONDS_PER_WEEK as f64);
         for (m, e) in &mut gps {
             e.week = (e.week as i64 - dw) as u32;
             e.tow_gpst -= shift;
@@ -1016,7 +1016,7 @@ fn cross_correlation_dropped_keeps_strongest() {
 #[test]
 fn sat_list_tags_constellations_and_appends_blocks() {
     // Bare PRN list: constellation inferred from signal type.
-    let l = get_sat_list("1,32,120,138,193,202", Signal::L1ca, false, false);
+    let l = build_sat_list("1,32,120,138,193,202", Signal::L1ca, false, false);
     assert_eq!(
         l.iter().map(|s| s.constellation).collect::<Vec<_>>(),
         vec![
@@ -1030,18 +1030,18 @@ fn sat_list_tags_constellations_and_appends_blocks() {
     );
 
     // Prefixed format: constellation explicit, independent of --sig.
-    let l = get_sat_list("G3,E11,G7", Signal::L1ca, false, false);
+    let l = build_sat_list("G3,E11,G7", Signal::L1ca, false, false);
     assert_eq!(l[0], SV::new(Constellation::GPS, 3));
     assert_eq!(l[1], SV::new(Constellation::Galileo, 11));
     assert_eq!(l[2], SV::new(Constellation::GPS, 7));
 
     // Prefixed Galileo PRNs even when --sig is L1CA.
-    let l = get_sat_list("E4,E9,E21", Signal::L1ca, false, false);
+    let l = build_sat_list("E4,E9,E21", Signal::L1ca, false, false);
     assert!(l.iter().all(|s| s.constellation == Constellation::Galileo));
     assert_eq!(l.iter().map(|s| s.prn).collect::<Vec<_>>(), vec![4, 9, 21]);
 
     // --sbas appends the 120-138 block (19 PRNs) on the GPS default.
-    let l = get_sat_list("", Signal::L1ca, true, false);
+    let l = build_sat_list("", Signal::L1ca, true, false);
     assert_eq!(l.len(), 32 + 19);
     assert_eq!(
         l.iter()
@@ -1051,7 +1051,7 @@ fn sat_list_tags_constellations_and_appends_blocks() {
     );
 
     // --qzss appends the 193-202 block (10 PRNs).
-    let l = get_sat_list("", Signal::L1ca, false, true);
+    let l = build_sat_list("", Signal::L1ca, false, true);
     assert_eq!(l.len(), 32 + 10);
     assert_eq!(
         l.iter()
@@ -1063,7 +1063,7 @@ fn sat_list_tags_constellations_and_appends_blocks() {
     // --sbas / --qzss append on top of an *explicit* --sats list too: this is
     // how validate_fix.py searches the GEOs (`--sats 1 --sbas`). The block
     // must follow the selection, not get dropped when --sats is non-empty.
-    let l = get_sat_list("1", Signal::L1ca, true, true);
+    let l = build_sat_list("1", Signal::L1ca, true, true);
     assert_eq!(l.len(), 1 + 19 + 10);
     assert_eq!(l[0], SV::new(Constellation::GPS, 1));
     assert_eq!(
@@ -1080,12 +1080,12 @@ fn sat_list_tags_constellations_and_appends_blocks() {
     );
 
     // Default Galileo block: 1..=36, all tagged Galileo.
-    let l = get_sat_list("", Signal::GalileoE1b, false, false);
+    let l = build_sat_list("", Signal::GalileoE1b, false, false);
     assert_eq!(l.len(), 36);
     assert!(l.iter().all(|s| s.constellation == Constellation::Galileo));
 
     // Bare PRN with Galileo signal → Galileo constellation (backward compat).
-    let l = get_sat_list("4,11", Signal::GalileoE1c, false, false);
+    let l = build_sat_list("4,11", Signal::GalileoE1c, false, false);
     assert_eq!(l.len(), 2);
     assert_eq!(l[0], SV::new(Constellation::Galileo, 4));
     assert_eq!(l[1], SV::new(Constellation::Galileo, 11));
@@ -1094,9 +1094,9 @@ fn sat_list_tags_constellations_and_appends_blocks() {
     // of panicking in Channel::new ("no spreading code for E1B PRN 120" —
     // the tuni2025 UI crash, where the sticky --sbas flag followed a
     // signal switch to E1B). Both the appended blocks and explicit tokens.
-    let l = get_sat_list("4", Signal::GalileoE1b, true, true);
+    let l = build_sat_list("4", Signal::GalileoE1b, true, true);
     assert_eq!(l, vec![SV::new(Constellation::Galileo, 4)]);
-    let l = get_sat_list("4,S120,J193", Signal::GalileoE1b, false, false);
+    let l = build_sat_list("4,S120,J193", Signal::GalileoE1b, false, false);
     assert_eq!(l, vec![SV::new(Constellation::Galileo, 4)]);
 }
 

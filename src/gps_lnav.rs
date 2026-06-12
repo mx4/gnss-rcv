@@ -22,7 +22,8 @@ use gnss_rs::sv::SV;
 use gnss_rtk::prelude::Epoch;
 use std::collections::VecDeque;
 
-const SECS_PER_WEEK: u32 = 7 * 24 * 60 * 60;
+use crate::constants::SECONDS_PER_WEEK;
+
 /// Rolling nav-bit window (bits): one 300-bit subframe plus the *next*
 /// subframe's 8-bit preamble — exactly what frame sync and decode look back at
 /// (a subframe is accepted only when bracketed by a preamble at both ends).
@@ -508,7 +509,7 @@ impl Channel {
         // epochs and run the shared transmit-time anchor each subframe (the
         // anchor itself pins only once — see Channel::nav_anchor_tx).
         if self.nav.eph.week != 0 {
-            let week_to_secs = self.nav.eph.week * SECS_PER_WEEK;
+            let week_to_secs = self.nav.eph.week * SECONDS_PER_WEEK;
             self.nav.eph.tow_gpst =
                 Epoch::from_gpst_seconds((week_to_secs + self.nav.eph.tow).into());
             self.nav.eph.toe_gpst =

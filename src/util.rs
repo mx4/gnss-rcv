@@ -18,7 +18,7 @@ pub fn norm(v: &[Complex32]) -> f64 {
     norm_square(v).sqrt()
 }
 
-pub fn get_max_with_idx(vec: &[f32]) -> (usize, f32) {
+pub fn max_with_idx(vec: &[f32]) -> (usize, f32) {
     let mut max = 0.0f32;
     let mut idx = 0;
     for (i, v) in vec.iter().enumerate() {
@@ -29,10 +29,6 @@ pub fn get_max_with_idx(vec: &[f32]) -> (usize, f32) {
     }
 
     (idx, max)
-}
-
-pub fn get_average(v: &[f64]) -> f64 {
-    v.iter().sum::<f64>() / v.len() as f64
 }
 
 fn normalize_post_fft(data: &mut [Complex32]) {

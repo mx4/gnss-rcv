@@ -10,7 +10,7 @@
 
 use crate::constants::{
     P2_2, P2_5, P2_8, P2_15, P2_19, P2_29, P2_31, P2_32, P2_33, P2_34, P2_35, P2_43, P2_46, P2_51,
-    P2_59, SC2RAD,
+    P2_59, SC2RAD, SECONDS_PER_WEEK,
 };
 use crate::ephemeris::Ephemeris;
 use crate::fec::{G1, G2, conv_encode, crc24q, parity};
@@ -342,7 +342,7 @@ pub fn ggto_at(eph: &Ephemeris, week: u32, tow: f64) -> Option<f64> {
     let dw = ((week % 64) as i64 - eph.wn0g as i64).rem_euclid(64);
     // Nearest interpretation of the mod-64 week difference (±32 weeks).
     let dw = if dw > 32 { dw - 64 } else { dw };
-    let dt = dw as f64 * 604_800.0 + (tow - eph.t0g as f64);
+    let dt = dw as f64 * SECONDS_PER_WEEK as f64 + (tow - eph.t0g as f64);
     Some(eph.a0g + eph.a1g * dt)
 }
 
@@ -788,7 +788,7 @@ mod tests {
         assert!((g - (q.a0g + q.a1g * 3600.0)).abs() < 1e-18);
         // Mod-64 week wrap: 63 weeks later resolves to -1 week (nearest).
         let g2 = ggto_at(&q, e.week + 63, 13.0 * 3600.0).unwrap();
-        assert!((g2 - (q.a0g + q.a1g * (3600.0 - 604_800.0))).abs() < 1e-15);
+        assert!((g2 - (q.a0g + q.a1g * (3600.0 - SECONDS_PER_WEEK as f64))).abs() < 1e-15);
         // No word 10 decoded -> None.
         assert!(ggto_at(&Ephemeris::default(), 0, 0.0).is_none());
     }

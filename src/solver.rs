@@ -13,8 +13,8 @@ use crate::{
     constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
     ephemeris::{Ephemeris as RxEphemeris, Measurement},
     models::{
-        compute_sv_position_ecef, elevation_azimuth, get_sv_clock_correction, klobuchar_l1_delay_m,
-        saastamoinen_tropo_m,
+        compute_sv_position_ecef, elevation_azimuth, klobuchar_l1_delay_m, saastamoinen_tropo_m,
+        sv_clock_correction,
     },
     state::GnssState,
     wls::wls_solve,
@@ -66,7 +66,7 @@ impl SpacebornBias for ReceiverSpacebornBias {
         let Some(eph) = ephs.iter().find(|e| e.sv == rtm.sv) else {
             return SatelliteClockCorrection::default();
         };
-        let corr = get_sv_clock_correction(eph, rtm.epoch);
+        let corr = sv_clock_correction(eph, rtm.epoch);
         SatelliteClockCorrection::with_relativistic_correction(Duration::from_seconds(corr))
     }
 
@@ -239,7 +239,7 @@ impl PositionSolver {
             .find(|(_, e)| e.sv.constellation == Constellation::Galileo)
             .map(|(_, e)| e.tow_gpst)
         {
-            const WEEK: f64 = 604_800.0;
+            const WEEK: f64 = crate::constants::SECONDS_PER_WEEK as f64;
             for (m, e) in snaps.iter_mut() {
                 if e.sv.constellation == Constellation::Galileo {
                     continue;
@@ -335,7 +335,7 @@ impl PositionSolver {
         for ((mm, eph), t_tx) in snaps.iter().zip(tx_gpst.iter()) {
             let stale_sec = freshest - mm.ts_sec;
             let pseudo_range_sec = (now_gpst - *t_tx).to_seconds() - stale_sec;
-            let clock_corr = get_sv_clock_correction(eph, now_gpst);
+            let clock_corr = sv_clock_correction(eph, now_gpst);
 
             // This SV's broadcast residual-error variance (SBAS UDRE + slant
             // GIVE), accumulated below and fed to the WLS as its weight prior.
@@ -691,7 +691,7 @@ mod tests {
         assert!((20_000_000.0..25_000_000.0).contains(&h), "h={h}");
         // Clock correction with a zero clock model is just the relativistic term:
         // bounded (sub-microsecond) and finite.
-        let dt = get_sv_clock_correction(&e, e.toe_gpst);
+        let dt = sv_clock_correction(&e, e.toe_gpst);
         assert!(dt.abs() < 1e-6, "dt={dt}");
     }
 }

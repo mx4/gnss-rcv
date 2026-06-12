@@ -253,7 +253,7 @@ pub fn synth_e1(
 
 // ---- Geometry-consistent L1 C/A scene ---------------------------------------
 
-const SECS_PER_WEEK: f64 = 604_800.0;
+const SECS_PER_WEEK: f64 = crate::constants::SECONDS_PER_WEEK as f64;
 
 /// One satellite of a [`GeoFeed`] scene.
 struct GeoSv {

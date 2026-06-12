@@ -12,6 +12,12 @@ const fn p2(n: u32) -> f64 {
 /// L1 C/A, Galileo E1, SBAS L1 and QZSS L1 all share it).
 pub const L1_HZ: f64 = 1_575_420_000.0;
 
+/// Seconds in a GPS/GST week — the modulus for time-of-week arithmetic.
+pub const SECONDS_PER_WEEK: u32 = 7 * 24 * 60 * 60; // 604_800
+/// Half a week — the wrap threshold when folding a signed week-seconds delta
+/// back into ±½ week (see `models::normalize_week_seconds`).
+pub const HALF_WEEK_SECONDS: f64 = SECONDS_PER_WEEK as f64 / 2.0;
+
 pub const P2_2: f64 = p2(2); // Galileo iono ai0
 pub const P2_5: f64 = p2(5);
 pub const P2_8: f64 = p2(8); // Galileo iono ai1

@@ -272,7 +272,7 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// `--sbas` then appends the legacy SBAS L1 block (PRN 120-138) and `--qzss` the
 /// QZSS block (PRN 193-202) on top of whatever was selected — the explicit
 /// `--sats` list included, so `--sats 1 --sbas` searches PRN 1 plus the GEOs.
-fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
+fn build_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     let mut svs: Vec<SV> = if sats.is_empty() {
         let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) = match sig {
             Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
@@ -377,7 +377,7 @@ fn reject_cross_correlations(
     kept
 }
 
-fn get_iq_feed(
+fn open_iq_feed(
     use_device: bool,
     hostname: &str,
     sig: Signal,
@@ -406,7 +406,7 @@ impl Receiver {
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let iq_feed = get_iq_feed(
+        let iq_feed = open_iq_feed(
             cfg.use_device,
             &cfg.hostname,
             cfg.sig,
@@ -475,9 +475,9 @@ impl Receiver {
             // guard drop them with a spurious "not decodable" warning while
             // the GEOs were alive in the session via the C/A family.
             let ca = !fam_sig.is_boc11();
-            for sv in get_sat_list(&cfg.sats, fam_sig, cfg.sbas && ca, cfg.qzss && ca) {
+            for sv in build_sat_list(&cfg.sats, fam_sig, cfg.sbas && ca, cfg.qzss && ca) {
                 // In a mixed session each family contributes only its own
-                // constellations (get_sat_list is per-signal).
+                // constellations (build_sat_list is per-signal).
                 if families.len() > 1 {
                     let is_gal = sv.constellation == Constellation::Galileo;
                     if is_gal != fam_sig.is_boc11() {
