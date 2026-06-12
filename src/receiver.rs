@@ -422,7 +422,7 @@ impl Receiver {
             iq_feed,
             code_period_sec,
             off_samples: cfg.off_msec * period_sp,
-            scheduler: Scheduler::new(cfg.fs, cfg.sig),
+            scheduler: Scheduler::new(cfg.fs, &[cfg.sig]),
             channels,
             pub_state: state.clone(),
             solver: PositionSolver::new(state),
@@ -494,21 +494,27 @@ impl Receiver {
             .iq_feed
             .get_iq_data(self.off_samples, self.scheduler.block_sp())?;
         self.off_samples += self.scheduler.block_sp();
-        if !self.scheduler.ingest(block) {
+        let due = self.scheduler.ingest(block);
+        if due.is_empty() {
             return Ok(false);
         }
 
-        let (window, ts_sec) = self.scheduler.window();
-        // Hand channels their own copy of the window (same cost as the old
-        // per-fetch to_vec); the ring itself stays with the scheduler.
-        let iq_vec = window.to_vec();
+        let mut latest_ts = 0.0f64;
+        for fam in due {
+            let (window, ts_sec) = self.scheduler.window(fam);
+            // Hand channels their own copy of the window (same cost as the
+            // old per-fetch to_vec); the ring itself stays with the
+            // scheduler. M2 runs one family per session, so every channel
+            // belongs to the due family; M3 filters by family here.
+            let iq_vec = window.to_vec();
+            self.channels
+                .par_iter_mut()
+                .for_each(|(_id, channel)| channel.process_samples(&iq_vec, ts_sec));
+            latest_ts = latest_ts.max(ts_sec);
+        }
         self.stats.msec_processed += 1;
 
-        self.channels
-            .par_iter_mut()
-            .for_each(|(_id, channel)| channel.process_samples(&iq_vec, ts_sec));
-
-        self.compute_fix(ts_sec);
+        self.compute_fix(latest_ts);
         self.feed_osnma();
 
         Ok(true)
