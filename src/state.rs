@@ -97,6 +97,11 @@ pub struct GnssState {
     pub hdop: f64,
     pub vdop: f64,
     pub fix_sv_count: usize,
+    /// Run progress (fraction of the recording processed, 0..1) and the real-time
+    /// processing factor (data seconds per wall second). `None` = no known total
+    /// (idle, or a live device); drives the UI progress bar.
+    pub run_progress: Option<f32>,
+    pub realtime_x: f32,
 
     pub channels: HashMap<SV, ChannelState>,
     pub histories: HashMap<SV, History>,
@@ -129,6 +134,8 @@ impl GnssState {
             hdop: 0.0,
             vdop: 0.0,
             fix_sv_count: 0,
+            run_progress: None,
+            realtime_x: 0.0,
             channels: HashMap::<SV, ChannelState>::new(),
             histories: HashMap::new(),
             update_func: UpdateFunc {

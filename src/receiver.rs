@@ -490,7 +490,9 @@ impl Receiver {
         Self {
             iq_feed,
             code_period_sec,
-            fs: cfg.fs,
+            // The post-decimation rate the receiver actually runs at (off_samples
+            // counts decimated samples), so off_samples/fs is the true data time.
+            fs,
             off_samples: cfg.off_msec * period_sp,
             scheduler: Scheduler::new(fs, &families),
             families,

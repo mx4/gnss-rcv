@@ -73,6 +73,12 @@ impl DecimatingReader {
 }
 
 impl IQReader for DecimatingReader {
+    // Decimation lowers the sample *rate*, not the wall-clock length, so the
+    // recording's total duration passes straight through to the progress bar.
+    fn duration_sec(&self) -> Option<f64> {
+        self.inner.duration_sec()
+    }
+
     /// Output sample `n` is the filter evaluated at input sample `n·k`; each
     /// call re-reads the (taps−1)-sample overlap, which is noise next to the
     /// block itself. The start of the stream is zero-padded.

@@ -324,12 +324,38 @@ pub fn egui_main(plots: bool, sbas: bool, qzss: bool) {
 
 impl eframe::App for GnssRcvApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_shortcuts(ctx);
         self.update_top(ctx);
         self.update_central(ctx);
     }
 }
 
 impl GnssRcvApp {
+    /// Global keyboard shortcuts: Space = start / pause / resume, Esc = stop.
+    /// Suppressed while a field (file path, fs/fi) has focus so typing still works.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let (space, esc) = ctx.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if space {
+            if self.active.load(Ordering::SeqCst) {
+                let paused = self.paused.load(Ordering::SeqCst);
+                self.paused.store(!paused, Ordering::SeqCst);
+            } else {
+                self.start_async(ctx);
+            }
+        }
+        if esc && self.active.load(Ordering::SeqCst) {
+            self.stop_async();
+        }
+    }
+
     fn update_file_picker(&mut self, ui: &mut egui::Ui) {
         let selected_text = self
             .recordings
@@ -518,13 +544,13 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, egnos) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, egnos, run) = {
             let st = self.pub_state.lock().unwrap();
-            let mut sv_elaz: Vec<(SV, f64, f64)> = st
+            let mut sv_elaz: Vec<(SV, f64, f64, f64)> = st
                 .channels
                 .iter()
                 .filter(|(_, cs)| cs.state == State::Tracking && cs.elevation_deg != 0.0)
-                .map(|(sv, cs)| (*sv, cs.elevation_deg, cs.azimuth_deg))
+                .map(|(sv, cs)| (*sv, cs.elevation_deg, cs.azimuth_deg, cs.cn0))
                 .collect();
             sv_elaz.sort_by_key(|t| t.0);
             let tow_text = format!("{:?}", st.tow_gpst);
@@ -559,6 +585,7 @@ impl GnssRcvApp {
                     st.sbas_corr.fast_len(),
                     st.sbas_corr.long_len(),
                 ),
+                (st.run_progress, st.realtime_x),
             )
         };
 
@@ -576,100 +603,119 @@ impl GnssRcvApp {
                             self.update_controls(ui);
                             ui.separator();
                             ui.horizontal_top(|ui| {
-                                let btn_area_w = 170.0_f32;
+                                // Narrower so the status text column + the correction-flag
+                                // column both fit to its left.
+                                let btn_area_w = 130.0_f32;
                                 let status_w =
                                     (ui.available_width() - btn_area_w - GRID_GAP_X).max(240.0);
                                 let status = ui.scope(|ui| {
                                     ui.set_width(status_w);
-                                    // The scope inherits the outer row's horizontal
-                                    // layout; stack the headline + grid explicitly.
-                                    ui.vertical(|ui| {
-                                        let h = ui.spacing().interact_size.y;
-                                        // 1. GPST (+ live correction flags).
-                                        ui.horizontal(|ui| {
-                                            status_label(ui, "GPST", h);
-                                            ui.monospace(&tow_text);
+                                    let h = ui.spacing().interact_size.y;
+                                    // The scope inherits the outer row's horizontal layout;
+                                    // a text column (GPST / position / precision / KROOT)
+                                    // with the correction-flag column beside it.
+                                    ui.horizontal_top(|ui| {
+                                        ui.vertical(|ui| {
+                                            // GPST + time.
+                                            ui.horizontal(|ui| {
+                                                status_label(ui, "GPST", h);
+                                                ui.monospace(&tow_text);
+                                            });
+                                            // Position — bare (no label, no prefixes).
+                                            if let Some(url) = &pos_url {
+                                                ui.hyperlink_to(&pos_text, url);
+                                            } else {
+                                                ui.monospace(&pos_text);
+                                            }
+                                            // Precision (HDOP/VDOP), no label. Always keep the
+                                            // row (blank until the first fix) so the box
+                                            // doesn't grow when a fix appears.
+                                            let prec = ui.horizontal(|ui| {
+                                                if let Some((hdop, vdop, nsv)) = dop {
+                                                    ui.colored_label(
+                                                        dop_color(hdop),
+                                                        format!("HDOP {hdop:.1}"),
+                                                    );
+                                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                                                } else {
+                                                    ui.allocate_space(egui::vec2(0.0, h));
+                                                }
+                                            });
+                                            if dop.is_some() {
+                                                prec.response.on_hover_text(
+                                                    "Dilution of precision (lower is better — \
+                                                     <2 excellent, 2-5 good). VDOP is vertical, \
+                                                     then the SV count used in the fix.",
+                                                );
+                                            }
+                                            // OSNMA DSM-KROOT assembly progress.
+                                            if let Some((got, total)) = osnma_kroot {
+                                                ui.horizontal(|ui| {
+                                                    status_label(ui, "KROOT", h);
+                                                    let fill = if got >= total {
+                                                        egui::Color32::from_rgb(80, 200, 100)
+                                                    } else {
+                                                        egui::Color32::from_rgb(70, 110, 180)
+                                                    };
+                                                    ui.add(
+                                                        egui::ProgressBar::new(
+                                                            got as f32 / total as f32,
+                                                        )
+                                                        .desired_width(VALUE_W)
+                                                        .text(format!("{got}/{total} blocks"))
+                                                        .fill(fill),
+                                                    )
+                                                    .on_hover_text(
+                                                        "OSNMA TESLA root key (DSM-KROOT): \
+                                                         blocks assembled / needed before nav \
+                                                         data is authenticated",
+                                                    );
+                                                });
+                                            }
+                                        });
+                                        // Correction-flag column, beside all the text lines
+                                        // and left of the run controls.
+                                        ui.vertical(|ui| {
                                             if has_ion {
-                                                ui.separator();
                                                 ui.monospace("ion");
                                             }
                                             if has_utc {
-                                                ui.separator();
                                                 ui.monospace("utc");
                                             }
-                                            // EGNOS corrections are live and feeding
-                                            // the solver — SBAS-orange.
                                             let (n_igp, n_fast, n_long) = egnos;
                                             if n_igp + n_fast + n_long > 0 {
-                                                ui.separator();
                                                 ui.colored_label(
                                                     constellation_color(Constellation::SBAS),
                                                     "EGNOS",
                                                 )
                                                 .on_hover_text(format!(
-                                                    "SBAS corrections applied to the fix: \
-                                                         iono grid {n_igp} IGPs · {n_fast} fast \
-                                                         + {n_long} long-term corrections"
+                                                    "SBAS corrections applied to the fix: iono \
+                                                     grid {n_igp} IGPs · {n_fast} fast + \
+                                                     {n_long} long-term corrections"
                                                 ));
                                             }
                                         });
-                                        // 2. Position — bare (no label, no prefixes).
-                                        if let Some(url) = &pos_url {
-                                            ui.hyperlink_to(&pos_text, url);
-                                        } else {
-                                            ui.monospace(&pos_text);
-                                        }
-                                        // 3. Precision (HDOP/VDOP), no label. Always keep the
-                                        // row — blank until the first fix (allocate_space
-                                        // reserves its height) — so the box doesn't grow when
-                                        // a fix appears.
-                                        let prec = ui.horizontal(|ui| {
-                                            if let Some((hdop, vdop, nsv)) = dop {
-                                                ui.colored_label(
-                                                    dop_color(hdop),
-                                                    format!("HDOP {hdop:.1}"),
-                                                );
-                                                ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
-                                            } else {
-                                                ui.allocate_space(egui::vec2(0.0, h));
-                                            }
-                                        });
-                                        if dop.is_some() {
-                                            prec.response.on_hover_text(
-                                                "Dilution of precision (lower is better — \
-                                                 <2 excellent, 2-5 good). VDOP is vertical, \
-                                                 then the SV count used in the fix.",
-                                            );
-                                        }
-                                        // OSNMA DSM-KROOT assembly progress.
-                                        if let Some((got, total)) = osnma_kroot {
-                                            ui.horizontal(|ui| {
-                                                status_label(ui, "KROOT", h);
-                                                let fill = if got >= total {
-                                                    egui::Color32::from_rgb(80, 200, 100)
-                                                } else {
-                                                    egui::Color32::from_rgb(70, 110, 180)
-                                                };
-                                                ui.add(
-                                                    egui::ProgressBar::new(
-                                                        got as f32 / total as f32,
-                                                    )
-                                                    .desired_width(VALUE_W)
-                                                    .text(format!("{got}/{total} blocks"))
-                                                    .fill(fill),
-                                                )
-                                                .on_hover_text(
-                                                    "OSNMA TESLA root key (DSM-KROOT): blocks \
-                                                         assembled / needed before nav data is \
-                                                         authenticated",
-                                                );
-                                            });
-                                        }
                                     });
                                 });
                                 let box_h = status.response.rect.height();
                                 self.update_start_stop(ui, ctx, box_h, btn_area_w);
                             });
+                            // Run progress — fraction of the recording processed,
+                            // plus the real-time factor; only while a run is active.
+                            let (progress, realtime_x) = run;
+                            if self.active.load(Ordering::SeqCst)
+                                && let Some(p) = progress
+                            {
+                                ui.add(
+                                    egui::ProgressBar::new(p)
+                                        .text(format!(
+                                            "{:.0}%  ·  {:.1}× real-time",
+                                            p * 100.0,
+                                            realtime_x
+                                        ))
+                                        .fill(egui::Color32::from_rgb(70, 110, 180)),
+                                );
+                            }
                         });
                     });
                     // Right column: sky plot, pinned to the right edge.
@@ -919,7 +965,7 @@ impl GnssRcvApp {
 
 /// Polar sky plot: azimuth around the circle, elevation as radial distance from
 /// centre (90° elev = centre, 0° = horizon ring).
-fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
+fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64, f64)]) {
     let size = 168.0_f32;
     let (response, painter) = ui.allocate_painter(egui::vec2(size, size), egui::Sense::hover());
     let rect = response.rect;
@@ -932,7 +978,19 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
     // No background fill: let the panel show through so the plot blends into the
     // UI rather than sitting in its own dark box.
 
-    // Concentric elevation rings (horizon, 30°, 60°)
+    let grid_stroke = egui::Stroke::new(0.6, egui::Color32::from_rgb(60, 70, 90));
+
+    // Cardinal spokes (N-S and E-W diameters) for an azimuth reference.
+    painter.line_segment(
+        [egui::pos2(c.x - r, c.y), egui::pos2(c.x + r, c.y)],
+        grid_stroke,
+    );
+    painter.line_segment(
+        [egui::pos2(c.x, c.y - r), egui::pos2(c.x, c.y + r)],
+        grid_stroke,
+    );
+
+    // Concentric elevation rings (horizon, 30°, 60°) — the horizon a touch heavier.
     for (elev, stroke_w) in [(0.0_f64, 1.5_f32), (30.0, 0.6), (60.0, 0.6)] {
         let ring_r = r * (1.0 - elev as f32 / 90.0);
         painter.circle_stroke(
@@ -976,14 +1034,22 @@ fn draw_sky_plot(ui: &mut egui::Ui, sv_elaz: &[(SV, f64, f64)]) {
     );
 
     // SV dots, tinted by constellation — same palette as the SV table, so an
-    // orange dot on the plot is the same SBAS GEO as the orange row.
-    for (sv, elev_deg, azim_deg) in sv_elaz {
+    // orange dot on the plot is the same SBAS GEO as the orange row. The radius
+    // tracks C/N0 (stronger = bigger), with a dark outline so dots read against
+    // the rings.
+    let outline = egui::Stroke::new(1.0, egui::Color32::from_rgb(20, 24, 34));
+    for (sv, elev_deg, azim_deg, cn0) in sv_elaz {
         let azim_rad = azim_deg.to_radians() as f32;
         let dist = r * (1.0 - *elev_deg as f32 / 90.0);
         let sx = c.x + dist * azim_rad.sin();
         let sy = c.y - dist * azim_rad.cos();
         let pos = egui::pos2(sx, sy);
-        painter.circle_filled(pos, 5.0, constellation_color(sv.constellation));
+        let radius = match cn0_band(*cn0) {
+            0 => 4.0, // green / strong
+            1 => 3.5, // yellow
+            _ => 3.0, // red / weak
+        };
+        painter.circle(pos, radius, constellation_color(sv.constellation), outline);
         painter.text(
             pos + egui::vec2(6.0, -6.0),
             egui::Align2::LEFT_TOP,

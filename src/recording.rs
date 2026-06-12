@@ -79,9 +79,16 @@ pub struct IQRecording {
     // Current read position, in samples, so we only seek when a fetch is not
     // contiguous with the previous one (e.g. the initial --off-msec offset).
     pos_samples: usize,
+    // Total recording length in seconds (file size / sample rate), for the UI
+    // progress bar.
+    total_sec: f64,
 }
 
 impl IQReader for IQRecording {
+    fn duration_sec(&self) -> Option<f64> {
+        Some(self.total_sec)
+    }
+
     fn get_iq_data(
         &mut self,
         off_samples: usize,
@@ -219,6 +226,7 @@ impl IQRecording {
             file_type: file_type.clone(),
             reader: None,
             pos_samples: 0,
+            total_sec: recording_duration_sec,
         })
     }
 
