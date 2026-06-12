@@ -42,12 +42,46 @@ already had is 2013–2021 and carries no OSNMA bits).
 | PocketSDR (Tokyo, Dec 2021) | yes | ~30 s; GPS+QZSS; too short for an E1 ephemeris |
 | CTTC (Spain, 2013) | **IOV** | GPS fix + **EGNOS SBAS** S120/S126; also `--sig E1B` decodes **3 Galileo IOV ephemerides** (E11/E12/E20, GST week 710) — the 2013 4-satellite constellation, too sparse for a Galileo-only fix but real dual-constellation data |
 | **tuni2025** (Tampere, 2025) | **yes** | TUNI clear-sky, 50 MHz, **int16 big-endian** (`2xi16-be`; dataset's "32-bit float" label is wrong). Carries both: **Galileo fix** (8 E1B SVs) + **GPS fix** (16 L1CA SVs) at 61.450, 23.856. **✅ first live full OSNMA nav-data authentication** — DSM-KROOT (NB=8) → KROOT verified vs the built-in 2024 PKID-1 key → TESLA chain → 7 SVs authenticated. Prime combined-GPS+Galileo candidate. |
+| **texbat-clean** / TEXBAT (UT Austin) | no (GPS-only spoof testbed) | The canonical public **GPS L1 spoofing** battery (Humphreys et al.). Real GPS L1 C/A, **complex baseband int16, 25 Msps** (`-t 2xi16 --fs 25000000`, zero-IF; `scott.m` reads from byte 0, no header). We fetch **`cleanStatic80.bin`** (~80 s, 7.5 GiB) — the spoof-free static reference, which **fixes** (Austin, TX). The spoofed/evil-waveform sets **ds1–ds8** (each ~44 GiB, first 100 s spoof-free then the spoofer ramps in) sit in the [same datastore](https://rnl-data.ae.utexas.edu/datastore/texbat/) — a robustness probe nothing else here offers (watch a tracking loop get dragged off), complementing the Galileo-side OSNMA anti-spoofing on tuni2025/fgi. Full clean sets `cleanStatic.bin`/`cleanDynamic.bin` are ~44/41 GiB. [TEXBAT](https://radionavlab.ae.utexas.edu/texbat/). |
+| **ion-gn3s** / SiGe (Munich, 2013) | no (BW too narrow) | Real **8-bit IF** at 16.368 MHz, IF 4.092 MHz, ~120 s — **runs on the existing `i8` reader** (`-t i8 --fs 16368000 --fi 4092000`). The GN3S front-end is only ~2 MHz wide, so effectively GPS L1 C/A only (PRN 1,7,8,9,11,17,28) despite the `.sdrx` "GPS + Galileo" label. [`SiGe_Bands-L1.dat`](https://sdr.ion.org/SiGe/SiGe_Bands-L1.dat). |
+| **ion-ifen** / IFEN SX3 (Munich, 2016) | **yes** | GPS L1 + Galileo E1 (E11/E12/E19/E20), 10 MHz BW. Real **2-bit packed IF** (4 samples/byte, two's-complement), 20.48 MHz, IF 5.5 MHz, ~18 min (5.7 GiB). Needed the **new `2bit` reader** in [`recording.rs`](../src/recording.rs); the pair order / sign convention mirrors the codebase's MSB-first 1-/4-bit readers but is **not yet confirmed against a live acquire** — if it fails to acquire, that's the suspect. `-t 2bit --fs 20480000 --fi 5500000`. [`IFEN_Bands-L1.stream`](https://sdr.ion.org/IFEN/IFEN_Bands-L1.stream). |
 
 ## Evaluated — not usable for us
 
+- **LuGRE** (lunar surface, Firefly Blue Ghost M1, 2025) — GPS/Galileo L1+L5 raw
+  IQ recorded *on the Moon* ([Zenodo 16411687](https://zenodo.org/records/16411687),
+  CC BY 4.0). Genuinely novel, but **not worth the plumbing**: the `.bin` is a
+  Qascom QN400-SPACE block format (per-block 62-byte header) that must be run
+  through [`qascom_to_sigmf.py`](https://github.com/daniestevez/lugre) (needs
+  `hifitime`/`numpy`/`sigmf`) to get a flat SigMF `ci8`, and **every clip is
+  ≤ 2.5 s** — acquisition-only, far too short for a fix. Not in fetch.py.
+- **ION OhioTRIGR** (Athens, OH) — real GPS **L1/L2 + Galileo E5a/E5b**, 56.32 MHz
+  1-bit. Its L1 is GPS-only (no E1), so nothing new for the L1/E1 path today, but
+  it's the best **real L5/E5a** candidate for when that roadmap item lands.
+- **ION NTLab** ([`.bin`](https://sdr.ion.org/NTLab/NTLab_Bands_GPS_GLONASS_L12.bin),
+  NT1065, Minsk 2017, 7.3 GiB ≈ 138 s) — GPS + **GLONASS** L1/L2, 53 Msps. **Not**
+  a plain stream and **not** readable by our `2bit` reader: every byte multiplexes
+  *four* bands, 2 bits each — `[7:6]` GPS-L1 (IF −14.58 MHz), `[5:4]` GLONASS-L1,
+  `[3:2]` GLONASS-L2, `[1:0]` GPS-L2 — in **sign-magnitude** (`encoding=MS`). Would
+  need a dedicated deinterleaving reader, and since we don't decode GLONASS it would
+  only yield GPS-L1 — i.e. nothing over `ion-gn3s`. Skipped.
+- **FGI-GSRx "Raw GPS L1C I/Q-data"** ([Etsin](https://etsin.fairdata.fi/dataset/63f8b776-680b-4c98-ace7-d5e443f2b1c5))
+  — **Skydel-simulated** (like Flexiband below): GPS **L1C** + L1 C/A + Galileo
+  E1 OS + **BDS B1C**, `2xi8` 25 MHz, 119 s, CC BY 4.0. A clean modernized-signal
+  testbed if an L1C/B1C decoder is ever added; not real-sky.
 - **IEEE DataPort "GNSS Recordings for Galileo OSNMA"** — Septentrio **SBF**
   (processed PVT), *not* raw IQ. [link](https://ieee-dataport.org/documents/gnss-recordings-galileo-osnma-evaluation)
 - **Fraunhofer Flexiband** (L1/E1, 18 MHz) — Spirent-**simulated**, access-restricted.
+- **DemoGRAPE / SANAE IV (Antarctica) scintillation SDR** — scientifically the
+  richest polar raw-IF source: INGV + PoliTo NavSAS + EC-JRC "4tuNe" bit-grabber at
+  SANAE IV (and Brazil's EACF), continuous since Jan 2016, raw IF in **L1/E1 + L2 +
+  L5/E5a** at 5/30 MHz, 7+ yr incl. storm/scintillation events ([GPS Solutions
+  2018](https://link.springer.com/article/10.1007/s10291-018-0761-7), [Annals of
+  Geophysics 2024, ag-9016](https://www.annalsofgeophysics.eu/index.php/annals/article/view/9016)).
+  Would be a great polar-geometry + scintillation stress test, **but not openly
+  downloadable** — no public repo, access on-request via NavSAS/INGV. For *raw IF*
+  that is openly hosted there's only the off-target **CYGNSS L1 Raw-IF** (NASA
+  PO.DAAC) — spaceborne GNSS-reflectometry (±38°, not polar), not a ground fix.
 - A 2024 highway E1/E6 set — only **20 ms snapshots**, too short for a fix.
 - **galileo-sdr-sim** — generates a trackable E1 signal but its **I/NAV time
   fields (t0e/t0c/GST week) are non-conformant**, so no ephemeris/fix (see the

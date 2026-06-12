@@ -394,6 +394,7 @@ impl GnssRcvApp {
                     IQFileType::TypePairInt8,
                     IQFileType::TypeOneInt8,
                     IQFileType::TypeOne4Bit,
+                    IQFileType::TypeOne2Bit,
                     IQFileType::TypeOneBit,
                     IQFileType::TypeRtlSdrFile,
                 ] {

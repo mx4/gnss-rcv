@@ -28,6 +28,10 @@ pub enum IQFileType {
     // signed 4-bit real samples, 2 packed per byte (high nibble first), I-only,
     // e.g. the SX3 front-end (ION SJTU L1E1 capture).
     TypeOne4Bit,
+    // signed 2-bit real samples, 4 packed per byte (most-significant pair first),
+    // two's-complement [-2, 1], I-only, e.g. the IFEN SX3 dual-RF L1 capture
+    // (ION IFEN_Bands-L1.stream: 20.48 MHz, IF 5.5 MHz).
+    TypeOne2Bit,
     // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
     // e.g. jks.com's gps.samples.1bit.I.fs5456.if4092.bin.
     TypeOneBit,
@@ -44,6 +48,7 @@ impl FromStr for IQFileType {
             "rtlsdr-file" => Ok(IQFileType::TypeRtlSdrFile),
             "i8" => Ok(IQFileType::TypeOneInt8),
             "4bit" => Ok(IQFileType::TypeOne4Bit),
+            "2bit" => Ok(IQFileType::TypeOne2Bit),
             "1bit" => Ok(IQFileType::TypeOneBit),
             _ => Err(format!("Failed to parse {}", input).into()),
         }
@@ -60,6 +65,7 @@ impl fmt::Display for IQFileType {
             IQFileType::TypeRtlSdrFile => write!(f, "rtlsdr-file"),
             IQFileType::TypeOneInt8 => write!(f, "i8"),
             IQFileType::TypeOne4Bit => write!(f, "4bit"),
+            IQFileType::TypeOne2Bit => write!(f, "2bit"),
             IQFileType::TypeOneBit => write!(f, "1bit"),
         }
     }
@@ -101,6 +107,9 @@ impl IQReader for IQRecording {
         }
         if let IQFileType::TypeOne4Bit = self.file_type {
             return self.get_iq_data_4bit(off_samples, num_samples);
+        }
+        if let IQFileType::TypeOne2Bit = self.file_type {
+            return self.get_iq_data_2bit(off_samples, num_samples);
         }
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
 
@@ -192,8 +201,9 @@ impl IQReader for IQRecording {
                     });
                 }
             }
-            // Returned early above via get_iq_data_1bit / get_iq_data_4bit.
+            // Returned early above via get_iq_data_1bit / _2bit / _4bit.
             IQFileType::TypeOneBit => unreachable!(),
+            IQFileType::TypeOne2Bit => unreachable!(),
             IQFileType::TypeOne4Bit => unreachable!(),
         }
 
@@ -208,8 +218,9 @@ impl IQRecording {
             .map_err(|e| format!("{}: {e}", file_path.display()))?
             .len();
         let recording_duration_sec = match file_type {
-            // sub-byte packings: 8 / 2 samples per byte respectively.
+            // sub-byte packings: 8 / 4 / 2 samples per byte respectively.
             IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
+            IQFileType::TypeOne2Bit => (file_size * 4) as f64 / fs,
             IQFileType::TypeOne4Bit => (file_size * 2) as f64 / fs,
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
         };
@@ -239,6 +250,7 @@ impl IQRecording {
             IQFileType::TypePairFloat32 => 2 * 4,
             // Sub-byte; not expressible here -- handled on their own read paths.
             IQFileType::TypeOneBit => unreachable!("1-bit uses get_iq_data_1bit"),
+            IQFileType::TypeOne2Bit => unreachable!("2-bit uses get_iq_data_2bit"),
             IQFileType::TypeOne4Bit => unreachable!("4-bit uses get_iq_data_4bit"),
         }
     }
@@ -281,6 +293,60 @@ impl IQRecording {
             for bit in (0..8).rev() {
                 let re = if (byte >> bit) & 1 == 1 { 1.0 } else { -1.0 };
                 iq_vec.push(Complex32 { re, im: 0.0 });
+            }
+        }
+        Ok(iq_vec)
+    }
+
+    // Read signed 2-bit real samples, 4 per byte (most-significant pair first),
+    // I-only. Each pair is two's-complement [-2, 1], normalized by 2. Reads are
+    // byte-aligned: num/off are multiples of 4 (period_sp = PERIOD_RCV * fs is a
+    // multiple of 4 for fs a multiple of 4000, e.g. the IFEN SX3's 20.48 MHz).
+    //
+    // NB: the IFEN .sdrx gives encoding "TCA" (two's complement) with the first
+    // sample left-aligned/MSB-first -- mirrored here from the 1-bit/4-bit readers'
+    // MSB-first convention. Not yet cross-checked against a live acquisition; if
+    // IFEN_SX3 fails to acquire, the pair order or sign convention is the suspect.
+    fn get_iq_data_2bit(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
+        assert!(
+            off_samples.is_multiple_of(4) && num_samples.is_multiple_of(4),
+            "2-bit reads must be 4-sample aligned (use an fs that is a multiple of 4000)"
+        );
+
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX; // force an initial seek
+        }
+        let reader = self.reader.as_mut().unwrap();
+
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples / 4) as u64))?;
+            self.pos_samples = off_samples;
+        }
+
+        let mut bytes = vec![0u8; num_samples / 4];
+        if reader.read_exact(&mut bytes).is_err() {
+            return Err("end of file".into());
+        }
+        self.pos_samples += num_samples;
+
+        // sign-extend a 2-bit pair (0..3) to [-2, 1], then normalize by 2.
+        let pair = |n: u8| -> f32 {
+            let v = if n >= 2 { n as i32 - 4 } else { n as i32 };
+            v as f32 / 2.0
+        };
+        let mut iq_vec = Vec::with_capacity(num_samples);
+        for byte in bytes {
+            for shift in [6, 4, 2, 0] {
+                iq_vec.push(Complex32 {
+                    re: pair((byte >> shift) & 0x03),
+                    im: 0.0,
+                });
             }
         }
         Ok(iq_vec)

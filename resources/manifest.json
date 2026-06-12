@@ -64,6 +64,18 @@
     ]
   },
   {
+    "name": "texbat-clean",
+    "url": "https://rnl-data.ae.utexas.edu/datastore/texbat/cleanStatic80.bin",
+    "dest": "TEXBAT_cleanStatic80.2xi16",
+    "size": 8016392192,
+    "archive": "raw",
+    "flags": "-t 2xi16 --fs 25000000",
+    "note": "TEXBAT clean-static (UT Austin), GPS L1 complex baseband int16 25 MHz, ~80s (7.5 GiB), no header (scott.m reads from byte 0); spoof-free reference -> fixes (Austin TX). The spoofed/evil-waveform sets ds1-ds8 live in the same datastore (each ~44 GiB, first 100s spoof-free) for robustness tests; see docs/datasets.md",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
     "name": "ion-rtlsdr",
     "url": "https://sdr.ion.org/RTL_SDR/RTLSDR_Bands-L1.uint8",
     "dest": "ION_RTLSDR_Bands-L1.rtlsdr",
@@ -76,6 +88,18 @@
     ]
   },
   {
+    "name": "ion-gn3s",
+    "url": "https://sdr.ion.org/SiGe/SiGe_Bands-L1.dat",
+    "dest": "ION_GN3S_Bands-L1.i8",
+    "size": 1963982848,
+    "archive": "raw",
+    "flags": "-t i8 --fs 16368000 --fi 4092000",
+    "note": "ION GN3S (SiGe) L1, real 8-bit IF 4.092 MHz, ~120s (Munich 2013); GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
     "name": "sjtu",
     "url": "https://sdr.ion.org/SJTU/SJTU_Bands-L1E1.dat",
     "dest": "SJTU_Bands-L1E1.dat",
@@ -83,6 +107,19 @@
     "archive": "raw",
     "flags": "-t 4bit --fs 25000000 --fi 6250000",
     "note": "ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs, no full fix",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "ion-ifen",
+    "url": "https://sdr.ion.org/IFEN/IFEN_Bands-L1.stream",
+    "dest": "ION_IFEN_Bands-L1.2bit",
+    "size": 5725209600,
+    "archive": "raw",
+    "flags": "-t 2bit --fs 20480000 --fi 5500000",
+    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). Uses the new 2-bit reader -- bit-order not yet confirmed against a live acquire",
     "tags": [
       "gps",
       "galileo"
