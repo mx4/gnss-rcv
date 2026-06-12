@@ -946,12 +946,14 @@ impl Channel {
             }
             // Two-gear proportional path. In the linear region the velocity
             // gain (B_DLL/0.25)·disc_gain = 1/τ trims noise around the peak;
-            // its maximum slew is ~±490 ns/s (|disc| = 1). A *persistently*
-            // hot discriminator means the loop is not filtering noise, it is
-            // behind — on the SJTU capture an ~850 ns/s sample-clock vs LO
-            // skew outran the linear slew entirely: the discriminator pegged
-            // at ~0.85 and the prompt walked off the peak in ~16 s, C/N0
-            // 50 -> 30, lock lost, re-acquire, repeat. The pull-in gear
+            // its slew tops out at ~±980 ns/s (L1CA, |disc| = 1), and the
+            // discriminator compresses well before full deflection. A
+            // *persistently* hot discriminator means the loop is not
+            // filtering noise, it is behind — on the SJTU capture an
+            // ~850 ns/s sample-clock vs LO skew consumed ~90% of that
+            // authority: the discriminator pegged at ~0.85 (= 850/980) and
+            // the remaining deficit walked the prompt off the peak in ~16 s,
+            // C/N0 50 -> 30, lock lost, re-acquire, repeat. The pull-in gear
             // instead kicks out half the *estimated offset* per update
             // (τ/t_u being the deadbeat gain), converging in a few updates
             // without overshoot. Persistence (3 consecutive hot updates)

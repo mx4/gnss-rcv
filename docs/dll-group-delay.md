@@ -1,5 +1,16 @@
 # DLL code-loop group delay and the transmit-time compensation
 
+> **Attribution superseded** (8b53dc5, 2026-06-12): the compensation below
+> survives unchanged and is still load-bearing, but it is **not** loop group
+> delay — with the DLL's rate-trim integrator active the loop holds no
+> Doppler-proportional lag (trim ≈ 0 across gpssim's ±3 kHz), yet the term
+> is still required (σ 1.6 → 48 m without it), and at 25 Msps (SJTU) it
+> *injects* bias. The slope behaves like a ~0.157 s epoch latency with a
+> sample-rate dependence; mechanism hunt open. See
+> [dll-pi-loop.md](dll-pi-loop.md) § "What the trim revealed about
+> `dll_lag`". The experiments and calibration below remain the record of
+> how the constant was measured.
+
 ## Summary
 
 The dominant per-satellite pseudorange error in the receiver was the **group delay
