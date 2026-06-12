@@ -91,8 +91,16 @@ impl Channel {
             self.stats.subframes += 1;
             let detail = {
                 let mut st = self.pub_state.lock().unwrap();
-                let iono = st.sbas_iono.feed(&msg);
-                let corr = st.sbas_corr.feed(&msg, self.ts_sec);
+                // One GEO feeds the correction state (see GnssState::sbas_source).
+                let source = *st.sbas_source.get_or_insert(self.sv);
+                let (iono, corr) = if source == self.sv {
+                    (
+                        st.sbas_iono.feed(&msg),
+                        st.sbas_corr.feed(&msg, self.ts_sec),
+                    )
+                } else {
+                    (false, false)
+                };
                 // MT9 (GEO navigation): place this GEO on the sky plot. Its
                 // ECEF position + the current fix give elevation/azimuth —
                 // the solver never computes them for SBAS channels (no

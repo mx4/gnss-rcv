@@ -80,6 +80,13 @@ pub struct GnssState {
     /// SBAS fast + long-term corrections (MT1-5/24/25), assembled live by the
     /// SBAS channels and applied per GPS SV at the pseudorange level.
     pub sbas_corr: SbasCorrections,
+    /// The GEO whose stream feeds sbas_iono/sbas_corr — first come, first
+    /// serve. GEOs of one system broadcast the same data *nominally*, but a
+    /// test-mode bird (tuni2025's S121 vs S123) can carry a different
+    /// IODP/IODI generation, and interleaving two generations wipes the
+    /// shared state on every MT1/MT18 (observed: corrections reset to 0/0,
+    /// iono grid stuck at 0 IGPs).
+    pub sbas_source: Option<SV>,
     /// Galileo OSNMA DSM-KROOT assembly progress as `(blocks_received, total)`,
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
@@ -117,6 +124,7 @@ impl GnssState {
             gal_iono_az: None,
             sbas_iono: SbasIonoGrid::default(),
             sbas_corr: SbasCorrections::default(),
+            sbas_source: None,
             osnma_kroot: None,
             hdop: 0.0,
             vdop: 0.0,
