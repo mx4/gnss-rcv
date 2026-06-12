@@ -124,7 +124,9 @@ Baseline (2026-06-12, pre multi-signal-stepping; after the WLS+ISB live
 solver, SBAS corrections/weights, retroactive anchor, f32 DSP and lazy
 acquisition grids): gpssim fix error ~0 km (5 SVs); ION LimeSDR Galileo-only
 ~0.1 km (5 SVs); CTTC SBAS 74 msgs/40 s (S120+S126); tuni2025 15 s bench
-24.1 s wall / 130.5 s CPU / 1.16 GB peak RSS (post shared-FFT M5; CTTC
+~1.5 CPU-s per data-second / 646 MB peak RSS mixed (post ingest decimation:
+50 -> 6.25 Msps auto, GNSS_DECIM=off to disable; was 17.2 CPU-s & 3.59 GB);
+C/A-only 15 s slice 24.1 s wall / 130.5 s CPU (post shared-FFT M5; CTTC
 first fix re-pinned 41.274817, 1.987575 — a deterministic ULP-path shift
 at the 4-SV epoch, exact-truth suite unchanged). All gates PASS.
 

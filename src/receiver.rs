@@ -29,6 +29,12 @@ pub trait IQReader {
         off_samples: usize,
         num_samples: usize,
     ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>>;
+
+    /// Total length in seconds, if known (a file). `None` for a live device, which
+    /// has no end — the UI then shows no progress bar.
+    fn duration_sec(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// In-memory IQ source: serves slices of a pre-loaded sample buffer and reports
@@ -113,6 +119,7 @@ pub struct Receiver {
     fam_carriers: Vec<std::sync::Arc<Vec<Vec<Complex32>>>>,
     fft_planner: rustfft::FftPlanner<f32>,
     code_period_sec: f64, // family-0 code period (the data-time stat unit)
+    fs: f64,              // sample rate, for the data-time / progress calc
     off_samples: usize,
     scheduler: Scheduler,
     channels: HashMap<SV, Channel>,
@@ -408,6 +415,30 @@ impl Receiver {
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Self {
+        // Ingest decimation: wideband file captures are filtered down to the
+        // lowest rate the signals need before anything else sees them — the
+        // entire receiver below simply runs at the lower fs (see decimate.rs).
+        // Streaming feeds (device/network) lack the random access the
+        // overlap reads need, so they pass through; GNSS_DECIM=off for A/B.
+        let mut iq_feed = iq_feed;
+        let mut fs = cfg.fs;
+        let decim_ok = !cfg.use_device
+            && cfg.hostname.is_empty()
+            && !std::env::var("GNSS_DECIM").is_ok_and(|v| v == "off");
+        if decim_ok {
+            let k = crate::decimate::decimation_factor(cfg.fs, cfg.fi);
+            if k > 1 {
+                log::warn!(
+                    "decimating {:.3} -> {:.3} Msps (factor {k}); the signal band \
+                     (|fi| + 2.046 MHz BOC lobes) fits with filter margin",
+                    cfg.fs / 1e6,
+                    cfg.fs / k as f64 / 1e6
+                );
+                iq_feed = Box::new(crate::decimate::DecimatingReader::new(iq_feed, k));
+                fs = cfg.fs / k as f64;
+            }
+        }
+
         let families: Vec<Signal> = if cfg.families.is_empty() {
             vec![cfg.sig]
         } else {
@@ -416,7 +447,7 @@ impl Receiver {
         // Kept for the off_msec quirk and the data-time stat; family 0 is the
         // session's primary signal.
         let code_period_sec = families[0].code_period_sec();
-        let period_sp = (code_period_sec * cfg.fs) as usize;
+        let period_sp = (code_period_sec * fs) as usize;
         // Per family: one shared acquisition carrier-replica set (the set
         // depends on the code period, so a mixed session needs one per
         // family — duplicating it per channel was the 50 MHz OOM), and the
@@ -424,8 +455,8 @@ impl Receiver {
         let mut channels = HashMap::<SV, Channel>::new();
         let mut fam_carriers = Vec::new();
         for &fam_sig in &families {
-            let fam_sp = (fam_sig.code_period_sec() * cfg.fs) as usize;
-            let carriers = Channel::build_carriers(cfg.fs, cfg.fi, fam_sp);
+            let fam_sp = (fam_sig.code_period_sec() * fs) as usize;
+            let carriers = Channel::build_carriers(fs, cfg.fi, fam_sp);
             fam_carriers.push(carriers.clone());
             // SBAS/QZSS are C/A-family blocks: offer them only to that
             // family's list — handing them to the E1 pass just made its
@@ -446,7 +477,7 @@ impl Receiver {
                     Channel::new(
                         fam_sig,
                         sv,
-                        cfg.fs,
+                        fs,
                         cfg.fi,
                         cfg.plots,
                         state.clone(),
@@ -459,8 +490,9 @@ impl Receiver {
         Self {
             iq_feed,
             code_period_sec,
+            fs: cfg.fs,
             off_samples: cfg.off_msec * period_sp,
-            scheduler: Scheduler::new(cfg.fs, &families),
+            scheduler: Scheduler::new(fs, &families),
             families,
             fam_carriers,
             fft_planner: rustfft::FftPlanner::new(),
@@ -673,6 +705,24 @@ impl Receiver {
         self.paused = paused;
     }
 
+    /// Push run progress (fraction of the recording processed) and the real-time
+    /// factor to the shared state for the UI's progress bar. No-op for a live
+    /// device (no known total).
+    fn publish_progress(&self) {
+        let Some(total) = self.iq_feed.duration_sec() else {
+            return;
+        };
+        if total <= 0.0 {
+            return;
+        }
+        let data_sec = self.off_samples as f64 / self.fs;
+        let wall = self.stats.start.elapsed().as_secs_f64();
+        let realtime = if wall > 1e-3 { data_sec / wall } else { 0.0 };
+        let mut st = self.pub_state.lock().unwrap();
+        st.run_progress = Some((data_sec / total).clamp(0.0, 1.0) as f32);
+        st.realtime_x = realtime as f32;
+    }
+
     pub fn run_loop(&mut self, num_msec: usize) {
         let mut n = 0;
         loop {
@@ -699,6 +749,9 @@ impl Receiver {
                 continue;
             }
             n += 1;
+            if n % 32 == 0 {
+                self.publish_progress();
+            }
             if num_msec != 0 && n >= num_msec {
                 log::info!("{num_msec} msecs of iq-data processed");
                 break;

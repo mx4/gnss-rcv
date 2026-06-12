@@ -4,6 +4,7 @@ pub mod bits;
 pub mod channel;
 pub mod code;
 pub mod constants;
+pub mod decimate;
 pub mod device;
 pub mod ephemeris;
 pub mod fec;
