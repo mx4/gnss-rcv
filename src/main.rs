@@ -209,6 +209,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sbas,
         qzss: opt.qzss,
         plots: opt.plots,
+        // Headless CLI: diagnostics history only pays off when --plots writes it.
+        diagnostics: opt.plots,
         exit_on_fix: opt.exit_on_fix,
         json: opt.json.clone(),
     };

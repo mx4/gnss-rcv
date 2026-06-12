@@ -295,6 +295,9 @@ impl GnssRcvApp {
             sig: families[0],
             families,
             plots: self.plots,
+            // The egui diagnostics tab reads the published History snapshots, so
+            // keep the full depth even without --plots.
+            diagnostics: true,
             sbas: self.sbas,
             qzss: self.qzss,
             ..Default::default()

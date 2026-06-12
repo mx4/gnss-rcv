@@ -105,7 +105,14 @@ fn dll_tau(disc_gain: f64) -> f64 {
 // bin count keeps the step at ~320 Hz (2*12000/75) so resolution is unchanged.
 const DOPPLER_SPREAD_HZ: f64 = 12000.0;
 const DOPPLER_SPREAD_BINS: usize = 75;
+// Full history depth, kept only when diagnostics are consumed (--plots or the UI
+// tab). The five ring buffers at this depth are ~1.5 MB/tracking channel plus an
+// equal published clone — pure diagnostic weight a headless run never reads.
 const HISTORY_NUM: usize = 20000;
+// Headless depth: the tracking loops read at most the last two entries (the FLL
+// at run_fll reads corr_p[len-1] and [len-2]; everything else is `.back()`), so
+// a tiny ring suffices when nothing is plotting. The margin over 2 is free.
+const HISTORY_MIN: usize = 4;
 /// Acquisition accept / tracking drop C/N0 gates (dB-Hz). The 6 dB gap is
 /// hysteresis: the 10 ms acquisition estimate is noisy, so the accept gate
 /// sits well above the floor where the loops still work — a marginal SV that
@@ -160,20 +167,20 @@ pub struct History {
 }
 
 impl History {
-    pub fn trim(&mut self) {
-        if self.doppler_hz.len() > HISTORY_NUM {
+    pub fn trim(&mut self, cap: usize) {
+        if self.doppler_hz.len() > cap {
             self.doppler_hz.pop_front();
         }
-        if self.phi_error.len() > HISTORY_NUM {
+        if self.phi_error.len() > cap {
             self.phi_error.pop_front();
         }
-        if self.corr_p.len() > HISTORY_NUM {
+        if self.corr_p.len() > cap {
             self.corr_p.pop_front();
         }
-        if self.code_phase_offset.len() > HISTORY_NUM {
+        if self.code_phase_offset.len() > cap {
             self.code_phase_offset.pop_front();
         }
-        if self.cn0.len() > HISTORY_NUM {
+        if self.cn0.len() > cap {
             self.cn0.pop_front();
         }
     }
@@ -246,6 +253,10 @@ pub struct Channel {
     pub sv: SV,
     pub stats: ChannelStats,
     plots: bool,
+    // Diagnostics consumer present (--plots or the egui tab): keep the full
+    // History depth and publish the 2 s snapshot. Off → the loops keep only a
+    // tiny ring and skip the snapshot clone (see HISTORY_MIN, update_all_plots).
+    diagnostics: bool,
     fc: f64, // carrier frequency
     fs: f64, // sampling frequency
     fi: f64, // intermediate frequency
@@ -417,6 +428,7 @@ impl Channel {
         fs: f64,
         fi: f64,
         plots: bool,
+        diagnostics: bool,
         pub_state: Arc<Mutex<GnssState>>,
         carriers: Arc<Vec<Vec<Complex32>>>,
     ) -> Self {
@@ -472,6 +484,7 @@ impl Channel {
             sv,
             stats: ChannelStats::default(),
             plots,
+            diagnostics,
             fft_planner,
             ts_sec: 0.0,
             fc: sig.carrier_hz(),
@@ -697,8 +710,12 @@ impl Channel {
         }
 
         // Publish a history snapshot at 2-second cadence for the diagnostics tab.
-        if let Ok(mut st) = self.pub_state.lock() {
-            st.histories.insert(self.sv, self.hist.clone());
+        // Only the UI/plots consume it, and headless the History is trimmed to
+        // HISTORY_MIN anyway — so skip the ~1.5 MB clone when nothing reads it.
+        if self.diagnostics {
+            if let Ok(mut st) = self.pub_state.lock() {
+                st.histories.insert(self.sv, self.hist.clone());
+            }
         }
     }
 
@@ -1278,7 +1295,8 @@ impl Channel {
 
         self.hist.cn0.push_back(self.trk.cn0);
         self.hist.doppler_hz.push_back(self.trk.doppler_hz);
-        self.hist.trim();
+        self.hist
+            .trim(if self.diagnostics { HISTORY_NUM } else { HISTORY_MIN });
         self.update_all_plots(false);
         self.monitor_code_carrier_consistency();
         self.log_periodically();

@@ -84,6 +84,10 @@ pub struct ReceiverConfig {
     pub sbas: bool,
     pub qzss: bool,
     pub plots: bool,
+    /// Keep full per-channel diagnostic history and publish the UI snapshot.
+    /// True for --plots or when the egui UI runs; false headless (the loops then
+    /// keep only a tiny history ring — see channel.rs HISTORY_MIN).
+    pub diagnostics: bool,
     pub exit_on_fix: bool,
     /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
     pub json: Option<PathBuf>,
@@ -105,6 +109,7 @@ impl Default for ReceiverConfig {
             sbas: false,
             qzss: false,
             plots: false,
+            diagnostics: false,
             exit_on_fix: false,
             json: None,
         }
@@ -487,6 +492,7 @@ impl Receiver {
                         fs,
                         cfg.fi,
                         cfg.plots,
+                        cfg.diagnostics,
                         state.clone(),
                         carriers.clone(),
                     ),
