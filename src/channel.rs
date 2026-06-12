@@ -1114,6 +1114,7 @@ impl Channel {
         // sign and +code_off, yielding 1 - doppler/fc (Doppler with the wrong sign,
         // so pseudoranges moved opposite to the true range).
         self.nav.meas.trk_phase = self.num_trk_samples as f64 * self.code_sec;
+        self.nav.meas.ts_sec = self.ts_sec;
         // Snapshot the fractional code phase paired with trk_phase from the same
         // period. The solver forms the transmit phase as trk_phase - code_off; the
         // absolute code_off (common cross-SV reference from acquisition) carries the
@@ -1168,6 +1169,11 @@ impl Channel {
             self.num_acq_fails = self.num_acq_fails.max(ACQ_FAIL_GRACE + 1);
             self.idle_start();
         }
+    }
+
+    /// This channel's spreading-code period (s) — its scheduler family key.
+    pub fn code_period_sec(&self) -> f64 {
+        self.code_sec
     }
 
     pub fn process_samples(&mut self, iq_vec: &[Complex32], ts_sec: f64) {

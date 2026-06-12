@@ -285,9 +285,20 @@ impl PositionSolver {
 
         let params = UserParameters::new(UserProfile::Static, ClockProfile::Quartz);
 
+        // Mixed-family staleness: each measurement's t_tx belongs to its own
+        // snapshot instant, but families snapshot on different grids (C/A
+        // every 1 ms, E1 every 4 ms). Referencing each pseudorange to the
+        // freshest snapshot removes the family-common offset that would
+        // otherwise land in the ISB state (3 ms — the grid gap — measured).
+        let freshest = snaps
+            .iter()
+            .map(|(m, _)| m.ts_sec)
+            .fold(f64::NEG_INFINITY, f64::max);
+
         log::warn!("----- now_gpst={now_gpst:?}");
         for ((mm, eph), t_tx) in snaps.iter().zip(tx_gpst.iter()) {
-            let pseudo_range_sec = (now_gpst - *t_tx).to_seconds();
+            let stale_sec = freshest - mm.ts_sec;
+            let pseudo_range_sec = (now_gpst - *t_tx).to_seconds() - stale_sec;
             let clock_corr = get_sv_clock_correction(eph, now_gpst);
 
             // This SV's broadcast residual-error variance (SBAS UDRE + slant

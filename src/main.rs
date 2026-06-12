@@ -27,8 +27,12 @@ struct Options {
     file: PathBuf,
     #[structopt(short = "s", long, help = "host for rtl-sdr-tcp", default_value = "")]
     hostname: String,
-    #[structopt(long, help = "signal: L1CA, E1B, E1C", default_value = "L1CA")]
-    sig: Signal,
+    #[structopt(
+        long,
+        help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B) for a mixed session",
+        default_value = "L1CA"
+    )]
+    sig: String,
     #[structopt(short = "d", long, help = "use rtl-sdr device")]
     use_device: bool,
     #[structopt(short = "l", long, help = "path to log file", default_value = "")]
@@ -155,10 +159,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         opt.off_msec,
         opt.num_msec,
     );
+    let families: Vec<Signal> = opt
+        .sig
+        .split(',')
+        .map(|t| {
+            t.trim()
+                .parse::<Signal>()
+                .unwrap_or_else(|_| panic!("invalid signal: {t}"))
+        })
+        .collect();
+    let sig = families[0];
     log::warn!(
         "gnss-rcv: using signal {} frequency: {:.1} MHz",
         opt.sig,
-        opt.sig.carrier_hz() / 1_000_000.0
+        sig.carrier_hz() / 1_000_000.0
     );
 
     // SBAS is on by default (--no-sbas disables; bare --sbas is accepted for
@@ -179,7 +193,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs: opt.fs,
         fi: opt.fi,
         off_msec: opt.off_msec,
-        sig: opt.sig,
+        sig,
+        families,
         sats: opt.sats.clone(),
         sbas,
         qzss: opt.qzss,

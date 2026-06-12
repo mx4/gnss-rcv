@@ -29,10 +29,12 @@ const LEFT_PANEL_W: f32 = 460.0;
 /// columns of the controls grid line up.
 const FIELD_W: f32 = 115.0;
 
-/// Fixed width of the controls-grid label column ("iq-format" / "signal …"), so
-/// the column doesn't reflow when the SBAS checkbox shows/hides — and so the
-/// recording dropdown above can line its right edge up with the iq-format field.
-const LABEL_W: f32 = 115.0;
+/// Width of the controls-grid label column ("recording" / "iq-format" / "signal").
+const LABEL_W: f32 = 72.0;
+
+/// Width of the controls-grid value column (file path / fs / fi) — wider than the
+/// dropdown column so the recording path stays legible.
+const VALUE_W: f32 = 175.0;
 
 /// Horizontal gap between the controls-grid columns (matches `Grid::spacing`).
 const GRID_GAP_X: f32 = 10.0;
@@ -293,9 +295,7 @@ impl GnssRcvApp {
             .to_owned();
         let mut clicked = None;
         egui::ComboBox::from_id_salt("file_picker")
-            // Right edge lines up with the iq-format field below: label column +
-            // grid gap + field width.
-            .width(LABEL_W + GRID_GAP_X + FIELD_W)
+            .width(FIELD_W)
             .selected_text(selected_text)
             .show_ui(ui, |ui| {
                 for (i, r) in self.recordings.iter().enumerate() {
@@ -344,8 +344,8 @@ impl GnssRcvApp {
             });
     }
 
-    /// The format / signal / fs / fi controls in a 2×2 grid: label-left, with the
-    /// fields all `FIELD_W` wide so the two columns line up and the dropdowns match.
+    /// The recording / format / signal settings as one `label | dropdown | label |
+    /// value` table: recording + file path, then iq-format + fs, then signal + fi.
     fn update_controls(&mut self, ui: &mut egui::Ui) {
         let h = ui.spacing().interact_size.y;
         egui::Grid::new("rx_controls")
@@ -354,12 +354,21 @@ impl GnssRcvApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.set_min_width(LABEL_W);
+                    ui.label("recording");
+                });
+                self.update_file_picker(ui);
+                ui.label("file");
+                ui.add_sized([VALUE_W, h], egui::TextEdit::singleline(&mut self.iq_file));
+                ui.end_row();
+
+                ui.horizontal(|ui| {
+                    ui.set_min_width(LABEL_W);
                     ui.label("iq-format");
                 });
                 self.update_iq_type(ui);
                 ui.label("fs");
                 ui.add_sized(
-                    [FIELD_W, h],
+                    [VALUE_W, h],
                     egui::DragValue::new(&mut self.fs)
                         .speed(1000.0)
                         .suffix(" Hz"),
@@ -369,16 +378,11 @@ impl GnssRcvApp {
                 ui.horizontal(|ui| {
                     ui.set_min_width(LABEL_W);
                     ui.label("signal");
-                    if !self.sig.is_boc11() {
-                        ui.checkbox(&mut self.sbas, "SBAS").on_hover_text(
-                            "also search the SBAS L1 GEOs (PRN 120-138, EGNOS/WAAS)",
-                        );
-                    }
                 });
                 self.update_sig_type(ui);
                 ui.label("fi");
                 ui.add_sized(
-                    [FIELD_W, h],
+                    [VALUE_W, h],
                     egui::DragValue::new(&mut self.fi)
                         .speed(1000.0)
                         .suffix(" Hz"),
@@ -387,34 +391,42 @@ impl GnssRcvApp {
             });
     }
 
-    fn update_start_stop(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, box_h: f32) {
+    /// The run controls — start/pause/resume + stop — side by side in an `area_w`
+    /// wide strip `box_h` tall (it fills the height of the status table beside it).
+    fn update_start_stop(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        box_h: f32,
+        area_w: f32,
+    ) {
         let active = self.active.load(Ordering::SeqCst);
         let paused = self.paused.load(Ordering::SeqCst);
         let accent = ui.visuals().selection.bg_fill;
         let red = egui::Color32::from_rgb(0xC0, 0x39, 0x2B);
-        // Fill the height of the neighbouring position-fix box (minus this box's
-        // own frame margin), so the two boxes are the same height.
-        let h = (box_h - 12.0).max(ui.spacing().interact_size.y);
+        let gap = ui.spacing().item_spacing.x;
+        // Running: start/pause shares the strip with the red stop button but stays
+        // twice its width. Idle: the single start button spans the whole strip.
+        let (main_w, stop_w) = if active {
+            let stop = ((area_w - gap) / 3.0).max(40.0);
+            ((area_w - gap - stop).max(60.0), stop)
+        } else {
+            (area_w, 0.0)
+        };
+        let label = if !active {
+            "start"
+        } else if paused {
+            "resume"
+        } else {
+            "pause"
+        };
         ui.horizontal(|ui| {
-            // Primary run control: start (idle) -> pause (running) -> resume
-            // (paused). It takes the full box when idle, and shares it with the
-            // red stop button while running — staying the larger of the two.
-            let stop_w = if active { 46.0 } else { 0.0 };
-            let gap = if active {
-                ui.spacing().item_spacing.x
-            } else {
-                0.0
-            };
-            let main_w = (ui.available_width() - stop_w - gap).max(60.0);
-            let label = if !active {
-                "start"
-            } else if paused {
-                "resume"
-            } else {
-                "pause"
-            };
+            // start (idle) -> pause (running) -> resume (paused).
             if ui
-                .add_sized([main_w, h], egui::Button::new(label).fill(accent))
+                .add_sized(
+                    [main_w, box_h],
+                    egui::Button::new(egui::RichText::new(label).size(15.0)).fill(accent),
+                )
                 .clicked()
             {
                 if !active {
@@ -426,7 +438,10 @@ impl GnssRcvApp {
             // Stop (red), only while running — tears the run down.
             if active
                 && ui
-                    .add_sized([stop_w, h], egui::Button::new("stop").fill(red))
+                    .add_sized(
+                        [stop_w, box_h],
+                        egui::Button::new(egui::RichText::new("stop").size(14.0)).fill(red),
+                    )
                     .clicked()
             {
                 self.stop_async();
@@ -490,113 +505,102 @@ impl GnssRcvApp {
                     // same width so they read as one stacked panel.
                     ui.vertical(|ui| {
                         ui.set_max_width(LEFT_PANEL_W);
-                        // Controls box.
+                        // One box: the settings table, a divider, then the status
+                        // table with the run-control strip beside it.
                         egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                self.update_file_picker(ui);
-                                let h = ui.spacing().interact_size.y;
-                                ui.add_sized(
-                                    [ui.available_width(), h],
-                                    egui::TextEdit::singleline(&mut self.iq_file),
-                                );
-                            });
                             self.update_controls(ui);
-                        });
-                        // Position-fix box, with the run controls boxed to its right.
-                        ui.horizontal(|ui| {
-                            let btn_box_w = 130.0_f32;
-                            let status_w = (ui.available_width() - btn_box_w - 40.0).max(240.0);
-                            let status = egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(status_w);
-                                // The box inherits the outer row's horizontal layout;
-                                // stack its lines explicitly so they don't run together.
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.monospace(&tow_text);
-                                        if has_ion {
-                                            ui.separator();
-                                            ui.monospace("ion: 1");
-                                        }
-                                        if has_utc {
-                                            ui.separator();
-                                            ui.monospace("utc: 1");
-                                        }
-                                        // EGNOS/SBAS corrections are live and feeding
-                                        // the solver — SBAS-orange, like its SVs.
-                                        let (n_igp, n_fast, n_long) = egnos;
-                                        if n_igp + n_fast + n_long > 0 {
-                                            ui.separator();
-                                            ui.colored_label(
-                                                constellation_color(Constellation::SBAS),
-                                                "EGNOS",
-                                            )
-                                            .on_hover_text(format!(
-                                                "SBAS corrections applied to the fix: iono grid \
-                                         {n_igp} IGPs (per satellite, where the grid \
-                                         covers its pierce point) · {n_fast} fast + \
-                                         {n_long} long-term clock/ephemeris corrections"
-                                            ));
-                                        }
-                                    });
-                                    if let Some(url) = &pos_url {
-                                        ui.hyperlink_to(&pos_text, url);
-                                    } else {
-                                        ui.monospace(&pos_text);
-                                    }
-                                    // Fix precision: HDOP/VDOP geometry factors (lower is
-                                    // better, HDOP colour-coded by quality) + SVs used.
-                                    if let Some((hdop, vdop, nsv)) = dop {
-                                        ui.horizontal(|ui| {
-                                            ui.weak("precision:");
-                                            ui.colored_label(
-                                                dop_color(hdop),
-                                                format!("HDOP {hdop:.1}"),
-                                            );
-                                            ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
-                                        })
-                                        .response
-                                        .on_hover_text(
-                                            "Dilution of precision: how much satellite \
-                                     geometry amplifies range error (lower is \
-                                     better — <2 excellent, 2-5 good, 5-10 \
-                                     moderate). VDOP is vertical, then the satellite \
-                                     count used in the fix.",
-                                        );
-                                    }
-                                    // OSNMA DSM-KROOT assembly: the TESLA root key arrives
-                                    // one block per 30 s subframe, and full authentication
-                                    // can't complete until every block is in.
-                                    if let Some((got, total)) = osnma_kroot {
-                                        let done = got >= total;
-                                        let label = if done {
-                                            format!("KROOT ✓  {got}/{total} blocks")
-                                        } else {
-                                            format!("KROOT  {got}/{total} blocks")
-                                        };
-                                        let fill = if done {
-                                            egui::Color32::from_rgb(80, 200, 100)
-                                        } else {
-                                            egui::Color32::from_rgb(70, 110, 180)
-                                        };
-                                        ui.add(
-                                            egui::ProgressBar::new(got as f32 / total as f32)
-                                                .text(label)
-                                                .fill(fill),
-                                        )
-                                        .on_hover_text(
-                                            "OSNMA TESLA root key (DSM-KROOT): blocks \
-                                     assembled / needed before nav data can be \
-                                     authenticated",
-                                        );
-                                    }
+                            ui.separator();
+                            ui.horizontal_top(|ui| {
+                                let btn_area_w = 170.0_f32;
+                                let status_w =
+                                    (ui.available_width() - btn_area_w - GRID_GAP_X).max(240.0);
+                                let status = ui.scope(|ui| {
+                                    ui.set_width(status_w);
+                                    egui::Grid::new("status_grid")
+                                        .num_columns(2)
+                                        .spacing([GRID_GAP_X, 6.0])
+                                        .show(ui, |ui| {
+                                            ui.label("time");
+                                            ui.horizontal(|ui| {
+                                                ui.monospace(&tow_text);
+                                                if has_ion {
+                                                    ui.separator();
+                                                    ui.monospace("ion");
+                                                }
+                                                if has_utc {
+                                                    ui.separator();
+                                                    ui.monospace("utc");
+                                                }
+                                                // EGNOS corrections are live and
+                                                // feeding the solver — SBAS-orange.
+                                                let (n_igp, n_fast, n_long) = egnos;
+                                                if n_igp + n_fast + n_long > 0 {
+                                                    ui.separator();
+                                                    ui.colored_label(
+                                                        constellation_color(Constellation::SBAS),
+                                                        "EGNOS",
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "SBAS corrections applied to the fix: \
+                                                         iono grid {n_igp} IGPs · {n_fast} fast \
+                                                         + {n_long} long-term corrections"
+                                                    ));
+                                                }
+                                            });
+                                            ui.end_row();
+
+                                            ui.label("position");
+                                            if let Some(url) = &pos_url {
+                                                ui.hyperlink_to(&pos_text, url);
+                                            } else {
+                                                ui.monospace(&pos_text);
+                                            }
+                                            ui.end_row();
+
+                                            if let Some((hdop, vdop, nsv)) = dop {
+                                                ui.label("precision");
+                                                ui.horizontal(|ui| {
+                                                    ui.colored_label(
+                                                        dop_color(hdop),
+                                                        format!("HDOP {hdop:.1}"),
+                                                    );
+                                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                                                })
+                                                .response
+                                                .on_hover_text(
+                                                    "Dilution of precision (lower is better — \
+                                                     <2 excellent, 2-5 good). VDOP is vertical, \
+                                                     then the SV count used in the fix.",
+                                                );
+                                                ui.end_row();
+                                            }
+
+                                            if let Some((got, total)) = osnma_kroot {
+                                                ui.label("KROOT");
+                                                let fill = if got >= total {
+                                                    egui::Color32::from_rgb(80, 200, 100)
+                                                } else {
+                                                    egui::Color32::from_rgb(70, 110, 180)
+                                                };
+                                                ui.add(
+                                                    egui::ProgressBar::new(
+                                                        got as f32 / total as f32,
+                                                    )
+                                                    .desired_width(VALUE_W)
+                                                    .text(format!("{got}/{total} blocks"))
+                                                    .fill(fill),
+                                                )
+                                                .on_hover_text(
+                                                    "OSNMA TESLA root key (DSM-KROOT): blocks \
+                                                     assembled / needed before nav data is \
+                                                     authenticated",
+                                                );
+                                                ui.end_row();
+                                            }
+                                        });
                                 });
-                            });
-                            // Run controls, boxed to the right of the position-fix box
-                            // and matched to its height.
-                            let box_h = status.response.rect.height();
-                            egui::Frame::group(ui.style()).show(ui, |ui| {
-                                ui.set_width(btn_box_w);
-                                self.update_start_stop(ui, ctx, box_h);
+                                let box_h = status.response.rect.height();
+                                self.update_start_stop(ui, ctx, box_h, btn_area_w);
                             });
                         });
                     });

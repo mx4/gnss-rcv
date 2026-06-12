@@ -16,7 +16,14 @@ pub struct Measurement {
     // code_sec. Because num_trk_samples counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver
     // wall clock ts_sec. The absolute sub-ms code phase is kept in code_off_sec.
-    pub trk_phase: f64,     // current integer transmit-time
+    pub trk_phase: f64, // current integer transmit-time
+    /// Receiver stream time of this snapshot (the channel's last period
+    /// step). In a mixed session families snapshot on different grids, so a
+    /// solve epoch sees E1 snapshots up to 3 ms staler than C/A ones — the
+    /// solver subtracts the per-SV staleness from the pseudorange (without
+    /// it the offset is family-common and lands in the ISB state: measured
+    /// +3 ms exactly on the first mixed tuni2025 solve).
+    pub ts_sec: f64,
     pub tow_trk_phase: f64, // integer-ms phase at tx_tow_gpst (set once)
     pub tx_tow_gpst: Epoch, // GPS time pinned once the transmit anchor pins
     pub tx_anchored: bool,

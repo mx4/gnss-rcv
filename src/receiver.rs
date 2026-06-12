@@ -70,6 +70,10 @@ pub struct ReceiverConfig {
     pub fi: f64,
     pub off_msec: usize,
     pub sig: Signal,
+    /// All signal families this session runs (each on its own scheduler
+    /// grid). Empty = just `sig`. Populated from a comma list in --sig
+    /// ("L1CA,E1B") for mixed sessions.
+    pub families: Vec<Signal>,
     pub sats: String,
     pub sbas: bool,
     pub qzss: bool,
@@ -90,6 +94,7 @@ impl Default for ReceiverConfig {
             fi: 0.0,
             off_msec: 0,
             sig: Signal::L1ca,
+            families: Vec::new(),
             sats: String::new(),
             sbas: false,
             qzss: false,
@@ -102,7 +107,9 @@ impl Default for ReceiverConfig {
 
 pub struct Receiver {
     iq_feed: Box<dyn IQReader>,
-    code_period_sec: f64, // one spreading-code period (1 ms L1CA, 4 ms E1)
+    /// The session's signal families, in scheduler registration order.
+    families: Vec<Signal>,
+    code_period_sec: f64, // family-0 code period (the data-time stat unit)
     off_samples: usize,
     scheduler: Scheduler,
     channels: HashMap<SV, Channel>,
@@ -320,6 +327,10 @@ fn get_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
 /// biased duplicate. Distinct GPS satellites never broadcast identical
 /// orbital+clock parameters, so when two channels report the same ephemeris we
 /// keep only the highest-C/N0 (true) one and drop the cross-correlation(s).
+fn families_has_e1b(families: &[Signal]) -> bool {
+    families.iter().any(|s| matches!(s, Signal::GalileoE1b))
+}
+
 fn reject_cross_correlations(
     mut snaps: Vec<(Measurement, RxEphemeris)>,
 ) -> Vec<(Measurement, RxEphemeris)> {
@@ -394,35 +405,53 @@ impl Receiver {
         exit_req: Arc<AtomicBool>,
         state: Arc<Mutex<GnssState>>,
     ) -> Self {
-        // The receiver steps one spreading-code period at a time; that period is
-        // the signal's, not a hardcoded 1 ms (E1 is 4 ms).
-        let code_period_sec = cfg.sig.code_period_sec();
+        let families: Vec<Signal> = if cfg.families.is_empty() {
+            vec![cfg.sig]
+        } else {
+            cfg.families.clone()
+        };
+        // Kept for the off_msec quirk and the data-time stat; family 0 is the
+        // session's primary signal.
+        let code_period_sec = families[0].code_period_sec();
         let period_sp = (code_period_sec * cfg.fs) as usize;
-        // Build the acquisition carrier replicas once and share them across every
-        // channel (period_sp == code_sp). PRN-independent, so this is the same data
-        // for all 36 — duplicating it per channel was the 50 MHz OOM.
-        let carriers = Channel::build_carriers(cfg.fs, cfg.fi, period_sp);
+        // Per family: one shared acquisition carrier-replica set (the set
+        // depends on the code period, so a mixed session needs one per
+        // family — duplicating it per channel was the 50 MHz OOM), and the
+        // channels of the constellations that family carries.
         let mut channels = HashMap::<SV, Channel>::new();
-        for sv in get_sat_list(&cfg.sats, cfg.sig, cfg.sbas, cfg.qzss) {
-            channels.insert(
-                sv,
-                Channel::new(
-                    cfg.sig,
+        for &fam_sig in &families {
+            let fam_sp = (fam_sig.code_period_sec() * cfg.fs) as usize;
+            let carriers = Channel::build_carriers(cfg.fs, cfg.fi, fam_sp);
+            for sv in get_sat_list(&cfg.sats, fam_sig, cfg.sbas, cfg.qzss) {
+                // In a mixed session each family contributes only its own
+                // constellations (get_sat_list is per-signal).
+                if families.len() > 1 {
+                    let is_gal = sv.constellation == Constellation::Galileo;
+                    if is_gal != fam_sig.is_boc11() {
+                        continue;
+                    }
+                }
+                channels.insert(
                     sv,
-                    cfg.fs,
-                    cfg.fi,
-                    cfg.plots,
-                    state.clone(),
-                    carriers.clone(),
-                ),
-            );
+                    Channel::new(
+                        fam_sig,
+                        sv,
+                        cfg.fs,
+                        cfg.fi,
+                        cfg.plots,
+                        state.clone(),
+                        carriers.clone(),
+                    ),
+                );
+            }
         }
 
         Self {
             iq_feed,
             code_period_sec,
             off_samples: cfg.off_msec * period_sp,
-            scheduler: Scheduler::new(cfg.fs, &[cfg.sig]),
+            scheduler: Scheduler::new(cfg.fs, &families),
+            families,
             channels,
             pub_state: state.clone(),
             solver: PositionSolver::new(state),
@@ -432,7 +461,11 @@ impl Receiver {
             paused: Arc::new(AtomicBool::new(false)),
             stats: RunStats::default(),
             json_out: cfg.json.clone(),
-            osnma_enabled: matches!(cfg.sig, Signal::GalileoE1b),
+            osnma_enabled: families_has_e1b(if cfg.families.is_empty() {
+                std::slice::from_ref(&cfg.sig)
+            } else {
+                &cfg.families
+            }),
             osnma: None,
             osnma_authenticated: HashSet::new(),
         }
@@ -504,11 +537,13 @@ impl Receiver {
             let (window, ts_sec) = self.scheduler.window(fam);
             // Hand channels their own copy of the window (same cost as the
             // old per-fetch to_vec); the ring itself stays with the
-            // scheduler. M2 runs one family per session, so every channel
-            // belongs to the due family; M3 filters by family here.
+            // scheduler. Only the due family's channels step — matched by
+            // their code period.
             let iq_vec = window.to_vec();
+            let fam_period = self.families[fam].code_period_sec();
             self.channels
                 .par_iter_mut()
+                .filter(|(_, ch)| ch.code_period_sec() == fam_period)
                 .for_each(|(_id, channel)| channel.process_samples(&iq_vec, ts_sec));
             latest_ts = latest_ts.max(ts_sec);
         }
