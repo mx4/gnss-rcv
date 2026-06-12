@@ -66,8 +66,8 @@ const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
 /// Effective early-late discriminator slope (normalized output per unit code
-/// error) that sets the code-loop group delay [`dll_tau`]; calibrated to null
-/// the residual Doppler slope (history in `docs/dll-group-delay.md`).
+/// error) that sets the code-loop time constant [`dll_tau`]; calibrated to
+/// null the residual Doppler slope (history in `docs/dll-group-delay.md`).
 /// - **BPSK** (L1CA / SBAS): calibrated on gpssim (τ ≈ 0.157 s).
 const DLL_DISC_GAIN_BPSK: f64 = 3.18;
 /// - **BOC(1,1)** (Galileo E1): the *same* value — the loop's effective gain
@@ -84,11 +84,12 @@ const DLL_DISC_GAIN_BPSK: f64 = 3.18;
 ///   experiments.
 const DLL_DISC_GAIN_BOC: f64 = 3.18;
 
-/// Code-loop group delay = 1/(loop velocity gain). `run_dll` corrects `code_off`
-/// at rate `(B_DLL/0.25)·disc_gain` per unit error, so a code-Doppler ramp leaves a
-/// steady lag of (rate)·τ; the tracked code phase therefore lags the true one by
-/// code-Doppler·τ, a per-SV transmit-time bias ∝ Doppler we add back (see
-/// `code_off_sec` capture). Derived from B_DLL so it tracks any loop retune.
+/// Code-loop time constant τ = 1/(loop velocity gain): `run_dll` corrects
+/// `code_off` at rate `(B_DLL/0.25)·disc_gain` per unit code error. The loop's
+/// two derived gains follow from τ — the pull-in kick (τ/t_u is the deadbeat
+/// gain) and the rate-trim integrator (B_DLL/2τ, see its noise note) — and τ also
+/// scales the measurement-path Doppler-proportional correction (see the
+/// `code_off_sec` snapshot). Derived from B_DLL so all track any loop retune.
 fn dll_tau(disc_gain: f64) -> f64 {
     0.25 / (B_DLL * disc_gain)
 }
@@ -121,6 +122,8 @@ pub struct Tracking {
     sig_buf: Vec<Complex32>,  // reused scratch for the Doppler-mixed code period
     doppler_hz: f64,
     code_off_sec: f64,
+    code_rate_trim: f64,  // DLL integrator: residual code-rate error (s/s)
+    hot_disc_streak: u32, // consecutive DLL updates with the discriminator saturated
     cn0: f64,
     adr: f64,
     phi: f64,
@@ -625,6 +628,12 @@ impl Channel {
         self.trk.cn0 = 0.0;
         self.trk.adr = 0.0;
         self.trk.code_off_sec = 0.0;
+        // code_rate_trim deliberately survives re-locks: the rate it learns
+        // (dominated by the front end's sample-clock vs LO skew, ~850 ns/s on
+        // SJTU) is a receiver constant, not a per-pass quantity — re-winding
+        // from zero leaves every re-lock a ~10 s biased tail. It is zeroed
+        // only on a code-carrier divergence drop (known-bad loop state).
+        self.trk.hot_disc_streak = 0;
         self.trk.err_phase = 0.0;
         self.trk.sum_corr_p = 0.0;
         self.trk.sum_corr_e = 0.0;
@@ -916,10 +925,74 @@ impl Channel {
         if self.num_trk_samples.is_multiple_of(n) {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
-            let err_code = (e - l) / (e + l) / 2.0 * self.code_sec / self.code_len as f64;
-            // First-order loop, gain 4·Bn — this rate is the loop velocity gain
-            // whose inverse sets the DLL group delay (see dll_tau).
-            self.trk.code_off_sec -= B_DLL / 0.25 * err_code * self.code_sec * n as f64;
+            let disc = (e - l) / (e + l);
+            let err_code = disc / 2.0 * self.code_sec / self.code_len as f64;
+            let t_u = self.code_sec * n as f64;
+            // Loop forensics (GNSS_DLL_DEBUG=1): early/late balance, the loop
+            // state and the rate trim, every ~100 ms.
+            if self.num_trk_samples.is_multiple_of(10 * n)
+                && std::env::var("GNSS_DLL_DEBUG").is_ok()
+            {
+                log::warn!(
+                    "{}: DLLDBG ts={:.2} disc={:+.5} code_off_us={:+.4} trim_ns_s={:+.1} dopp={:+.1} cn0={:.1}",
+                    self.sv,
+                    self.ts_sec,
+                    disc,
+                    self.trk.code_off_sec * 1e6,
+                    self.trk.code_rate_trim * 1e9,
+                    self.trk.doppler_hz,
+                    self.trk.cn0
+                );
+            }
+            // Two-gear proportional path. In the linear region the velocity
+            // gain (B_DLL/0.25)·disc_gain = 1/τ trims noise around the peak;
+            // its maximum slew is ~±490 ns/s (|disc| = 1). A *persistently*
+            // hot discriminator means the loop is not filtering noise, it is
+            // behind — on the SJTU capture an ~850 ns/s sample-clock vs LO
+            // skew outran the linear slew entirely: the discriminator pegged
+            // at ~0.85 and the prompt walked off the peak in ~16 s, C/N0
+            // 50 -> 30, lock lost, re-acquire, repeat. The pull-in gear
+            // instead kicks out half the *estimated offset* per update
+            // (τ/t_u being the deadbeat gain), converging in a few updates
+            // without overshoot. Persistence (3 consecutive hot updates)
+            // keeps it spike-safe: the discriminator throws isolated
+            // one-update outliers (|disc| up to ~0.9 at 53 dB-Hz, synth GEO
+            // bench) that the linear gain absorbs as a ~9 ns blip but a
+            // deadbeat kick would turn into a ~35 ns pseudorange glitch.
+            self.trk.hot_disc_streak = if disc.abs() > 0.5 {
+                self.trk.hot_disc_streak + 1
+            } else {
+                0
+            };
+            let pull_in = self.trk.hot_disc_streak >= 3;
+            let gain = if pull_in {
+                0.5 * self.tau_dll / t_u
+            } else {
+                B_DLL / 0.25
+            };
+            // Rate trim — the loop integrator. A proportional-only loop
+            // chasing a steady code-rate error (front-end sample-clock vs LO
+            // skew, or code Doppler the carrier aiding misses) holds a
+            // permanent offset of rate·τ off the peak; the integrator learns
+            // the rate instead, so the tracked phase converges onto the true
+            // peak. The gain (B_DLL/4τ, well below critical damping) trades
+            // windup speed for trim noise: the trim's random walk feeds
+            // straight into the pseudoranges, and at critical damping it
+            // costs ~3 m on the synth GEO bench vs ~1 m here (SJTU's 850 ns/s
+            // still winds up in ~10 s, bridged by the pull-in gear). The
+            // learning input clamps the discriminator to its linear range —
+            // beyond it a saturated discriminator measures direction, not
+            // rate (and a hard |disc| ≤ 0.3 learning *gate* deadlocks: the
+            // kick/linear equilibrium parks right at the pull-in threshold,
+            // never entering the gate, and the trim stays unlearned forever).
+            // No learning during the FLL second — carrier transients there
+            // are code-rate garbage it would faithfully memorize.
+            let err_learn = disc.clamp(-0.3, 0.3) / 2.0 * self.code_sec / self.code_len as f64;
+            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN {
+                self.trk.code_rate_trim -= 0.25 * B_DLL / self.tau_dll * err_learn * t_u;
+            }
+            self.trk.code_off_sec += self.trk.code_rate_trim * t_u;
+            self.trk.code_off_sec -= gain * err_code * t_u;
             self.trk.sum_corr_e = 0.0;
             self.trk.sum_corr_l = 0.0;
         }
@@ -1052,9 +1125,14 @@ impl Channel {
     /// (−1)ⁿ flip, covering the few seconds before this correction engages.
     fn monitor_code_carrier_consistency(&mut self) {
         let txp = self.num_trk_samples as f64 * self.code_sec - self.trk.code_off_sec;
-        // Establish the baseline once past carrier pull-in.
+        // Establish the baseline once past carrier pull-in AND the code-loop
+        // rate-trim windup: the trim transient bends the early transmit-phase
+        // slope, and a baseline taken across it mis-calibrates the healthy
+        // divergence — on the synth GEO bench that poisoned baseline (−103 Hz
+        // vs a true ~0) got a clean 52 dB-Hz channel dropped as divergent the
+        // moment the trim settled.
         if self.trk.txp0 == 0.0 {
-            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN + 1.0 {
+            if self.num_trk_samples as f64 * self.code_sec > T_FPULLIN + 4.0 {
                 self.trk.txp_ts0 = self.ts_sec;
                 self.trk.txp0 = txp;
             }
@@ -1120,6 +1198,9 @@ impl Channel {
                             self.trk.div_ema,
                             self.ts_sec,
                         );
+                        // The walk-off may have been steered by a bad learned
+                        // code rate; relearn from scratch on the next lock.
+                        self.trk.code_rate_trim = 0.0;
                         self.idle_start();
                         return;
                     }
@@ -1165,11 +1246,24 @@ impl Channel {
         // absolute code_off (common cross-SV reference from acquisition) carries the
         // sub-ms range and must NOT be differenced away at the anchor.
         //
-        // The code (DLL) loop has a finite group delay (self.tau_dll), so the
-        // tracked code phase lags the true one by code-Doppler · τ. Uncompensated
-        // this is a per-SV transmit-time bias ∝ Doppler (gpssim residual slope
-        // ~-0.03 m/Hz, ~170 m; far larger for E1's BOC). Add it back.
-        let dll_lag = self.trk.doppler_hz / self.fc * self.tau_dll;
+        // Doppler-proportional transmit-time correction, calibrated end-to-end
+        // to null the pseudoranges' residual-vs-Doppler slope (τ via
+        // DLL_DISC_GAIN_*, history in docs/dll-group-delay.md). Long
+        // attributed to DLL group delay, but the code loop holds no such lag:
+        // with the carrier aiding plus the rate-trim integrator, both the
+        // discriminator and the trim sit at zero across gpssim's ±3 kHz
+        // Doppler spread (trim within ±15 ns/s), yet removing this term still
+        // costs σ 1.6 m -> 48 m there. The slope's real source is therefore
+        // an epoch-latency-like bias elsewhere in the measurement path — a
+        // Δt of 0.157 s produces exactly λ·Δt ≈ 0.03 m/Hz, the calibrated
+        // value (compare the I/NAV 2.000 s anchor story at DLL_DISC_GAIN_BOC).
+        // Until that source is found, the calibrated correction stays.
+        // GNSS_DLL_LAG=off disables it for per-capture A/B calibration runs.
+        let dll_lag = if std::env::var("GNSS_DLL_LAG").is_ok_and(|v| v == "off") {
+            0.0
+        } else {
+            self.trk.doppler_hz / self.fc * self.tau_dll
+        };
         self.nav.meas.code_off_sec = self.trk.code_off_sec + dll_lag;
 
         if self.num_trk_samples as f64 * self.code_sec < T_FPULLIN {

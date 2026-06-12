@@ -264,6 +264,9 @@ fn synthetic_geometry_solves_to_truth() {
 fn sbas_fast_corrections_recover_broadcast_clock_errors() {
     use crate::constants::SPEED_OF_LIGHT;
     use crate::sbas_corr::test_msgs;
+    let _ = env_logger::builder()
+        .filter_level(log::LevelFilter::Warn)
+        .try_init();
 
     let (fs, fi) = (2_046_000.0, 0.0);
     let truth = [4_396_463.3, 474_169.7, 4_581_510.0];
