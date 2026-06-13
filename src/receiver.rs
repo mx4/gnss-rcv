@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::channel::{AcqFftCache, Channel, ChannelConfig};
+use crate::channel::{AcqFftCache, Channel, ChannelConfig, MAX_CONCURRENT_ACQ};
 use crate::code::Signal;
 use crate::device::RtlSdrDevice;
 use crate::ephemeris::{Ephemeris as RxEphemeris, Measurement};
@@ -604,6 +604,36 @@ impl Receiver {
             // their code period.
             let iq_vec = window.to_vec();
             let fam_period = self.families[fam].code_period_sec();
+
+            // Acquisition admission: cap how many of this family's channels
+            // search at once (each holds a sum_p grid — see MAX_CONCURRENT_ACQ).
+            // Channels never self-promote, so this is the only Idle -> Acquisition
+            // path: count in-flight searchers, then admit backoff-ready idle
+            // channels, longest-waiting first (fair, no starvation), up to the
+            // cap. Runs before the FFT-cache union so admittees are covered now.
+            let in_flight = self
+                .channels
+                .values()
+                .filter(|ch| ch.code_period_sec() == fam_period && ch.is_acquiring())
+                .count();
+            let free = MAX_CONCURRENT_ACQ.saturating_sub(in_flight);
+            if free > 0 {
+                let mut ready: Vec<(SV, usize)> = self
+                    .channels
+                    .iter()
+                    .filter(|(_, ch)| ch.code_period_sec() == fam_period)
+                    .filter_map(|(sv, ch)| ch.acq_wait().map(|waited| (*sv, waited)))
+                    .collect();
+                // Longest wait first; ties broken by SV so admission — and thus
+                // the lock order and the resulting fix — is reproducible, not a
+                // function of the channel map's per-process-random iteration order.
+                ready.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                for (sv, _) in ready.into_iter().take(free) {
+                    if let Some(ch) = self.channels.get_mut(&sv) {
+                        ch.admit_acquisition();
+                    }
+                }
+            }
 
             // Shared acquisition FFT cache: the per-bin carrier-mixed forward
             // FFT is PRN-independent, so compute each searched bin once per

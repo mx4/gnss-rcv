@@ -40,6 +40,13 @@ const T_IDLE: f64 = 3.0;
 const ACQ_FAIL_GRACE: u32 = 20;
 const T_IDLE_MAX: f64 = 30.0;
 const T_ACQ: f64 = 0.01; // 10msec acquisition time
+// Cap on channels searching (each holding a sum_p grid: 75 bins × code_sp × f32,
+// ~30 MB at 25 Msps Galileo) at once. Every channel is processed in parallel, so
+// without a cap a cold start allocated one grid per absent PRN (~1 GB). The
+// receiver admits at most this many backoff-ready idle channels per step; a slot
+// frees the instant a search locks or fails (≤ T_ACQ), so cold-start coverage
+// costs ~ceil(N/cap)·T_ACQ (tens of ms), not acquisition sensitivity.
+pub const MAX_CONCURRENT_ACQ: usize = 8;
 // SBAS search throttles (the block is on by default, so its 19 mostly-absent
 // PRNs must stay cheap): GEOs are stationary, so once the receiver-side LO
 // offset is known from any tracking channel, the Doppler search shrinks to
@@ -279,6 +286,11 @@ pub struct Channel {
 
     fft_planner: FftPlanner<f32>,
     state: State,
+    // Set by idle_process when the backoff has elapsed: this idle channel wants
+    // to search. The receiver admits up to MAX_CONCURRENT_ACQ such channels into
+    // Acquisition per step (a channel never self-promotes), capping how many
+    // sum_p grids exist at once. Cleared on admission.
+    wants_acq: bool,
 
     pub ts_sec: f64, // current time
     pub num_trk_periods: usize,
@@ -516,7 +528,12 @@ impl Channel {
             num_trk_periods: 0,
             num_tx_codes: 0.0,
 
-            state: State::Acquisition,
+            // Born Idle and wanting to search: the receiver admits it (and the
+            // rest) into Acquisition up to the concurrency cap, rather than every
+            // channel allocating a search grid on the first step (the cold-start
+            // memory spike). See receiver's admission pass.
+            state: State::Idle,
+            wants_acq: true,
             nav: Navigation::new(sv),
             hist: History::default(),
             scratch: Vec::new(),
@@ -625,8 +642,29 @@ impl Channel {
                 self.num_idl_periods = 0;
                 return;
             }
-            self.acquisition_start();
+            // Ready to search — but don't self-promote: flag it and let the
+            // receiver admit up to the concurrency cap (see admit_acquisition).
+            self.wants_acq = true;
         }
+    }
+
+    /// True while this channel is searching (holds a sum_p grid). The receiver
+    /// counts these to enforce the acquisition concurrency cap.
+    pub fn is_acquiring(&self) -> bool {
+        self.state == State::Acquisition
+    }
+
+    /// An idle channel whose backoff has elapsed and is waiting for a search
+    /// slot, with how long it has waited (for fair, longest-first admission).
+    pub fn acq_wait(&self) -> Option<usize> {
+        (self.wants_acq && self.state == State::Idle).then_some(self.num_idl_periods)
+    }
+
+    /// Admit this channel into Acquisition (called by the receiver under the
+    /// concurrency cap). Allocates the search grid via acquisition_start.
+    pub fn admit_acquisition(&mut self) {
+        self.wants_acq = false;
+        self.acquisition_start();
     }
 
     fn acquisition_init(&mut self) {
@@ -769,9 +807,8 @@ impl Channel {
     }
 
     fn acquisition_process(&mut self, iq_vec: &[Complex32], cache: Option<&AcqFftCache>) {
-        // Channels are *born* in Acquisition without passing through
-        // acquisition_start (which sizes the grid for the attempt) — set up
-        // here on the first pass.
+        // Defensive: admission (admit_acquisition → acquisition_start) already
+        // sized the grid for this attempt, so this normally does nothing.
         if self.acq.sum_p.len() != self.acq.bin_range.1 - self.acq.bin_range.0 {
             self.acquisition_init();
         }
