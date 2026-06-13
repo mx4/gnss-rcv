@@ -19,6 +19,7 @@ use crate::util::doppler_shifted_carrier;
 use crate::util::max_with_idx;
 use crate::util::{calc_correlation_inplace, finish_correlation_inplace};
 
+// === Correlator geometry ===
 /// Early/late correlator spacing, in chips (prompt ± half a chip). The
 /// early-late discriminator's slope — and through it the DLL group delay —
 /// depends on the correlation-peak shape *relative to this spacing*; that
@@ -31,14 +32,19 @@ const SP_CORR: f64 = 0.5;
 /// rate (3.3 chips at 25 MHz, inside the peak beyond ~54 MHz); in chips it is
 /// rate-invariant. Verified no C/N0 shift at 2.046/25 MHz (synth bench, 45 dB-Hz).
 const NEUTRAL_CORR: f64 = 40.0;
+
+// === Idle / acquisition backoff ===
 const T_IDLE: f64 = 3.0;
+const T_IDLE_SBAS: f64 = 10.0;
+const T_IDLE_MAX: f64 = 30.0;
 // A satellite in view acquires within a handful of attempts; the 10 ms
 // acquisition CN0 estimate is noisy near the threshold, so a weak-but-real SV
 // may fail several times before it locks. Keep the normal retry rate for this
 // many failures (well above what any visible SV needs), then back off the idle
 // time so a truly-absent PRN stops burning the FFT search every few seconds.
 const ACQ_FAIL_GRACE: u32 = 20;
-const T_IDLE_MAX: f64 = 30.0;
+
+// === Acquisition search ===
 const T_ACQ: f64 = 0.01; // 10msec acquisition time
 // Cap on channels searching (each holding a sum_p grid: 75 bins × code_sp × f32,
 // ~30 MB at 25 Msps Galileo) at once. Every channel is processed in parallel, so
@@ -47,14 +53,12 @@ const T_ACQ: f64 = 0.01; // 10msec acquisition time
 // frees the instant a search locks or fails (≤ T_ACQ), so cold-start coverage
 // costs ~ceil(N/cap)·T_ACQ (tens of ms), not acquisition sensitivity.
 pub const MAX_CONCURRENT_ACQ: usize = 8;
-// SBAS search throttles (the block is on by default, so its 19 mostly-absent
-// PRNs must stay cheap): GEOs are stationary, so once the receiver-side LO
-// offset is known from any tracking channel, the Doppler search shrinks to
-// LO ± this spread (vs the full ±12 kHz). Idle longer between attempts (the
-// 1 msg/s correction stream loses nothing to a slow first lock), and stop
-// searching altogether once this many GEOs track — every GEO of a system
-// broadcasts the same corrections, two covers redundancy.
-const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
+// Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
+// captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
+// still lands inside the window, on top of the +/-5 kHz of true GPS Doppler. The
+// bin count keeps the step at ~320 Hz (2*12000/75) so resolution is unchanged.
+const DOPPLER_SPREAD_HZ: f64 = 12000.0;
+const DOPPLER_SPREAD_BINS: usize = 75;
 // MEO search half-width once the LO offset is known: ±5 kHz of physical
 // Doppler plus margin for LO drift since the measurement.
 const ACQ_SPREAD_LO_KNOWN_HZ: f64 = 6000.0;
@@ -66,20 +70,35 @@ const ACQ_SPREAD_LO_KNOWN_HZ: f64 = 6000.0;
 // (The exact fix — subtract each SV's ephemeris+position-predicted Doppler for a
 // pure LO from one lock — waits on the almanac/position-aided acquisition work.)
 const ACQ_LO_MIN_SVS: usize = 3;
-const T_IDLE_SBAS: f64 = 10.0;
+
+// === SBAS throttles ===
+// SBAS search throttles (the block is on by default, so its 19 mostly-absent
+// PRNs must stay cheap): GEOs are stationary, so once the receiver-side LO
+// offset is known from any tracking channel, the Doppler search shrinks to
+// LO ± this spread (vs the full ±12 kHz). Idle longer between attempts (the
+// 1 msg/s correction stream loses nothing to a slow first lock), and stop
+// searching altogether once this many GEOs track — every GEO of a system
+// broadcasts the same corrections, two covers redundancy.
+const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
 const SBAS_TRACKED_ENOUGH: usize = 2;
 // Tracking this long without one CRC-valid message marks a SBAS channel as a
 // cross-correlation false lock (a real GEO frames within ~3 s at 1 msg/s).
 const SBAS_MSG_TIMEOUT_SEC: f64 = 12.0;
+
+// === Tracking-loop timing ===
 const T_FPULLIN: f64 = 1.0;
 const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
 const HALF_RATE_WINDOW: f64 = 3.0; // code-carrier Doppler slope window (s)
 const T_DLL: f64 = 0.01; // non-coherent integration time for DLL
 const T_CN0: f64 = 1.0; // averaging time for C/N0
+
+// === Loop bandwidths ===
 const B_FLL_WIDE: f64 = 10.0; // bandwidth of FLL wide Hz
 const B_FLL_NARROW: f64 = 2.0; // bandwidth of FLL narrow Hz
 const B_PLL: f64 = 10.0; // bandwidth of PLL filter Hz
 const B_DLL: f64 = 0.5; // bandwidth of DLL filter Hz
+
+// === DLL discriminator gain ===
 /// Effective early-late discriminator slope (normalized output per unit code
 /// error) that sets the code-loop time constant [`dll_tau`] — a loop-tuning
 /// constant only (pull-in and rate-trim gears); it no longer carries any
@@ -114,12 +133,7 @@ fn dll_tau(disc_gain: f64) -> f64 {
     0.25 / (B_DLL * disc_gain)
 }
 
-// Acquisition Doppler search: +/-12 kHz so a large front-end LO offset (some
-// captures sit several kHz off L1, e.g. the CTTC recording's SVs at +5..+10 kHz)
-// still lands inside the window, on top of the +/-5 kHz of true GPS Doppler. The
-// bin count keeps the step at ~320 Hz (2*12000/75) so resolution is unchanged.
-const DOPPLER_SPREAD_HZ: f64 = 12000.0;
-const DOPPLER_SPREAD_BINS: usize = 75;
+// === Diagnostics / history ===
 // Full history depth, kept only when diagnostics are consumed (--plots or the UI
 // tab). The five ring buffers at this depth are ~1.5 MB/tracking channel plus an
 // equal published clone — pure diagnostic weight a headless run never reads.
