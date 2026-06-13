@@ -616,6 +616,41 @@ impl Receiver {
                 .values()
                 .filter(|ch| ch.code_period_sec() == fam_period && ch.is_acquiring())
                 .count();
+            if let Some(c) = self
+                .channels
+                .iter()
+                .find_map(|(sv, c)| (sv.prn == 1 && c.code_period_sec() == fam_period).then_some(c))
+            {
+                eprintln!("E01 {}", c.dbg_state());
+            }
+            {
+                use std::sync::atomic::AtomicUsize;
+                static MXG: AtomicUsize = AtomicUsize::new(0);
+                let grids = self
+                    .channels
+                    .values()
+                    .filter(|c| c.acq_grid_bytes() > 0)
+                    .count();
+                let bytes: usize = self.channels.values().map(|c| c.acq_grid_bytes()).sum();
+                let mib = bytes / 1048576;
+                if mib > MXG.fetch_max(mib, Ordering::Relaxed) {
+                    let idle_g = self
+                        .channels
+                        .values()
+                        .filter(|c| {
+                            !c.is_acquiring() && !c.is_state_tracking() && c.acq_grid_bytes() > 0
+                        })
+                        .count();
+                    let trk_g = self
+                        .channels
+                        .values()
+                        .filter(|c| c.is_state_tracking() && c.acq_grid_bytes() > 0)
+                        .count();
+                    eprintln!(
+                        "DBG sum_p ~{mib} MiB: {grids} grids (idle_with_grid={idle_g} trk_with_grid={trk_g} in_flight={in_flight})"
+                    );
+                }
+            }
             let free = MAX_CONCURRENT_ACQ.saturating_sub(in_flight);
             if free > 0 {
                 let mut ready: Vec<(SV, usize)> = self

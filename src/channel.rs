@@ -58,6 +58,14 @@ const SBAS_DOPPLER_SPREAD_HZ: f64 = 3000.0;
 // MEO search half-width once the LO offset is known: ±5 kHz of physical
 // Doppler plus margin for LO drift since the measurement.
 const ACQ_SPREAD_LO_KNOWN_HZ: f64 = 6000.0;
+// Minimum tracking SVs before the LO-offset estimate is trusted to narrow the
+// search. A tracked SV's Doppler is LO + that SV's own physical Doppler (±5 kHz),
+// so one lock mis-centres the median by up to ±5 kHz — narrowing to ±6 kHz then
+// silently excludes opposite-Doppler SVs. The median over several SVs averages
+// the per-SV terms out and approximates the true LO; until then, full sweep.
+// (The exact fix — subtract each SV's ephemeris+position-predicted Doppler for a
+// pure LO from one lock — waits on the almanac/position-aided acquisition work.)
+const ACQ_LO_MIN_SVS: usize = 3;
 const T_IDLE_SBAS: f64 = 10.0;
 const SBAS_TRACKED_ENOUGH: usize = 2;
 // Tracking this long without one CRC-valid message marks a SBAS channel as a
@@ -576,6 +584,9 @@ impl Channel {
     }
 
     fn idle_start(&mut self) {
+        if !self.acq.sum_p.is_empty() {
+            eprintln!("DBG idle_start {} freeing {} rows", self.sv, self.acq.sum_p.len());
+        }
         // Idle channels hold no search state, no mix scratch, and no tracking
         // code (rebuilt on the next lock). The acq FFT is kept: an idle channel
         // re-acquires, and dropping it from a tracking channel happens on lock.
@@ -650,8 +661,14 @@ impl Channel {
 
     /// True while this channel is searching (holds a sum_p grid). The receiver
     /// counts these to enforce the acquisition concurrency cap.
+    pub fn acq_grid_bytes(&self) -> usize {
+        self.acq.sum_p.iter().map(|r| r.len()).sum::<usize>() * 4
+    }
     pub fn is_acquiring(&self) -> bool {
         self.state == State::Acquisition
+    }
+    pub fn dbg_state(&self) -> String {
+        format!("{:?} rows={} nap={}", self.state, self.acq.sum_p.len(), self.num_acq_periods)
     }
 
     /// An idle channel whose backoff has elapsed and is waiting for a search
@@ -677,11 +694,13 @@ impl Channel {
         self.num_idl_periods = 0;
         self.num_trk_periods = 0;
         // The ±12 kHz sweep exists for the *unknown front-end LO offset*, not
-        // for satellite dynamics — which is common-mode, so any tracking
-        // channel's Doppler measures it (median, against outliers). Once one
-        // is available, every search shrinks to LO ± the physical Doppler
-        // span: ±6 kHz for MEO satellites (±5 kHz orbital + margin), ±3 kHz
-        // for geostationary SBAS. Until then the full sweep stands.
+        // for satellite dynamics — which is common-mode, so the tracking
+        // channels' Doppler measures it (median, against outliers). Once
+        // ACQ_LO_MIN_SVS are tracking, every search shrinks to LO ± the physical
+        // Doppler span: ±6 kHz for MEO satellites (±5 kHz orbital + margin),
+        // ±3 kHz for geostationary SBAS. Until then the full sweep stands — a
+        // too-small sample mis-estimates the LO and would exclude SVs (see
+        // ACQ_LO_MIN_SVS).
         self.acq.bin_range = (0, DOPPLER_SPREAD_BINS);
         let dopplers: Vec<f64> = {
             let st = self.pub_state.lock().unwrap();
@@ -691,7 +710,7 @@ impl Channel {
                 .map(|cs| cs.doppler_hz)
                 .collect()
         };
-        if !dopplers.is_empty() {
+        if dopplers.len() >= ACQ_LO_MIN_SVS {
             let mut d = dopplers;
             d.sort_by(f64::total_cmp);
             let lo_offset = d[d.len() / 2];

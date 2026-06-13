@@ -9,6 +9,7 @@ resources/*
 !resources/manifest.json
 gnss.log
 plots/
+dhat-heap.json
 # OSNMA trust-anchor downloads from the GSC portal / destevez.net
 # (the values in use are embedded in src/osnma.rs and documented in docs/osnma.md)
 /OSNMA_*

@@ -52,3 +52,6 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 
 [target.'cfg(unix)'.dependencies]
 rtlsdr_mt = { git = 'https://github.com/mx4/rtlsdr_mt.rs.git', rev = '8ae8911b06be9680b92ef40367e72134b186aae9' }
+
+[dev-dependencies]
+dhat = "0.3"

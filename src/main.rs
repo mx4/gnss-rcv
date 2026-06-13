@@ -34,8 +34,8 @@ struct Options {
     sig: Option<String>,
     #[arg(short = 'd', long, help = "use rtl-sdr device")]
     use_device: bool,
-    #[arg(short = 'l', long, help = "path to log file", default_value = "")]
-    log_file: PathBuf,
+    #[arg(short = 'l', long, help = "path to log file")]
+    log_file: Option<PathBuf>,
     #[arg(
         short = 't',
         long,
@@ -94,8 +94,8 @@ struct Options {
     json: Option<PathBuf>,
 }
 
-fn init_logging(log_file: &PathBuf) {
-    if !log_file.as_os_str().is_empty() {
+fn init_logging(log_file: Option<&PathBuf>) {
+    if let Some(log_file) = log_file {
         println!("using log file: {}", log_file.display());
         let target = Box::new(File::create(log_file).expect("log file err"));
         env_logger::Builder::new()
@@ -157,7 +157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opt = Options::parse();
     let exit_req = Arc::new(AtomicBool::new(false));
 
-    init_logging(&opt.log_file);
+    init_logging(opt.log_file.as_ref());
     init_ctrl_c(exit_req.clone());
     if opt.plots {
         plot_remove_old_graph();
