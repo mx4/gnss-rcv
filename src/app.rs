@@ -707,17 +707,24 @@ impl GnssRcvApp {
                             // Run progress — fraction of the recording processed,
                             // plus the real-time factor; only while a run is active.
                             let (progress, realtime_x) = run;
-                            if self.active.load(Ordering::SeqCst)
-                                && let Some(p) = progress
-                            {
+                            if self.active.load(Ordering::SeqCst) {
+                                // `animate` keeps the bar visibly shimmering even when
+                                // the fraction barely moves (a long capture at sub-real-
+                                // time), and the "starting…" indeterminate bar covers
+                                // the gap before the first progress publish — so Start
+                                // gives instant feedback instead of a dead box during the
+                                // seconds of setup + cold-start acquisition.
+                                let bar = match progress {
+                                    Some(p) => egui::ProgressBar::new(p).text(format!(
+                                        "{:.0}%  ·  {:.1}× real-time",
+                                        p * 100.0,
+                                        realtime_x
+                                    )),
+                                    None => egui::ProgressBar::new(0.0).text("starting…"),
+                                };
                                 ui.add(
-                                    egui::ProgressBar::new(p)
-                                        .text(format!(
-                                            "{:.0}%  ·  {:.1}× real-time",
-                                            p * 100.0,
-                                            realtime_x
-                                        ))
-                                        .fill(egui::Color32::from_rgb(70, 110, 180)),
+                                    bar.fill(egui::Color32::from_rgb(70, 110, 180))
+                                        .animate(true),
                                 );
                             }
                         });
