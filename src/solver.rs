@@ -16,6 +16,8 @@ use crate::{
         compute_sv_position_ecef, elevation_azimuth, klobuchar_l1_delay_m, saastamoinen_tropo_m,
         sv_clock_correction,
     },
+    sbas_corr::SbasCorrections,
+    sbas_iono::SbasIonoGrid,
     state::GnssState,
     wls::wls_solve,
 };
@@ -194,6 +196,85 @@ fn make_solver(
     )
 }
 
+/// Per-epoch correction inputs shared across every SV in one solve — gathered
+/// once at the top of [`PositionSolver::compute_position`] and handed to
+/// [`PositionSolver::build_sv_measurement`].
+struct EpochContext {
+    now_gpst: Epoch,
+    /// Latest snapshot instant across families; each pseudorange is referenced
+    /// to it to strip the family-grid offset (see `compute_position`).
+    freshest: f64,
+    ts_sec: f64,
+    gps_sod: f64,
+    iono_valid: bool,
+    iono_alpha: [f64; 4],
+    iono_beta: [f64; 4],
+    sbas_iono: Option<SbasIonoGrid>,
+    sbas_corr: Option<SbasCorrections>,
+    truth_ecef: Option<Vector3<f64>>,
+}
+
+/// Mixed-pool week rebase: the LNAV week is 10 bits, pinned +2048 into the
+/// modern era at decode — right for post-2019 captures, 1024 weeks late for
+/// older ones (ion-lime 2017 -> "2037"). Galileo's 12-bit GST week is
+/// unambiguous, so when both constellations are present, snap each GPS-family
+/// SV's timeline onto Galileo's by the nearest 1024-week multiple (epochs and
+/// anchor shift together, so orbit/clock evaluation and phase pairing are
+/// untouched). Without this the pool spans 19.6 years and the solve is garbage.
+/// No-op when the pool has no Galileo SV.
+fn rebase_gps_weeks_onto_galileo(snaps: &mut [(Measurement, RxEphemeris)]) {
+    let Some(gal_ref) = snaps
+        .iter()
+        .find(|(_, e)| e.sv.constellation == Constellation::Galileo)
+        .map(|(_, e)| e.tow_gpst)
+    else {
+        return;
+    };
+    const WEEK: f64 = crate::constants::SECONDS_PER_WEEK as f64;
+    for (m, e) in snaps.iter_mut() {
+        if e.sv.constellation == Constellation::Galileo {
+            continue;
+        }
+        let dw = ((e.tow_gpst - gal_ref).to_seconds() / WEEK / 1024.0).round() * 1024.0;
+        if dw != 0.0 {
+            let shift = Duration::from_seconds(dw * WEEK);
+            log::warn!(
+                "{}: rebasing GPS week by {:+.0} weeks onto the Galileo timeline                          (LNAV 10-bit week rollover)",
+                e.sv,
+                -dw
+            );
+            e.tow_gpst -= shift;
+            e.toe_gpst -= shift;
+            e.toc_gpst -= shift;
+            m.tx_tow_gpst -= shift;
+        }
+    }
+}
+
+/// Each SV's transmit epoch: the message TOW anchor plus the transmit-phase time
+/// elapsed since it. `trk_phase - code_off` is the continuous transmit phase
+/// (channel.rs: code_off is the replica offset, opposite in sign to the received
+/// code phase).
+fn transmit_epochs(snaps: &[(Measurement, RxEphemeris)]) -> Vec<Epoch> {
+    snaps
+        .iter()
+        .map(|(mm, eph)| {
+            let phase = mm.trk_phase - mm.code_off_sec;
+            let elapsed = if mm.tx_anchored {
+                phase - mm.tow_trk_phase
+            } else {
+                (mm.trk_phase - mm.tow_trk_phase) - mm.code_off_sec
+            };
+            let tow = if mm.tx_anchored {
+                mm.tx_tow_gpst
+            } else {
+                eph.tow_gpst
+            };
+            tow + Duration::from_seconds(elapsed)
+        })
+        .collect()
+}
+
 impl PositionSolver {
     #[allow(clippy::new_without_default)]
     pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
@@ -225,67 +306,17 @@ impl PositionSolver {
 
     /// Returns true if a position was resolved this call.
     pub fn compute_position(&mut self, ts_sec: f64, snaps: &[(Measurement, RxEphemeris)]) -> bool {
-        // Mixed-pool week rebase: the LNAV week is 10 bits, pinned +2048 into
-        // the modern era at decode — right for post-2019 captures, 1024 weeks
-        // late for older ones (ion-lime 2017 -> "2037"). Galileo's 12-bit GST
-        // week is unambiguous, so when both constellations are present, snap
-        // each GPS-family SV's timeline onto Galileo's by the nearest
-        // 1024-week multiple (epochs and anchor shift together, so orbit/
-        // clock evaluation and phase pairing are untouched). Without this the
-        // pool spans 19.6 years and the solve is garbage.
+        // Snap GPS's ambiguous 10-bit week onto Galileo's timeline when both are
+        // present, so a mixed pool doesn't span ~19.6 years (no-op otherwise).
         let mut snaps: Vec<(Measurement, RxEphemeris)> = snaps.to_vec();
-        if let Some(gal_ref) = snaps
-            .iter()
-            .find(|(_, e)| e.sv.constellation == Constellation::Galileo)
-            .map(|(_, e)| e.tow_gpst)
-        {
-            const WEEK: f64 = crate::constants::SECONDS_PER_WEEK as f64;
-            for (m, e) in snaps.iter_mut() {
-                if e.sv.constellation == Constellation::Galileo {
-                    continue;
-                }
-                let dw = ((e.tow_gpst - gal_ref).to_seconds() / WEEK / 1024.0).round() * 1024.0;
-                if dw != 0.0 {
-                    let shift = Duration::from_seconds(dw * WEEK);
-                    log::warn!(
-                        "{}: rebasing GPS week by {:+.0} weeks onto the Galileo timeline                          (LNAV 10-bit week rollover)",
-                        e.sv,
-                        -dw
-                    );
-                    e.tow_gpst -= shift;
-                    e.toe_gpst -= shift;
-                    e.toc_gpst -= shift;
-                    m.tx_tow_gpst -= shift;
-                }
-            }
-        }
+        rebase_gps_weeks_onto_galileo(&mut snaps);
         let snaps = &snaps[..];
 
         // Refresh this solver's epoch store; the gnss-rtk callback objects
         // read it if the fallback path runs.
         *self.ephs.lock().unwrap() = snaps.iter().map(|(_, e)| *e).collect();
 
-        let mut meas: Vec<SvMeasurement> = Vec::with_capacity(snaps.len());
-
-        let tx_gpst: Vec<Epoch> = snaps
-            .iter()
-            .map(|(mm, eph)| {
-                // Transmit phase = trk_phase - code_off (see channel.rs: code_off is
-                // the replica offset, opposite in sign to the received code phase).
-                let phase = mm.trk_phase - mm.code_off_sec;
-                let elapsed = if mm.tx_anchored {
-                    phase - mm.tow_trk_phase
-                } else {
-                    (mm.trk_phase - mm.tow_trk_phase) - mm.code_off_sec
-                };
-                let tow = if mm.tx_anchored {
-                    mm.tx_tow_gpst
-                } else {
-                    eph.tow_gpst
-                };
-                tow + Duration::from_seconds(elapsed)
-            })
-            .collect();
+        let tx_gpst = transmit_epochs(snaps);
 
         // Reception epoch. The receiver has no absolute clock, so we reconstruct
         // "now" from the transmit times: the latest (highest-elevation, closest)
@@ -319,8 +350,6 @@ impl PositionSolver {
                 (v.len() == 3).then(|| Vector3::new(v[0], v[1], v[2]))
             });
 
-        let params = UserParameters::new(UserProfile::Static, ClockProfile::Quartz);
-
         // Mixed-family staleness: each measurement's t_tx belongs to its own
         // snapshot instant, but families snapshot on different grids (C/A
         // every 1 ms, E1 every 4 ms). Referencing each pseudorange to the
@@ -331,225 +360,115 @@ impl PositionSolver {
             .map(|(m, _)| m.ts_sec)
             .fold(f64::NEG_INFINITY, f64::max);
 
+        let ctx = EpochContext {
+            now_gpst,
+            freshest,
+            ts_sec,
+            gps_sod,
+            iono_valid,
+            iono_alpha,
+            iono_beta,
+            sbas_iono,
+            sbas_corr,
+            truth_ecef,
+        };
+
         log::warn!("----- now_gpst={now_gpst:?}");
+        let mut meas: Vec<SvMeasurement> = Vec::with_capacity(snaps.len());
         for ((mm, eph), t_tx) in snaps.iter().zip(tx_gpst.iter()) {
-            let stale_sec = freshest - mm.ts_sec;
-            let pseudo_range_sec = (now_gpst - *t_tx).to_seconds() - stale_sec;
-            let clock_corr = sv_clock_correction(eph, now_gpst);
-
-            // This SV's broadcast residual-error variance (SBAS UDRE + slant
-            // GIVE), accumulated below and fed to the WLS as its weight prior.
-            let mut sv_var_m2 = 0.0;
-            // Ionosphere and troposphere both need a receiver position (pierce
-            // point / elevation angle). We have one once there's a previous fix;
-            // before that both corrections are 0 (a few metres, dwarfed by the
-            // first-fix transient anyway).
-            let (iono_m, tropo_m) = if let Some(rx_ecef) = self.last_fix_ecef {
-                let sat = compute_sv_position_ecef(eph, now_gpst);
-                let (elev, azim) = elevation_azimuth(rx_ecef, sat);
-                {
-                    let mut st = self.pub_state.lock().unwrap();
-                    if let Some(ch) = st.channels.get_mut(&eph.sv) {
-                        ch.elevation_deg = elev.to_degrees();
-                        ch.azimuth_deg = azim.to_degrees();
-                    }
-                }
-                let (lat, lon, h_m) =
-                    ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
-                // Ionosphere, best source first: the SBAS grid (measured, per
-                // pierce point, available within seconds of tracking a GEO),
-                // else Klobuchar (a climatological model whose coefficients
-                // need up to 12.5 min of GPS nav data). Either applies to every
-                // SV regardless of constellation — all signals here are L1
-                // (standard practice for Galileo); Galileo's own NeQuick-G
-                // is still just decoded inputs (eph.ai0/1/2), awaiting the
-                // model port. The SBAS grid can be sparse: outside its
-                // populated cells we fall back per-SV.
-                let iono = if elev > 0.0 {
-                    sbas_iono
-                        .as_ref()
-                        .and_then(|g| g.delay_var_m(lat, lon, elev, azim))
-                        .map(|(d, v)| {
-                            sv_var_m2 += v;
-                            d
-                        })
-                        .unwrap_or_else(|| {
-                            if iono_valid {
-                                klobuchar_l1_delay_m(
-                                    &iono_alpha,
-                                    &iono_beta,
-                                    lat,
-                                    lon,
-                                    elev,
-                                    azim,
-                                    gps_sod,
-                                )
-                            } else {
-                                0.0
-                            }
-                        })
-                } else {
-                    0.0
-                };
-                let tropo = saastamoinen_tropo_m(lat, h_m, elev);
-                (iono, tropo)
-            } else {
-                (0.0, 0.0)
-            };
-
-            log::warn!(
-                "{} - t_tx={t_tx:?} code_off_sec={:.7}",
-                eph.sv,
-                mm.code_off_sec
-            );
-            // SBAS differential corrections (DO-229 A.4.4.3), folded into the
-            // pseudorange: PR_corrected = PR + PRC (fast, clock-error
-            // dominated) + c·δclk − û·δpos (long-term; the line-of-sight
-            // projection stands in for moving the modelled SV — exact to
-            // |δpos|²/range, sub-mm). δpos needs a receiver position for û,
-            // so like iono/tropo it waits for the first fix; PRC and δclk
-            // apply from the start. Unlike iono these are per-SV, so the
-            // receiver-clock state cannot absorb them.
-            let mut sbas_m = 0.0;
-            if let Some(c) = &sbas_corr {
-                if let Some((prc, var)) = c.fast_prc_var_m(eph.sv, ts_sec) {
-                    sbas_m += prc;
-                    sv_var_m2 += var;
-                }
-                if let Some((dpos, dclk)) = c.long_term(eph.sv, eph.iode as u8, gps_sod) {
-                    sbas_m += SPEED_OF_LIGHT * dclk;
-                    if let Some(rx_ecef) = self.last_fix_ecef {
-                        let s = compute_sv_position_ecef(eph, now_gpst);
-                        let v = Vector3::new(s.0, s.1, s.2) - rx_ecef;
-                        sbas_m -= v.dot(&Vector3::from(dpos)) / v.norm();
-                    }
-                }
+            if let Some(m) = self.build_sv_measurement(mm, eph, *t_tx, &ctx) {
+                meas.push(m);
             }
-
-            log::warn!(
-                "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m tropo={tropo_m:.1}m sbas={sbas_m:+.1}m",
-                eph.sv,
-                pseudo_range_sec * 1000.0,
-                eph.tgd,
-            );
-
-            let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m + sbas_m;
-
-            // A non-finite pseudorange (e.g. a NaN correction from a garbage prior
-            // fix) would panic gnss-rtk's Duration math — drop the SV instead.
-            if !pr_m.is_finite() {
-                log::warn!("{}: dropping SV, non-finite pseudorange", eph.sv);
-                continue;
-            }
-
-            // The finished measurement: SV at transmit time rotated into the
-            // reception ECEF frame (Earth turns ωe·τ while the signal travels).
-            let we = EARTH_ROTATION_RATE * pseudo_range_sec;
-            let (cw, sw) = (we.cos(), we.sin());
-            let s = compute_sv_position_ecef(eph, *t_tx);
-            let m = SvMeasurement {
-                sv: eph.sv,
-                cn0: mm.cn0,
-                pr_m,
-                clk_m: clock_corr * SPEED_OF_LIGHT,
-                svp: [cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2],
-                galileo: eph.sv.constellation == Constellation::Galileo,
-                var_m2: sv_var_m2,
-            };
-
-            if let Some(truth) = truth_ecef {
-                let geom = ((m.svp[0] - truth[0]).powi(2)
-                    + (m.svp[1] - truth[1]).powi(2)
-                    + (m.svp[2] - truth[2]).powi(2))
-                .sqrt();
-                // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.
-                // residual = pr_m + clk_m - geom = c*dT_rx (common-mode rx clock).
-                log::warn!(
-                    "RESID {} pr={:.2}km geom={:.2}km clk={:+.3}km resid={:+.3}km",
-                    eph.sv,
-                    pr_m / 1000.0,
-                    geom / 1000.0,
-                    m.clk_m / 1000.0,
-                    (pr_m + m.clk_m - geom) / 1000.0
-                );
-            }
-            meas.push(m);
         }
 
         // The weighted+ISB WLS is the live solver (GNSS_SOLVER=rtk selects
         // gnss-rtk instead; it also remains the fallback if WLS fails).
         // Rationale + revert condition in `wls_solve`'s doc.
         if !std::env::var("GNSS_SOLVER").is_ok_and(|v| v == "rtk") {
-            let x0 = self.last_fix_ecef.map_or([0.0; 3], |p| [p[0], p[1], p[2]]);
-            let m: Vec<f64> = meas.iter().map(|m| m.pr_m + m.clk_m).collect();
-            let svp: Vec<[f64; 3]> = meas.iter().map(|m| m.svp).collect();
-            let gal: Vec<bool> = meas.iter().map(|m| m.galileo).collect();
-            let var: Vec<f64> = meas.iter().map(|m| m.var_m2).collect();
-            if let Some(sol) = wls_solve(&m, &svp, &gal, &var, x0) {
-                let pos = Vector3::new(sol.pos[0], sol.pos[1], sol.pos[2]);
-                // A 4-SV pool has no redundancy: Gauss-Newton seeded from the
-                // geocentre can converge to the mirror root of the two-solution
-                // GNSS ambiguity, and the self-calibrated sigmas cannot see it
-                // (4 measurements, 4 unknowns, residuals ~0). A terrestrial
-                // receiver sits near the geoid — reject anything else and let
-                // gnss-rtk (Bancroft-initialised) arbitrate.
-                let r = pos.norm();
-                if !(6.25e6..6.5e6).contains(&r) {
-                    log::warn!(
-                        "WLS solution off-Earth (|pos|={:.0} km); trying gnss-rtk",
-                        r / 1000.0
-                    );
-                } else {
-                    self.last_fix_ecef = Some(pos);
-                    let (lat_rad, lon_rad, height_m) =
-                        ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
-                    let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
-                    {
-                        let mut st = self.pub_state.lock().unwrap();
-                        st.latitude = lat;
-                        st.longitude = lon;
-                        st.height = height_m;
-                        st.hdop = sol.hdop;
-                        st.vdop = sol.vdop;
-                        st.fix_sv_count = meas.len();
-                    }
-                    let mut sig: Vec<String> = sol
-                        .sigma
-                        .iter()
-                        .map(|(c, s)| {
-                            let label = match c {
-                                Constellation::Galileo => "gal",
-                                _ => "gps",
-                            };
-                            format!("σ{label}={s:.1}m")
-                        })
-                        .collect();
-                    sig.sort();
-                    let sig = sig.join(" ");
-                    let isb = if sol.isb_m != 0.0 {
-                        format!(" isb={:+.1}ns", sol.isb_m / SPEED_OF_LIGHT * 1e9)
-                    } else {
-                        String::new()
-                    };
-                    log::warn!(
-                    "{}",
-                    format!(
-                        "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
-                        sol.hdop,
-                        sol.vdop,
-                        meas.len(),
-                        sol.cdt_m / SPEED_OF_LIGHT * 1e3
-                    )
-                    .green()
-                    );
-                    return true;
-                }
+            if self.try_wls(&meas) {
+                return true;
             }
             log::warn!("WLS solve failed or rejected; trying gnss-rtk");
         }
+        self.solve_rtk(&meas, now_gpst)
+    }
 
-        // gnss-rtk fallback/cross-check: its pool is built only here, from
-        // the same finished measurements.
+    /// Weighted-least-squares solve (the live path). Returns true iff it
+    /// published a fix; a failed solve or an off-Earth result returns false
+    /// (logging the latter) so the caller falls through to gnss-rtk.
+    fn try_wls(&mut self, meas: &[SvMeasurement]) -> bool {
+        let x0 = self.last_fix_ecef.map_or([0.0; 3], |p| [p[0], p[1], p[2]]);
+        let m: Vec<f64> = meas.iter().map(|m| m.pr_m + m.clk_m).collect();
+        let svp: Vec<[f64; 3]> = meas.iter().map(|m| m.svp).collect();
+        let gal: Vec<bool> = meas.iter().map(|m| m.galileo).collect();
+        let var: Vec<f64> = meas.iter().map(|m| m.var_m2).collect();
+        let Some(sol) = wls_solve(&m, &svp, &gal, &var, x0) else {
+            return false;
+        };
+        let pos = Vector3::new(sol.pos[0], sol.pos[1], sol.pos[2]);
+        // A 4-SV pool has no redundancy: Gauss-Newton seeded from the
+        // geocentre can converge to the mirror root of the two-solution
+        // GNSS ambiguity, and the self-calibrated sigmas cannot see it
+        // (4 measurements, 4 unknowns, residuals ~0). A terrestrial
+        // receiver sits near the geoid — reject anything else and let
+        // gnss-rtk (Bancroft-initialised) arbitrate.
+        let r = pos.norm();
+        if !(6.25e6..6.5e6).contains(&r) {
+            log::warn!(
+                "WLS solution off-Earth (|pos|={:.0} km); trying gnss-rtk",
+                r / 1000.0
+            );
+            return false;
+        }
+        self.last_fix_ecef = Some(pos);
+        let (lat_rad, lon_rad, height_m) =
+            ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
+        let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
+        {
+            let mut st = self.pub_state.lock().unwrap();
+            st.latitude = lat;
+            st.longitude = lon;
+            st.height = height_m;
+            st.hdop = sol.hdop;
+            st.vdop = sol.vdop;
+            st.fix_sv_count = meas.len();
+        }
+        let mut sig: Vec<String> = sol
+            .sigma
+            .iter()
+            .map(|(c, s)| {
+                let label = match c {
+                    Constellation::Galileo => "gal",
+                    _ => "gps",
+                };
+                format!("σ{label}={s:.1}m")
+            })
+            .collect();
+        sig.sort();
+        let sig = sig.join(" ");
+        let isb = if sol.isb_m != 0.0 {
+            format!(" isb={:+.1}ns", sol.isb_m / SPEED_OF_LIGHT * 1e9)
+        } else {
+            String::new()
+        };
+        log::warn!(
+            "{}",
+            format!(
+                "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
+                sol.hdop,
+                sol.vdop,
+                meas.len(),
+                sol.cdt_m / SPEED_OF_LIGHT * 1e3
+            )
+            .green()
+        );
+        true
+    }
+
+    /// gnss-rtk fallback/cross-check (also the path when GNSS_SOLVER=rtk): its
+    /// candidate pool is built here from the same finished measurements.
+    fn solve_rtk(&mut self, meas: &[SvMeasurement], now_gpst: Epoch) -> bool {
+        let params = UserParameters::new(UserProfile::Static, ClockProfile::Quartz);
         let pool: Vec<Candidate> = meas
             .iter()
             .map(|m| {
@@ -625,6 +544,159 @@ impl PositionSolver {
                 true
             }
         }
+    }
+
+    /// Build one SV's fully corrected measurement for the solve, or `None` if its
+    /// pseudorange comes out non-finite (a NaN correction from a garbage prior
+    /// fix, which would panic gnss-rtk's Duration math).
+    fn build_sv_measurement(
+        &self,
+        mm: &Measurement,
+        eph: &RxEphemeris,
+        t_tx: Epoch,
+        ctx: &EpochContext,
+    ) -> Option<SvMeasurement> {
+        let stale_sec = ctx.freshest - mm.ts_sec;
+        let pseudo_range_sec = (ctx.now_gpst - t_tx).to_seconds() - stale_sec;
+        let clock_corr = sv_clock_correction(eph, ctx.now_gpst);
+
+        // This SV's broadcast residual-error variance (SBAS UDRE + slant
+        // GIVE), accumulated below and fed to the WLS as its weight prior.
+        let mut sv_var_m2 = 0.0;
+        // Ionosphere and troposphere both need a receiver position (pierce
+        // point / elevation angle). We have one once there's a previous fix;
+        // before that both corrections are 0 (a few metres, dwarfed by the
+        // first-fix transient anyway).
+        let (iono_m, tropo_m) = if let Some(rx_ecef) = self.last_fix_ecef {
+            let sat = compute_sv_position_ecef(eph, ctx.now_gpst);
+            let (elev, azim) = elevation_azimuth(rx_ecef, sat);
+            {
+                let mut st = self.pub_state.lock().unwrap();
+                if let Some(ch) = st.channels.get_mut(&eph.sv) {
+                    ch.elevation_deg = elev.to_degrees();
+                    ch.azimuth_deg = azim.to_degrees();
+                }
+            }
+            let (lat, lon, h_m) =
+                ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
+            // Ionosphere, best source first: the SBAS grid (measured, per
+            // pierce point, available within seconds of tracking a GEO),
+            // else Klobuchar (a climatological model whose coefficients
+            // need up to 12.5 min of GPS nav data). Either applies to every
+            // SV regardless of constellation — all signals here are L1
+            // (standard practice for Galileo); Galileo's own NeQuick-G
+            // is still just decoded inputs (eph.ai0/1/2), awaiting the
+            // model port. The SBAS grid can be sparse: outside its
+            // populated cells we fall back per-SV.
+            let iono = if elev > 0.0 {
+                ctx.sbas_iono
+                    .as_ref()
+                    .and_then(|g| g.delay_var_m(lat, lon, elev, azim))
+                    .map(|(d, v)| {
+                        sv_var_m2 += v;
+                        d
+                    })
+                    .unwrap_or_else(|| {
+                        if ctx.iono_valid {
+                            klobuchar_l1_delay_m(
+                                &ctx.iono_alpha,
+                                &ctx.iono_beta,
+                                lat,
+                                lon,
+                                elev,
+                                azim,
+                                ctx.gps_sod,
+                            )
+                        } else {
+                            0.0
+                        }
+                    })
+            } else {
+                0.0
+            };
+            let tropo = saastamoinen_tropo_m(lat, h_m, elev);
+            (iono, tropo)
+        } else {
+            (0.0, 0.0)
+        };
+
+        log::warn!(
+            "{} - t_tx={t_tx:?} code_off_sec={:.7}",
+            eph.sv,
+            mm.code_off_sec
+        );
+        // SBAS differential corrections (DO-229 A.4.4.3), folded into the
+        // pseudorange: PR_corrected = PR + PRC (fast, clock-error
+        // dominated) + c·δclk − û·δpos (long-term; the line-of-sight
+        // projection stands in for moving the modelled SV — exact to
+        // |δpos|²/range, sub-mm). δpos needs a receiver position for û,
+        // so like iono/tropo it waits for the first fix; PRC and δclk
+        // apply from the start. Unlike iono these are per-SV, so the
+        // receiver-clock state cannot absorb them.
+        let mut sbas_m = 0.0;
+        if let Some(c) = &ctx.sbas_corr {
+            if let Some((prc, var)) = c.fast_prc_var_m(eph.sv, ctx.ts_sec) {
+                sbas_m += prc;
+                sv_var_m2 += var;
+            }
+            if let Some((dpos, dclk)) = c.long_term(eph.sv, eph.iode as u8, ctx.gps_sod) {
+                sbas_m += SPEED_OF_LIGHT * dclk;
+                if let Some(rx_ecef) = self.last_fix_ecef {
+                    let s = compute_sv_position_ecef(eph, ctx.now_gpst);
+                    let v = Vector3::new(s.0, s.1, s.2) - rx_ecef;
+                    sbas_m -= v.dot(&Vector3::from(dpos)) / v.norm();
+                }
+            }
+        }
+
+        log::warn!(
+            "{} - prng={:.2} msec tgd={:+e} clock_corr={clock_corr:+.3e} iono={iono_m:.1}m tropo={tropo_m:.1}m sbas={sbas_m:+.1}m",
+            eph.sv,
+            pseudo_range_sec * 1000.0,
+            eph.tgd,
+        );
+
+        let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m + sbas_m;
+
+        // A non-finite pseudorange (e.g. a NaN correction from a garbage prior
+        // fix) would panic gnss-rtk's Duration math — drop the SV instead.
+        if !pr_m.is_finite() {
+            log::warn!("{}: dropping SV, non-finite pseudorange", eph.sv);
+            return None;
+        }
+
+        // The finished measurement: SV at transmit time rotated into the
+        // reception ECEF frame (Earth turns ωe·τ while the signal travels).
+        let we = EARTH_ROTATION_RATE * pseudo_range_sec;
+        let (cw, sw) = (we.cos(), we.sin());
+        let s = compute_sv_position_ecef(eph, t_tx);
+        let m = SvMeasurement {
+            sv: eph.sv,
+            cn0: mm.cn0,
+            pr_m,
+            clk_m: clock_corr * SPEED_OF_LIGHT,
+            svp: [cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2],
+            galileo: eph.sv.constellation == Constellation::Galileo,
+            var_m2: sv_var_m2,
+        };
+
+        if let Some(truth) = ctx.truth_ecef {
+            let geom = ((m.svp[0] - truth[0]).powi(2)
+                + (m.svp[1] - truth[1]).powi(2)
+                + (m.svp[2] - truth[2]).powi(2))
+            .sqrt();
+            // t_tx is SV-time, so pr_m = geom + c*dT_rx - c*clock_corr.
+            // residual = pr_m + clk_m - geom = c*dT_rx (common-mode rx clock).
+            log::warn!(
+                "RESID {} pr={:.2}km geom={:.2}km clk={:+.3}km resid={:+.3}km",
+                eph.sv,
+                pr_m / 1000.0,
+                geom / 1000.0,
+                m.clk_m / 1000.0,
+                (pr_m + m.clk_m - geom) / 1000.0
+            );
+        }
+        Some(m)
     }
 }
 
