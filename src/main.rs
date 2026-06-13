@@ -1,4 +1,5 @@
 use chrono::Local;
+use clap::Parser;
 use colored::Colorize;
 use coredump::register_panic_handler;
 use log::LevelFilter;
@@ -8,7 +9,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use clap::Parser;
 
 use gnss_rcv::code::Signal;
 use gnss_rcv::plots::{plot_generate_html, plot_remove_old_graph};
@@ -19,7 +19,11 @@ use gnss_rcv::state::GnssState;
 #[derive(Parser)]
 #[command(name = "gnss-rcv", about = "gnss-rcv: GNSS receiver")]
 struct Options {
-    #[arg(short = 'f', long, default_value = "resources/nov_3_time_18_48_st_ives")]
+    #[arg(
+        short = 'f',
+        long,
+        default_value = "resources/nov_3_time_18_48_st_ives"
+    )]
     file: PathBuf,
     #[arg(short = 's', long, help = "host for rtl-sdr-tcp", default_value = "")]
     hostname: String,
@@ -83,7 +87,10 @@ struct Options {
         help = "stop as soon as the first position fix is computed"
     )]
     exit_on_fix: bool,
-    #[arg(long, help = "write an end-of-run JSON summary to <path> ('-' = stdout)")]
+    #[arg(
+        long,
+        help = "write an end-of-run JSON summary to <path> ('-' = stdout)"
+    )]
     json: Option<PathBuf>,
 }
 

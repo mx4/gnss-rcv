@@ -126,7 +126,13 @@ pub(crate) fn compute_sv_position_ecef(eph: &RxEphemeris, t: Epoch) -> (f64, f64
 pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)) -> (f64, f64) {
     let (lat, lon, h) = ecef2geodetic(rx_ecef[0], rx_ecef[1], rx_ecef[2], Ellipsoid::WGS84);
     let (az, elev, _range) = ecef2aer(
-        sat_ecef.0, sat_ecef.1, sat_ecef.2, lat, lon, h, Ellipsoid::WGS84,
+        sat_ecef.0,
+        sat_ecef.1,
+        sat_ecef.2,
+        lat,
+        lon,
+        h,
+        Ellipsoid::WGS84,
     );
     // ecef2aer reports azimuth in [0, 2π); fold to (−π, π] — the convention the
     // rest of the receiver assumes (synth's azimuth-sector binning, the signed
