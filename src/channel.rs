@@ -584,9 +584,6 @@ impl Channel {
     }
 
     fn idle_start(&mut self) {
-        if !self.acq.sum_p.is_empty() {
-            eprintln!("DBG idle_start {} freeing {} rows", self.sv, self.acq.sum_p.len());
-        }
         // Idle channels hold no search state, no mix scratch, and no tracking
         // code (rebuilt on the next lock). The acq FFT is kept: an idle channel
         // re-acquires, and dropping it from a tracking channel happens on lock.
@@ -661,14 +658,8 @@ impl Channel {
 
     /// True while this channel is searching (holds a sum_p grid). The receiver
     /// counts these to enforce the acquisition concurrency cap.
-    pub fn acq_grid_bytes(&self) -> usize {
-        self.acq.sum_p.iter().map(|r| r.len()).sum::<usize>() * 4
-    }
     pub fn is_acquiring(&self) -> bool {
         self.state == State::Acquisition
-    }
-    pub fn dbg_state(&self) -> String {
-        format!("{:?} rows={} nap={}", self.state, self.acq.sum_p.len(), self.num_acq_periods)
     }
 
     /// An idle channel whose backoff has elapsed and is waiting for a search
@@ -920,7 +911,11 @@ impl Channel {
                 self.num_acq_fails = self.num_acq_fails.saturating_add(1);
                 self.idle_start();
             }
-            self.acquisition_init();
+            // No acquisition_init() here: the attempt is over and the channel is
+            // now Tracking or Idle, both of which freed sum_p. Re-arming the grid
+            // here stranded a ~code_sp×bins f32 buffer on every non-searching
+            // channel (~1 GB across the set at 25 Msps). The next attempt is set
+            // up when the receiver re-admits this channel (admit_acquisition).
         }
     }
 
