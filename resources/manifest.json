@@ -184,7 +184,7 @@
     "size": 1200000000,
     "archive": "raw",
     "flags": "-t 2xi8 --fs 10000000 --fi 420000",
-    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
+    "note": "ION HackRF L1, 10 MHz; acquires ~11 SVs, nav-decodes and fixes (Netherlands ~52.18,4.49)",
     "tags": [
       "gps",
       "galileo"

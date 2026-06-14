@@ -38,6 +38,12 @@ build:
 validate:
     ./scripts/validate_fix.py
 
+# Quick fix smoke-test across every present recording (seek past warmup, run a
+# short --exit-on-fix window, check a fix at the right site). `just smoke ifen`
+# filters by name; pass-through args, e.g. `just smoke "-j 4"`.
+smoke *args:
+    ./scripts/smoke_fix.py {{args}}
+
 # Examples:
 #   just run resources/gpssim_2xi16 "-t 2xi16 -x"
 #   just run resources/L1_20211226_082212_12MHz_I.bin "-t i8 --fs 12M --fi 3M --sig E1B"
