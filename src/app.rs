@@ -20,11 +20,6 @@ use crate::state::GnssState;
 const WIDTH: usize = 650;
 const HEIGHT: usize = 700;
 
-/// Width of the left control/status column in the top panel (the sky plot fills
-/// whatever is to its right). Wide enough for the status line, snug enough that
-/// the boxes don't sprawl across the window.
-const LEFT_PANEL_W: f32 = 460.0;
-
 /// Common width for the format/signal dropdowns and the fs/fi fields, so the two
 /// columns of the controls grid line up.
 const FIELD_W: f32 = 115.0;
