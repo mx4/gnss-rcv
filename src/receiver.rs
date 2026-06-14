@@ -240,7 +240,11 @@ struct JsonSat {
     max_lock_s: f64,
     /// Time-to-first-lock (s); None if the PRN never locked long enough.
     ttfl_s: Option<f64>,
+    /// Sustained C/N0 (slow EMA of the tracked C/N0) — the honest "how strong is
+    /// this SV while tracking" figure; decays when an SV fades after acquisition.
     cn0: f64,
+    /// Peak C/N0 ever seen while tracking; can far overstate a faded SV.
+    peak_cn0: f64,
     subframes: u64,
     parity_errors: u64,
     ephemeris: bool,
@@ -862,7 +866,8 @@ impl Receiver {
                     tracked_s: c.tracked_secs(),
                     max_lock_s: c.max_lock_secs(),
                     ttfl_s: (st.first_lock_ts > 0.0).then_some(st.first_lock_ts),
-                    cn0: st.peak_cn0,
+                    cn0: st.mean_cn0,
+                    peak_cn0: st.peak_cn0,
                     subframes: st.subframes,
                     parity_errors: st.parity_errors,
                     ephemeris: c.is_ephemeris_complete(),
@@ -936,14 +941,15 @@ fn print_summary(sum: &RunSummary) {
         st.acq_attempts, st.acq_correlations, st.tracking_periods, st.subframes, st.parity_errors
     );
 
-    println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0 subfr parity eph fix");
+    // cn0 = sustained (EMA) C/N0, pk = peak ever seen while tracking.
+    println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0   pk subfr parity eph fix");
     for s in &sum.sats {
         let ttfl = s
             .ttfl_s
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
+            "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
             s.sv,
             s.locks,
             s.losses,
@@ -951,6 +957,7 @@ fn print_summary(sum: &RunSummary) {
             s.max_lock_s,
             ttfl,
             s.cn0,
+            s.peak_cn0,
             s.subframes,
             s.parity_errors,
             if s.ephemeris { "y" } else { "-" },

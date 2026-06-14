@@ -91,6 +91,7 @@ const T_NPULLIN: f64 = 1.5; // navigation data pullin time (s)
 const HALF_RATE_WINDOW: f64 = 3.0; // code-carrier Doppler slope window (s)
 const T_DLL: f64 = 0.01; // non-coherent integration time for DLL
 const T_CN0: f64 = 1.0; // averaging time for C/N0
+const CN0_MEAN_ALPHA: f64 = 0.2; // EMA weight (per T_CN0 update) for the sustained summary C/N0
 
 // === Loop bandwidths ===
 const B_FLL_WIDE: f64 = 10.0; // bandwidth of FLL wide Hz
@@ -269,6 +270,7 @@ pub struct ChannelStats {
     pub max_trk_streak: u64, // longest continuous tracking run (periods)
     pub first_lock_ts: f64,  // ts_sec of first lock (0 = never)
     pub peak_cn0: f64,       // best C/N0 seen while tracking
+    pub mean_cn0: f64,       // sustained C/N0: slow EMA of the tracked C/N0 (0 = never tracked)
     pub subframes: u64,      // LNAV subframes decoded (parity OK)
     pub parity_errors: u64,  // LNAV parity failures
     pub used_in_fix: bool,   // contributed to at least one successful fix
@@ -1166,6 +1168,16 @@ impl Channel {
                 let cn0 =
                     10.0 * (self.trk.sum_corr_p / self.trk.sum_corr_noise / self.code_sec).log10();
                 self.trk.cn0 += 0.5 * (cn0 - self.trk.cn0);
+                // Sustained C/N0 for the run summary: a slow EMA of the tracked
+                // C/N0 kept across the whole run (and across re-locks) alongside
+                // peak_cn0. Unlike the peak, this decays when an SV fades after
+                // acquisition, so a faded SV no longer reads as strong-but-
+                // undecodable in the per-SV table.
+                if self.stats.mean_cn0 == 0.0 {
+                    self.stats.mean_cn0 = self.trk.cn0;
+                } else {
+                    self.stats.mean_cn0 += CN0_MEAN_ALPHA * (self.trk.cn0 - self.stats.mean_cn0);
+                }
                 self.update_state_cn0();
             }
             self.trk.sum_corr_noise = 0.0;
