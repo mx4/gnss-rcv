@@ -74,6 +74,9 @@ pub struct ReceiverConfig {
     pub iq_file_type: IQFileType,
     pub fs: f64,
     pub fi: f64,
+    /// The recording's IF spectrum is inverted (high-side-LO mixing, e.g. the
+    /// ION IFEN SX3 capture). Flips the carrier->code aiding sign in tracking.
+    pub invert_spectrum: bool,
     pub off_msec: usize,
     pub sig: Signal,
     /// All signal families this session runs (each on its own scheduler
@@ -102,6 +105,7 @@ impl Default for ReceiverConfig {
             iq_file_type: IQFileType::TypePairFloat32,
             fs: 2_046_000.0,
             fi: 0.0,
+            invert_spectrum: false,
             off_msec: 0,
             sig: Signal::L1ca,
             families: Vec::new(),
@@ -492,6 +496,7 @@ impl Receiver {
                             sv,
                             fs,
                             fi: cfg.fi,
+                            invert_spectrum: cfg.invert_spectrum,
                             plots: cfg.plots,
                             diagnostics: cfg.diagnostics,
                         },

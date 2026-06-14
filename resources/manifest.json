@@ -118,8 +118,8 @@
     "dest": "ION_IFEN_Bands-L1.2bit",
     "size": 5725209600,
     "archive": "raw",
-    "flags": "-t 2bit --fs 20480000 --fi 5500000",
-    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). Uses the new 2-bit reader -- bit-order not yet confirmed against a live acquire",
+    "flags": "-t 2bit --fs 20480000 --fi 5500000 --invert-spectrum",
+    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). 2-bit reader: 4 samples/byte LSB-first (MSB-first scrambled the carrier, decoded nothing). SX3 spectrum is inverted (high-side LO) -> needs --invert-spectrum or the carrier-aided code loop slips and parity fails despite 50 dB-Hz. GPS fix at Munich (48.078,11.638), TTFF ~25s",
     "tags": [
       "gps",
       "galileo"

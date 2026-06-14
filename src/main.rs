@@ -73,6 +73,11 @@ struct Options {
         help = "search the SBAS L1 block (PRN 120-138) — on by default; kept for compatibility"
     )]
     sbas: bool,
+    #[arg(
+        long,
+        help = "recording's IF spectrum is inverted (high-side-LO mixing, e.g. the ION IFEN SX3 capture)"
+    )]
+    invert_spectrum: bool,
     #[arg(long, help = "disable the SBAS L1 search")]
     no_sbas: bool,
     #[arg(long, help = "also search the QZSS L1 block (PRN 193-202)")]
@@ -215,6 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         iq_file_type: opt.iq_file_type.clone(),
         fs: opt.fs,
         fi: opt.fi,
+        invert_spectrum: opt.invert_spectrum,
         off_msec: opt.off_msec,
         sig,
         families,

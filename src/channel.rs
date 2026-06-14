@@ -283,6 +283,7 @@ pub struct ChannelConfig {
     pub sv: SV,
     pub fs: f64,
     pub fi: f64,
+    pub invert_spectrum: bool,
     pub plots: bool,
     pub diagnostics: bool,
 }
@@ -300,6 +301,11 @@ pub struct Channel {
     fc: f64, // carrier frequency
     fs: f64, // sampling frequency
     fi: f64, // intermediate frequency
+    // Recording's IF spectrum is inverted (high-side-LO mixing, e.g. the ION
+    // IFEN SX3 capture): the carrier Doppler then has the opposite sign to the
+    // code Doppler (code_dopp = -doppler_hz), so the carrier->code aiding and the
+    // code-carrier divergence monitor must negate doppler_hz's physical sense.
+    invert_spectrum: bool,
 
     code_sec: f64,   // code duration in sec
     code_len: usize, // prn code len: e.g. 1023
@@ -481,6 +487,7 @@ impl Channel {
             sv,
             fs,
             fi,
+            invert_spectrum,
             plots,
             diagnostics,
         } = config;
@@ -537,6 +544,7 @@ impl Channel {
             fc: sig.carrier_hz(),
             fs,
             fi,
+            invert_spectrum,
             code_sec,
             code_len,
             code_sp,
@@ -1168,7 +1176,13 @@ impl Channel {
         let tau = self.code_sec;
         let fc = self.fi + self.trk.doppler_hz;
         self.trk.accum_doppler_cyc += self.trk.doppler_hz * tau; // accumulated Doppler
-        self.trk.code_off_sec -= self.trk.doppler_hz / self.fc * tau; // carrier-aided code offset
+        // Carrier-aided code offset. On a spectrally-inverted recording the code
+        // Doppler is opposite the carrier Doppler, so the aiding sign flips
+        // (invert_spectrum) — otherwise the aiding fights the DLL, knocks the code
+        // off the peak and slips the Costas loop (corrupting the nav bits despite
+        // a strong C/N0; the IFEN SX3 capture decoded nothing until this flip).
+        let aid = if self.invert_spectrum { -1.0 } else { 1.0 };
+        self.trk.code_off_sec -= aid * self.trk.doppler_hz / self.fc * tau;
 
         // A code-period wrap shifts the transmit phase (num_tx_codes * code_sec +
         // code_off), which always tracks; num_trk_periods instead tracks
@@ -1284,7 +1298,15 @@ impl Channel {
         // The transmit-phase slope gives the code-implied (true) Doppler; its gap
         // from the PLL's carrier Doppler is the code-carrier divergence.
         let code_dopp = ((tx_phase - self.trk.tx_phase_ref) / dt - 1.0) * self.fc;
-        let div = code_dopp - self.trk.doppler_hz;
+        // On an inverted spectrum the code Doppler is the negative of the carrier
+        // Doppler; compare against the matching physical sense so the healthy
+        // divergence sits near zero (else the gate spuriously drops every SV).
+        let phys_dopp = if self.invert_spectrum {
+            -self.trk.doppler_hz
+        } else {
+            self.trk.doppler_hz
+        };
+        let div = code_dopp - phys_dopp;
 
         match self.sv.constellation {
             // Galileo I/NAV: the carrier discriminator is data-ambiguous, so a

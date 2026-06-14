@@ -298,15 +298,18 @@ impl IQRecording {
         Ok(iq_vec)
     }
 
-    // Read signed 2-bit real samples, 4 per byte (most-significant pair first),
+    // Read signed 2-bit real samples, 4 per byte (least-significant pair first),
     // I-only. Each pair is two's-complement [-2, 1], normalized by 2. Reads are
     // byte-aligned: num/off are multiples of 4 (period_sp = PERIOD_RCV * fs is a
     // multiple of 4 for fs a multiple of 4000, e.g. the IFEN SX3's 20.48 MHz).
     //
-    // NB: the IFEN .sdrx gives encoding "TCA" (two's complement) with the first
-    // sample left-aligned/MSB-first -- mirrored here from the 1-bit/4-bit readers'
-    // MSB-first convention. Not yet cross-checked against a live acquisition; if
-    // IFEN_SX3 fails to acquire, the pair order or sign convention is the suspect.
+    // NB: the pair order is LSB-first -- the earliest sample is in bits 1:0, not
+    // 7:6. This was confirmed against a live acquire of the IFEN SX3 capture: with
+    // the wrong (MSB-first) order the C/A code still correlates, but the carrier
+    // phase is scrambled (96.7 deg/sample at fi 5.5 MHz / fs 20.48 MHz when 4
+    // adjacent samples are time-reversed), capping every SV's C/N0 at ~35 dB-Hz
+    // and blocking nav-bit sync. LSB-first restores 44-49 dB-Hz on the strong SVs
+    // (matching the GN3S front-end's view of the same Munich capture) and decode.
     fn get_iq_data_2bit(
         &mut self,
         off_samples: usize,
@@ -342,7 +345,7 @@ impl IQRecording {
         };
         let mut iq_vec = Vec::with_capacity(num_samples);
         for byte in bytes {
-            for shift in [6, 4, 2, 0] {
+            for shift in [0, 2, 4, 6] {
                 iq_vec.push(Complex32 {
                     re: pair((byte >> shift) & 0x03),
                     im: 0.0,
