@@ -596,14 +596,14 @@ impl GnssRcvApp {
         egui::TopBottomPanel::top("top_panel")
             .resizable(false)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    // Left column: controls box, status box, start/stop — all the
-                    // same width so they read as one stacked panel.
-                    ui.vertical(|ui| {
-                        ui.set_max_width(LEFT_PANEL_W);
-                        // One box: the settings table, a divider, then the status
-                        // table with the run-control strip beside it.
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                // One frame box: controls + status on the left, sky plot column on the right.
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    StripBuilder::new(ui)
+                        .size(Size::remainder())   // controls + status
+                        .size(Size::exact(1.0))    // separator
+                        .size(Size::exact(180.0))  // sky plot
+                        .horizontal(|mut strip| {
+                        strip.cell(|ui| {
                             self.update_controls(ui);
                             ui.separator();
                             ui.horizontal_top(|ui| {
@@ -727,13 +727,21 @@ impl GnssRcvApp {
                                         .animate(true),
                                 );
                             }
+                        }); // strip.cell (left column)
+                        strip.cell(|ui| {
+                            let rect = ui.max_rect();
+                            ui.painter().line_segment(
+                                [rect.center_top(), rect.center_bottom()],
+                                ui.visuals().widgets.noninteractive.bg_stroke,
+                            );
                         });
-                    });
-                    // Right column: sky plot, pinned to the right edge.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                        draw_sky_plot(ui, &sv_elaz);
-                    });
-                });
+                        strip.cell(|ui| {
+                            ui.centered_and_justified(|ui| {
+                                draw_sky_plot(ui, &sv_elaz);
+                            });
+                        });
+                    }); // StripBuilder
+                }); // Frame::group
             });
     }
 
