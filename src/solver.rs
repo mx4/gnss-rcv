@@ -658,10 +658,16 @@ impl PositionSolver {
 
         let pr_m = pseudo_range_sec * SPEED_OF_LIGHT - iono_m - tropo_m + sbas_m;
 
-        // A non-finite pseudorange (e.g. a NaN correction from a garbage prior
-        // fix) would panic gnss-rtk's Duration math — drop the SV instead.
-        if !pr_m.is_finite() {
-            log::warn!("{}: dropping SV, non-finite pseudorange", eph.sv);
+        // Drop a pseudorange that isn't a physically plausible Earth↔MEO range:
+        // gnss-rtk's transmit-time math (rx − pr/c) *panics* ("physical non
+        // sense") on NaN/inf or an absurd magnitude — e.g. a blown-up correction
+        // — so guard the whole class here, not just non-finite. Real one-way
+        // ranges run ~20-26 Mm (~67-87 ms); allow generous slack either side.
+        if !pr_m.is_finite() || !(1.0e7..4.0e7).contains(&pr_m) {
+            log::warn!(
+                "{}: dropping SV, implausible pseudorange {pr_m:.3e} m",
+                eph.sv
+            );
             return None;
         }
 

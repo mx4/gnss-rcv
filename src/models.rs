@@ -150,9 +150,13 @@ pub(crate) fn elevation_azimuth(rx_ecef: Vector3<f64>, sat_ecef: (f64, f64, f64)
 ///
 /// Reference: Saastamoinen (1973); standard atmosphere (ICAO).
 pub(crate) fn saastamoinen_tropo_m(lat: f64, h_m: f64, elev: f64) -> f64 {
-    // Below 5° the 1/sin mapping blows up; a non-finite elevation (from a garbage
-    // prior fix) must also bail here (a plain `<` wouldn't catch NaN).
-    if elev.is_nan() || elev < 5.0_f64.to_radians() {
+    // Bail on anything that isn't a real above-horizon elevation. Below 5° the
+    // 1/sin mapping blows up; and a NaN or *out-of-[0°,90°]* value (a garbage
+    // elevation from a bad prior fix or a bogus geometry) would otherwise divide
+    // by a near-zero/wrong sin and inject a ~1e20 m "delay" that craters the WLS
+    // and panics gnss-rtk's transmit-time math. A genuine SV sits in [5°, 90°];
+    // an angle can never physically exceed 90°, so beyond that is garbage.
+    if !elev.is_finite() || !(5.0_f64.to_radians()..=PI / 2.0).contains(&elev) {
         return 0.0;
     }
     // Standard atmosphere: surface pressure at height h_m [hPa]. Clamp the base at
