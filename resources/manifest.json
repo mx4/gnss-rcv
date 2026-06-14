@@ -93,8 +93,8 @@
     "dest": "ION_GN3S_Bands-L1.i8",
     "size": 1963982848,
     "archive": "raw",
-    "flags": "-t i8 --fs 16368000 --fi 4092000",
-    "note": "ION GN3S (SiGe) L1, real 8-bit IF 4.092 MHz, ~120s (Munich 2013); GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1",
+    "flags": "-t i8 --fs 16368000 --fi 4092000 --invert-spectrum",
+    "note": "ION GN3S (SiGe Sampler v3) L1, real 8-bit IF 4.092 MHz, ~120s; collected 2013-05-23 in North America (CU GNSS Lab) -- NOT Munich (upstream/sdrx label is wrong; sub-sat geometry puts G09 overhead Baja, below Munich's horizon). GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1. Spectrum is inverted (high-side LO, like the IFEN SX3) so --invert-spectrum: deterministically lifts subframes 103->138 and cuts parity errors 11->4 (per-recording, like SJTU is NOT inverted). Still only ~4 weak SVs complete ephemerides -> high-GDOP, intermittent fix in N. America.",
     "tags": [
       "gps"
     ]

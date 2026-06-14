@@ -39,8 +39,12 @@ SITES = {
     "ion-rtlsdr": (52.177, 4.488),
     "ion-hackrf": (52.177, 4.488),
     "ion-bladerf": (52.177, 4.488),
-    "ion-gn3s": (48.14, 11.58),   # ION, Munich
-    "ion-ifen": (48.14, 11.58),
+    # ion-gn3s is NOT Munich: it's a CU GNSS Lab SiGe Sampler v3 capture from
+    # North America (2013-05-23), mislabeled "Munich" upstream. Its true antenna
+    # coords are undocumented and a 4-SV fix is exactly-determined, so there is
+    # no point to gate against -- left out of SITES (asserts only that *a* fix is
+    # solved, when the weak geometry lets one through).
+    "ion-ifen": (48.14, 11.58),   # ION, Munich (IFEN SX3, 2016)
     "sjtu": (31.20, 121.50),      # SJTU, Shanghai
     "tuni2025": (61.45, 23.857),  # Tampere, Finland
     "texbat-clean": (30.29, -97.74),  # TEXBAT, Austin TX
@@ -63,15 +67,19 @@ BYTES_PER_SAMPLE = {
 
 # Recordings that legitimately do NOT yield a GPS/Galileo position fix in a short
 # window -- so a "no fix" is the expected result, not a regression.
-#   decode: acquire/track/decode is the goal; no fix expected (auth-only or weak).
-#   short:  recording is too short to complete >=4 ephemerides in any window.
+#   decode:   acquire/track/decode is the goal; no fix expected (auth-only or weak).
+#   short:    recording is too short to complete >=4 ephemerides in any window.
+#   weakgeom: completes ephemerides but only ~4 weak SVs -> exactly-determined,
+#             high-GDOP fix that is mostly rejected; a pass is fine, a miss is not a regression.
 EXPECT = {
     "fgi-osnma": "decode",     # Galileo OSNMA auth focus; not a positioning capture
     "pocketsdr": "decode",     # ~30 s PocketSDR -- decode demo, below the ephemeris floor
     "ion-bladerf": "short",    # ~13 s -- below the ~25 s ephemeris floor
     "zenodo-sigmf": "short",   # short 4 MHz capture; window hits EOF before a fix
     "jks-1bit": "decode",      # 1-bit hard-limited demo; tracks but does not complete ephemerides
-    "ion-gn3s": "knownbad",    # decodes 4 ephemerides but the fix lands ~7000 km off (open bug)
+    "ion-gn3s": "weakgeom",    # North-America capture (not Munich); only ~4 weak SVs
+                               # complete -> exactly-determined, high-GDOP, mostly rejected
+                               # (a pass lands in N. America, ~36.4,-81.2). Not a bad fix.
 }
 
 
