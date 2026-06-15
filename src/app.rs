@@ -1071,17 +1071,25 @@ fn fmt_age(sec: f64) -> String {
 /// ephemeris is contemporaneous so it reads green; the colour earns its keep on
 /// long live runs, and a changed IODE flags a fresh upload.)
 fn draw_eph_used(ui: &mut egui::Ui, iode: u32, age_sec: f64) {
-    let color = if age_sec < 7200.0 {
-        egui::Color32::from_rgb(80, 200, 100)
-    } else if age_sec < 14400.0 {
-        egui::Color32::from_rgb(220, 190, 50)
+    // Freshness is the distance from the ephemeris reference epoch t0e (centre
+    // of the ~4 h fit interval). A t0e in the past (age > 0) or the future
+    // (age < 0 — GPS broadcasts the next ephemeris ahead of its t0e) is equally
+    // valid, so colour by |age| and word the sign rather than show a negative.
+    let dist = age_sec.abs();
+    let color = if dist < 7200.0 {
+        egui::Color32::from_rgb(80, 200, 100) // within ±2 h of t0e
+    } else if dist < 14400.0 {
+        egui::Color32::from_rgb(220, 190, 50) // toward the fit-interval edge
     } else {
-        egui::Color32::from_rgb(220, 80, 60)
+        egui::Color32::from_rgb(220, 80, 60) // past the fit interval
     };
-    ui.colored_label(color, "✔").on_hover_text(format!(
-        "used in fix · IODE {iode} · age {}",
-        fmt_age(age_sec)
-    ));
+    let when = if age_sec >= 0.0 {
+        format!("{} old", fmt_age(age_sec))
+    } else {
+        format!("{} ahead", fmt_age(-age_sec))
+    };
+    ui.colored_label(color, "✔")
+        .on_hover_text(format!("used in fix · IODE {iode} · t0e {when}"));
 }
 
 /// SBAS GEO status: a "src" mark for the GEO actually feeding the fix's
