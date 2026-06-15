@@ -584,6 +584,12 @@ impl Receiver {
                     ch.stats.used_in_fix = true;
                 }
             }
+            // The SVs in this fix, for the UI's per-SV "contributing" check
+            // (overwritten each fix, so it tracks the current pool, unlike the
+            // sticky per-channel stat above).
+            if let Ok(mut st) = self.pub_state.lock() {
+                st.fix_svs = ephs.iter().map(|(_, eph)| eph.sv).collect();
+            }
         } else {
             self.stats.fix_fail += 1;
         }

@@ -121,6 +121,7 @@ impl Channel {
                 });
                 if let Some(cs) = st.channels.get_mut(&self.sv) {
                     cs.sbas_msgs = self.stats.subframes;
+                    cs.sbas_msg_mask |= 1u64 << msg.mtype.min(63);
                     if let Some((el, az)) = elaz {
                         cs.elevation_deg = el;
                         cs.azimuth_deg = az;

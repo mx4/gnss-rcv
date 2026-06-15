@@ -22,19 +22,29 @@ pub struct ChannelState {
     /// Transmit-time anchor pinned — the SV is actually usable by the solver
     /// (a complete ephemeris alone is not; see `nav_anchor_tx`).
     pub tx_anchored: bool,
-    /// Ephemeris decode progress: distinct ephemeris-bearing messages collected
-    /// so far (Galileo I/NAV words 1-5, or GPS LNAV subframes 1-3). Full set =
-    /// `has_eph`. Shown per-SV in the diagnostics table.
-    pub eph_pages: u8,
+    /// Ephemeris decode progress as a per-message bitmask: bit *n* set once
+    /// message *n* is decoded — GPS LNAV subframes 1-3 (bits 1-3) or Galileo
+    /// I/NAV word types 1-5 (bits 1-5). The UI renders one pip per message so a
+    /// stuck decode shows *which* is missing; a full set = `has_eph`.
+    pub eph_mask: u8,
     /// Galileo OSNMA: this SV's navigation data has been cryptographically
     /// authenticated (set by the receiver-level verifier; always false off OSNMA).
     pub osnma_verified: bool,
     pub elevation_deg: f64,
     pub azimuth_deg: f64,
     /// SBAS channels: CRC-valid 250-bit messages decoded so far (SBAS GEOs
-    /// broadcast corrections, not ephemerides, so this replaces `eph_pages`
+    /// broadcast corrections, not ephemerides, so this replaces `eph_mask`
     /// as the decode-progress indicator in the UI).
     pub sbas_msgs: u64,
+    /// SBAS message types decoded so far, as a bitmask (bit *t* = message type
+    /// *t*, e.g. MT1 PRN mask, MT2-5 fast, MT18 iono mask, MT26 iono delays,
+    /// MT24/25 long-term). The UI renders which correction types are flowing.
+    pub sbas_msg_mask: u64,
+    /// Ephemeris issue-of-data and reference epoch, for the "used in fix"
+    /// freshness indicator: `age = tow_gpst − toe_gpst`, and a changed `iode`
+    /// flags a fresh upload. Valid once `has_eph`.
+    pub iode: u32,
+    pub toe_gpst: Epoch,
 }
 impl Default for ChannelState {
     fn default() -> Self {
@@ -46,11 +56,14 @@ impl Default for ChannelState {
             phi: 0.0,
             has_eph: false,
             tx_anchored: false,
-            eph_pages: 0,
+            eph_mask: 0,
             osnma_verified: false,
             elevation_deg: 0.0,
             azimuth_deg: 0.0,
             sbas_msgs: 0,
+            sbas_msg_mask: 0,
+            iode: 0,
+            toe_gpst: Epoch::default(),
         }
     }
 }
@@ -97,6 +110,9 @@ pub struct GnssState {
     pub hdop: f64,
     pub vdop: f64,
     pub fix_sv_count: usize,
+    /// SVs that contributed to the most recent successful fix. The per-SV table
+    /// collapses a contributing SV's ephemeris pips to a freshness check.
+    pub fix_svs: Vec<SV>,
     /// Run progress (fraction of the recording processed, 0..1) and the real-time
     /// processing factor (data seconds per wall second). `None` = no known total
     /// (idle, or a live device); drives the UI progress bar.
@@ -134,6 +150,7 @@ impl GnssState {
             hdop: 0.0,
             vdop: 0.0,
             fix_sv_count: 0,
+            fix_svs: Vec::new(),
             run_progress: None,
             realtime_x: 0.0,
             channels: HashMap::<SV, ChannelState>::new(),

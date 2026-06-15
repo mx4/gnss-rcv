@@ -438,11 +438,15 @@ impl Channel {
     fn update_state_cn0(&self) {
         let cn0 = self.trk.cn0;
         // Piggyback the ephemeris decode progress on the frequent cn0 publish so
-        // the UI's per-SV "pages/needed" counter advances as words arrive.
-        let eph_pages = self.nav.eph.pages();
+        // the UI's per-SV page pips advance as words/subframes arrive.
+        let eph_mask = self.nav.eph.eph_mask;
+        let iode = self.nav.eph.iode;
+        let toe_gpst = self.nav.eph.toe_gpst;
         self.publish(|cs| {
             cs.cn0 = cn0;
-            cs.eph_pages = eph_pages;
+            cs.eph_mask = eph_mask;
+            cs.iode = iode;
+            cs.toe_gpst = toe_gpst;
         });
     }
 
