@@ -22,7 +22,7 @@ use gnss_rcv::state::GnssState;
 const GPSSIM: &str = "resources/gpssim_2xi16";
 
 // The static location gps-sdr-sim was told to simulate: Geneva (Jet d'Eau),
-// 2026/04/28 17:00 -- the default scenario of resources/gen_gpssim.sh.
+// 2026/04/28 17:00 -- the default scenario of resources/gen_gpssim.py.
 const TRUE_LAT: f64 = 46.2075;
 const TRUE_LON: f64 = 6.1557;
 
@@ -31,7 +31,7 @@ const TRUE_LON: f64 = 6.1557;
 const SIM_SATS: &str = "1,2,3,4,6,9,17,19,28,31";
 
 // End-to-end generated recording + the meta the generator script writes.
-const GEN_SCRIPT: &str = "resources/gen_gpssim.sh";
+const GEN_SCRIPT: &str = "resources/gen_gpssim.py";
 const GEN_GPSSIM: &str = "resources/gpssim_gen_2xi16";
 const GEN_META: &str = "resources/gpssim_gen.meta";
 

@@ -65,7 +65,7 @@ cargo build --release
 # Get a recording — either download a real capture...
 ./resources/fetch.py nov3          # 12.7 GiB real rtl-sdr capture (2xf32)
 # ...or simulate one (needs gps-sdr-sim; downloads the ephemeris for you):
-./resources/gen_gpssim.sh          # ~350 MiB, Geneva, ends in a verified fix
+./resources/gen_gpssim.py          # ~350 MiB, Geneva, ends in a verified fix
 
 # Run the receiver until it computes the first position fix:
 cargo run --release -- -f resources/gpssim_gen_2xi16 -t 2xi16 -x
@@ -169,7 +169,7 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 
 | recording | get it | settings | result |
 |---|---|---|---|
-| `gpssim_2xi16` (Geneva, simulated) | `gen_gpssim.sh` | `-t 2xi16` | ✅ **46.207, 6.156** (truth 46.2075, 6.1557) |
+| `gpssim_2xi16` (Geneva, simulated) | `gen_gpssim.py` | `-t 2xi16` | ✅ **46.207, 6.156** (truth 46.2075, 6.1557) |
 | `nov_3_time_18_48_st_ives` | `fetch.py nov3` | `-t 2xf32` | ✅ **52.334, −0.081** — St Ives, Cambs UK |
 | CTTC Spain 2013 | `fetch.py cttc` | `-t 2xi16 --fs 4000000` | ✅ **41.274, 1.986** — Castelldefels |
 | ION rooftop RTL-SDR | `fetch.py ion-rtlsdr` | `-t rtlsdr-file --fs 2048000` | ✅ **52.177, 4.489** — Netherlands |
@@ -199,7 +199,7 @@ for a chosen date and location (2× int16 per sample, use `-t 2xi16`):
 $ ./gps-sdr-sim -b 16 -d 45 -t 2026/04/28,17:00:00 -l 46.2075,6.1557,375 \
     -e brdc1180.26n -s 2046000          # Geneva, Jet d'Eau
 ```
-`./resources/gen_gpssim.sh [date,time] [lat,lon,alt]` automates this end-to-end:
+`./resources/gen_gpssim.py [date,time] [lat,lon,alt]` automates this end-to-end:
 it downloads the matching broadcast ephemeris and runs gps-sdr-sim for you.
 
 ## Using an rtl-sdr device

@@ -59,7 +59,7 @@ def validate_gps_fix():
     """-> 'PASS' / 'FAIL' / 'SKIP'."""
     print("=== GPS L1 C/A fix (gpssim) ===")
     if not os.path.isfile(GPS_FIXTURE):
-        print(f"SKIP: {GPS_FIXTURE} absent -- generate with ./resources/gen_gpssim.sh")
+        print(f"SKIP: {GPS_FIXTURE} absent -- generate with ./resources/gen_gpssim.py")
         return "SKIP"
 
     summary, stderr = run_json(

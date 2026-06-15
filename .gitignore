@@ -5,7 +5,7 @@ Cargo.lock
 resources/*
 !resources/README.md
 !resources/fetch.py
-!resources/gen_gpssim.sh
+!resources/gen_gpssim.py
 !resources/manifest.json
 gnss.log
 plots/

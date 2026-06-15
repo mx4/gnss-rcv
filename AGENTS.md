@@ -122,7 +122,7 @@ shells out to curl/unzip/tar): no args lists them with constellation tags;
 `fetch.py <name>` downloads one (resuming/skipping if present) **and prints the
 exact command to run it**. A positional arg can be a recording name, a tag
 (`gps`/`qzss`/`galileo`), or `all`; `--tag <t>` filters the listing.
-`gpssim_2xi16` is *generated* by gps-sdr-sim (`./resources/gen_gpssim.sh`, needs
+`gpssim_2xi16` is *generated* by gps-sdr-sim (`./resources/gen_gpssim.py`, needs
 gps-sdr-sim + network), not downloaded.
 
 **Master validation list** — run these to check receiver stability across rates,

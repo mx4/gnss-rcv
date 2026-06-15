@@ -85,7 +85,7 @@ gps-sdr-sim recording at a known location:
 - `computes_position_fix_gpssim` (ignored) — fix within 0.02° of the
   simulated location, on the pre-existing `resources/gpssim_2xi16`.
 - `generates_and_solves_gpssim` (ignored) — **end-to-end**: runs
-  [resources/gen_gpssim.sh](../resources/gen_gpssim.sh) to pick a
+  [resources/gen_gpssim.py](../resources/gen_gpssim.py) to pick a
   date+location, download the matching broadcast ephemeris (ESA GSSC,
   auth-free FTP), run gps-sdr-sim, and verify the receiver recovers that
   location. Needs `gps-sdr-sim` (`$GPS_SDR_SIM`, or
