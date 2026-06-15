@@ -594,148 +594,150 @@ impl GnssRcvApp {
                 // One frame box: controls + status on the left, sky plot column on the right.
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     StripBuilder::new(ui)
-                        .size(Size::remainder())   // controls + status
-                        .size(Size::exact(1.0))    // separator
-                        .size(Size::exact(180.0))  // sky plot
+                        .size(Size::remainder()) // controls + status
+                        .size(Size::exact(1.0)) // separator
+                        .size(Size::exact(180.0)) // sky plot
                         .horizontal(|mut strip| {
-                        strip.cell(|ui| {
-                            self.update_controls(ui);
-                            ui.separator();
-                            ui.horizontal_top(|ui| {
-                                // Narrower so the status text column + the correction-flag
-                                // column both fit to its left.
-                                let btn_area_w = 130.0_f32;
-                                let status_w =
-                                    (ui.available_width() - btn_area_w - GRID_GAP_X).max(240.0);
-                                let status = ui.scope(|ui| {
-                                    ui.set_width(status_w);
-                                    let h = ui.spacing().interact_size.y;
-                                    // The scope inherits the outer row's horizontal layout;
-                                    // a text column (GPST / position / precision / KROOT)
-                                    // with the correction-flag column beside it.
-                                    ui.horizontal_top(|ui| {
-                                        ui.vertical(|ui| {
-                                            // GPST + time.
-                                            ui.horizontal(|ui| {
-                                                status_label(ui, "GPST", h);
-                                                ui.monospace(&tow_text);
-                                            });
-                                            // Position — bare (no label, no prefixes).
-                                            if let Some(url) = &pos_url {
-                                                ui.hyperlink_to(&pos_text, url);
-                                            } else {
-                                                ui.monospace(&pos_text);
-                                            }
-                                            // Precision (HDOP/VDOP), no label. Always keep the
-                                            // row (blank until the first fix) so the box
-                                            // doesn't grow when a fix appears.
-                                            let prec = ui.horizontal(|ui| {
-                                                if let Some((hdop, vdop, nsv)) = dop {
-                                                    ui.colored_label(
-                                                        dop_color(hdop),
-                                                        format!("HDOP {hdop:.1}"),
-                                                    );
-                                                    ui.weak(format!("· VDOP {vdop:.1} · {nsv} SV"));
+                            strip.cell(|ui| {
+                                self.update_controls(ui);
+                                ui.separator();
+                                ui.horizontal_top(|ui| {
+                                    // Narrower so the status text column + the correction-flag
+                                    // column both fit to its left.
+                                    let btn_area_w = 130.0_f32;
+                                    let status_w =
+                                        (ui.available_width() - btn_area_w - GRID_GAP_X).max(240.0);
+                                    let status = ui.scope(|ui| {
+                                        ui.set_width(status_w);
+                                        let h = ui.spacing().interact_size.y;
+                                        // The scope inherits the outer row's horizontal layout;
+                                        // a text column (GPST / position / precision / KROOT)
+                                        // with the correction-flag column beside it.
+                                        ui.horizontal_top(|ui| {
+                                            ui.vertical(|ui| {
+                                                // GPST + time.
+                                                ui.horizontal(|ui| {
+                                                    status_label(ui, "GPST", h);
+                                                    ui.monospace(&tow_text);
+                                                });
+                                                // Position — bare (no label, no prefixes).
+                                                if let Some(url) = &pos_url {
+                                                    ui.hyperlink_to(&pos_text, url);
                                                 } else {
-                                                    ui.allocate_space(egui::vec2(0.0, h));
+                                                    ui.monospace(&pos_text);
                                                 }
-                                            });
-                                            if dop.is_some() {
-                                                prec.response.on_hover_text(
-                                                    "Dilution of precision (lower is better — \
+                                                // Precision (HDOP/VDOP), no label. Always keep the
+                                                // row (blank until the first fix) so the box
+                                                // doesn't grow when a fix appears.
+                                                let prec = ui.horizontal(|ui| {
+                                                    if let Some((hdop, vdop, nsv)) = dop {
+                                                        ui.colored_label(
+                                                            dop_color(hdop),
+                                                            format!("HDOP {hdop:.1}"),
+                                                        );
+                                                        ui.weak(format!(
+                                                            "· VDOP {vdop:.1} · {nsv} SV"
+                                                        ));
+                                                    } else {
+                                                        ui.allocate_space(egui::vec2(0.0, h));
+                                                    }
+                                                });
+                                                if dop.is_some() {
+                                                    prec.response.on_hover_text(
+                                                        "Dilution of precision (lower is better — \
                                                      <2 excellent, 2-5 good). VDOP is vertical, \
                                                      then the SV count used in the fix.",
-                                                );
-                                            }
-                                            // OSNMA DSM-KROOT assembly progress.
-                                            if let Some((got, total)) = osnma_kroot {
-                                                ui.horizontal(|ui| {
-                                                    status_label(ui, "KROOT", h);
-                                                    let fill = if got >= total {
-                                                        egui::Color32::from_rgb(80, 200, 100)
-                                                    } else {
-                                                        egui::Color32::from_rgb(70, 110, 180)
-                                                    };
-                                                    ui.add(
-                                                        egui::ProgressBar::new(
-                                                            got as f32 / total as f32,
+                                                    );
+                                                }
+                                                // OSNMA DSM-KROOT assembly progress.
+                                                if let Some((got, total)) = osnma_kroot {
+                                                    ui.horizontal(|ui| {
+                                                        status_label(ui, "KROOT", h);
+                                                        let fill = if got >= total {
+                                                            egui::Color32::from_rgb(80, 200, 100)
+                                                        } else {
+                                                            egui::Color32::from_rgb(70, 110, 180)
+                                                        };
+                                                        ui.add(
+                                                            egui::ProgressBar::new(
+                                                                got as f32 / total as f32,
+                                                            )
+                                                            .desired_width(VALUE_W)
+                                                            .text(format!("{got}/{total} blocks"))
+                                                            .fill(fill),
                                                         )
-                                                        .desired_width(VALUE_W)
-                                                        .text(format!("{got}/{total} blocks"))
-                                                        .fill(fill),
-                                                    )
-                                                    .on_hover_text(
-                                                        "OSNMA TESLA root key (DSM-KROOT): \
+                                                        .on_hover_text(
+                                                            "OSNMA TESLA root key (DSM-KROOT): \
                                                          blocks assembled / needed before nav \
                                                          data is authenticated",
-                                                    );
-                                                });
-                                            }
-                                        });
-                                        // Correction-flag column, beside all the text lines
-                                        // and left of the run controls.
-                                        ui.vertical(|ui| {
-                                            if has_ion {
-                                                ui.monospace("ion");
-                                            }
-                                            if has_utc {
-                                                ui.monospace("utc");
-                                            }
-                                            let (n_igp, n_fast, n_long) = egnos;
-                                            if n_igp + n_fast + n_long > 0 {
-                                                ui.colored_label(
-                                                    constellation_color(Constellation::SBAS),
-                                                    "EGNOS",
-                                                )
-                                                .on_hover_text(format!(
-                                                    "SBAS corrections applied to the fix: iono \
+                                                        );
+                                                    });
+                                                }
+                                            });
+                                            // Correction-flag column, beside all the text lines
+                                            // and left of the run controls.
+                                            ui.vertical(|ui| {
+                                                if has_ion {
+                                                    ui.monospace("ion");
+                                                }
+                                                if has_utc {
+                                                    ui.monospace("utc");
+                                                }
+                                                let (n_igp, n_fast, n_long) = egnos;
+                                                if n_igp + n_fast + n_long > 0 {
+                                                    ui.colored_label(
+                                                        constellation_color(Constellation::SBAS),
+                                                        "EGNOS",
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "SBAS corrections applied to the fix: iono \
                                                      grid {n_igp} IGPs · {n_fast} fast + \
                                                      {n_long} long-term corrections"
-                                                ));
-                                            }
+                                                    ));
+                                                }
+                                            });
                                         });
                                     });
+                                    let box_h = status.response.rect.height();
+                                    self.update_start_stop(ui, ctx, box_h, btn_area_w);
                                 });
-                                let box_h = status.response.rect.height();
-                                self.update_start_stop(ui, ctx, box_h, btn_area_w);
-                            });
-                            // Run progress — fraction of the recording processed,
-                            // plus the real-time factor; only while a run is active.
-                            let (progress, realtime_x) = run;
-                            if self.active.load(Ordering::SeqCst) {
-                                // `animate` keeps the bar visibly shimmering even when
-                                // the fraction barely moves (a long capture at sub-real-
-                                // time), and the "starting…" indeterminate bar covers
-                                // the gap before the first progress publish — so Start
-                                // gives instant feedback instead of a dead box during the
-                                // seconds of setup + cold-start acquisition.
-                                let bar = match progress {
-                                    Some(p) => egui::ProgressBar::new(p).text(format!(
-                                        "{:.0}%  ·  {:.1}× real-time",
-                                        p * 100.0,
-                                        realtime_x
-                                    )),
-                                    None => egui::ProgressBar::new(0.0).text("starting…"),
-                                };
-                                ui.add(
-                                    bar.fill(egui::Color32::from_rgb(70, 110, 180))
-                                        .animate(true),
+                                // Run progress — fraction of the recording processed,
+                                // plus the real-time factor; only while a run is active.
+                                let (progress, realtime_x) = run;
+                                if self.active.load(Ordering::SeqCst) {
+                                    // `animate` keeps the bar visibly shimmering even when
+                                    // the fraction barely moves (a long capture at sub-real-
+                                    // time), and the "starting…" indeterminate bar covers
+                                    // the gap before the first progress publish — so Start
+                                    // gives instant feedback instead of a dead box during the
+                                    // seconds of setup + cold-start acquisition.
+                                    let bar = match progress {
+                                        Some(p) => egui::ProgressBar::new(p).text(format!(
+                                            "{:.0}%  ·  {:.1}× real-time",
+                                            p * 100.0,
+                                            realtime_x
+                                        )),
+                                        None => egui::ProgressBar::new(0.0).text("starting…"),
+                                    };
+                                    ui.add(
+                                        bar.fill(egui::Color32::from_rgb(70, 110, 180))
+                                            .animate(true),
+                                    );
+                                }
+                            }); // strip.cell (left column)
+                            strip.cell(|ui| {
+                                let rect = ui.max_rect();
+                                ui.painter().line_segment(
+                                    [rect.center_top(), rect.center_bottom()],
+                                    ui.visuals().widgets.noninteractive.bg_stroke,
                                 );
-                            }
-                        }); // strip.cell (left column)
-                        strip.cell(|ui| {
-                            let rect = ui.max_rect();
-                            ui.painter().line_segment(
-                                [rect.center_top(), rect.center_bottom()],
-                                ui.visuals().widgets.noninteractive.bg_stroke,
-                            );
-                        });
-                        strip.cell(|ui| {
-                            ui.centered_and_justified(|ui| {
-                                draw_sky_plot(ui, &sv_elaz);
                             });
-                        });
-                    }); // StripBuilder
+                            strip.cell(|ui| {
+                                ui.centered_and_justified(|ui| {
+                                    draw_sky_plot(ui, &sv_elaz);
+                                });
+                            });
+                        }); // StripBuilder
                 }); // Frame::group
             });
     }
@@ -836,7 +838,7 @@ impl GnssRcvApp {
             .min_scrolled_height(0.0)
             .max_scroll_height(available_height);
         let tb = if is_galileo {
-            tb.column(Column::remainder())
+            tb.column(Column::auto())
         } else {
             tb
         };
@@ -896,10 +898,15 @@ impl GnssRcvApp {
                 let cn0 = channel.unwrap().cn0;
                 let doppler_hz = channel.unwrap().doppler_hz;
                 let code_idx = channel.unwrap().code_idx;
-                let eph_pages = channel.unwrap().eph_pages;
+                let eph_mask = channel.unwrap().eph_mask;
                 let osnma_verified = channel.unwrap().osnma_verified;
                 let sbas_msgs = channel.unwrap().sbas_msgs;
+                let sbas_msg_mask = channel.unwrap().sbas_msg_mask;
                 let tx_anchored = channel.unwrap().tx_anchored;
+                let iode = channel.unwrap().iode;
+                let eph_age_sec = (pub_state.tow_gpst - channel.unwrap().toe_gpst).to_seconds();
+                let used_in_fix = pub_state.fix_svs.contains(&sv);
+                let is_sbas_source = pub_state.sbas_source == Some(sv);
 
                 body.row(row_height, |mut row| {
                     row.col(|ui| {
@@ -923,42 +930,18 @@ impl GnssRcvApp {
                     });
                     row.col(|ui| {
                         if sv.constellation == Constellation::SBAS {
-                            // SBAS GEOs broadcast corrections, not ephemerides —
-                            // an x/3 fraction would sit at 0 forever. Show the
-                            // running count of CRC-valid messages instead.
-                            ui.weak(format!("{sbas_msgs} msgs"))
-                                .on_hover_text("SBAS messages decoded (CRC ok)");
+                            // SBAS GEOs broadcast corrections, not ephemerides:
+                            // show which correction types are flowing + the source.
+                            draw_sbas_cell(ui, sbas_msgs, sbas_msg_mask, is_sbas_source);
                             return;
                         }
-                        // How many orbit/clock messages are decoded (Galileo: 5
-                        // I/NAV words, GPS: 3 subframes). The fraction turns green
-                        // on a full set — no ✓ glyph, which egui's bundled fonts
-                        // render as a tofu box (U+2713 is unsupported).
-                        // The fraction stays muted at every stage (0/3 reads the
-                        // same as 3/3); the only green element is the check that
-                        // appears once the full set is decoded.
-                        let needed = if sv.constellation == Constellation::Galileo {
-                            5
+                        if used_in_fix {
+                            // Contributing to the fix: collapse the pips to a
+                            // freshness-coloured check (detail moves to the hover).
+                            draw_eph_used(ui, iode, eph_age_sec);
                         } else {
-                            3
-                        };
-                        ui.horizontal(|ui| {
-                            ui.weak(format!("{eph_pages}/{needed}"));
-                            if eph_pages >= needed {
-                                // Heavy check U+2714 — a real emoji NotoEmoji
-                                // renders (the plain U+2713 ✓ is a tofu box).
-                                // Green only once the transmit-time anchor is
-                                // pinned — i.e. the SV is actually usable by
-                                // the solver, not just fully decoded.
-                                if tx_anchored {
-                                    ui.colored_label(egui::Color32::from_rgb(80, 200, 100), "✔");
-                                } else {
-                                    ui.weak("✔").on_hover_text(
-                                        "ephemeris complete; pinning the transmit-time anchor",
-                                    );
-                                }
-                            }
-                        });
+                            draw_eph_pages(ui, sv, eph_mask, tx_anchored);
+                        }
                     });
                     if is_galileo {
                         row.col(|ui| {
@@ -975,6 +958,157 @@ impl GnssRcvApp {
             }
         });
     }
+}
+
+/// Per-page ephemeris decode status: one pip per orbit/clock message — GPS LNAV
+/// subframes 1-3, Galileo I/NAV words 1-5 — filled as each arrives, so a stuck
+/// decode shows *which* message is missing rather than just a count. Painter-drawn
+/// circles (no glyph-font dependency). Filled pips are green once the full set is
+/// decoded *and* the transmit anchor is pinned (the SV is solver-usable), amber
+/// when fully decoded but not yet anchored, constellation-tinted while partial.
+fn draw_eph_pages(ui: &mut egui::Ui, sv: SV, eph_mask: u8, tx_anchored: bool) {
+    // Page bits are 1-indexed (bit 0 unused): GPS subframes 1..=3, Galileo word
+    // types 1..=5. The names drive the hover so the pips are self-documenting.
+    let labels: &[&str] = if sv.constellation == Constellation::Galileo {
+        &[
+            "W1 ephemeris 1/4",
+            "W2 ephemeris 2/4",
+            "W3 ephemeris 3/4 + SISA",
+            "W4 ephemeris 4/4 + clock",
+            "W5 iono + BGD + GST",
+        ]
+    } else {
+        &[
+            "SF1 clock / health",
+            "SF2 ephemeris (orbit shape)",
+            "SF3 ephemeris (orientation)",
+        ]
+    };
+    let n = labels.len();
+    let got = |i: usize| (eph_mask >> (i + 1)) & 1 == 1;
+    let count = (0..n).filter(|&i| got(i)).count();
+    let complete = count == n;
+
+    let fill = if complete && tx_anchored {
+        egui::Color32::from_rgb(80, 200, 100) // green: decoded and solver-usable
+    } else if complete {
+        egui::Color32::from_rgb(220, 190, 50) // amber: decoded, pinning the anchor
+    } else {
+        constellation_color(sv.constellation) // partial
+    };
+    let dim = egui::Color32::from_gray(80);
+
+    let r = 3.5_f32;
+    let gap = 3.0_f32;
+    let h = ui.spacing().interact_size.y;
+    let w = n as f32 * (2.0 * r) + (n as f32 - 1.0) * gap;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+    let painter = ui.painter();
+    let cy = rect.center().y;
+    for i in 0..n {
+        let cx = rect.left() + r + i as f32 * (2.0 * r + gap);
+        let c = egui::pos2(cx, cy);
+        if got(i) {
+            painter.circle_filled(c, r, fill);
+        } else {
+            painter.circle_stroke(c, r, egui::Stroke::new(1.0, dim));
+        }
+    }
+
+    let mut tip = String::new();
+    for (i, label) in labels.iter().enumerate() {
+        tip.push_str(if got(i) { "✔ " } else { "· " });
+        tip.push_str(label);
+        tip.push('\n');
+    }
+    tip.push_str(&format!("{count}/{n} decoded"));
+    if complete && !tx_anchored {
+        tip.push_str(" — pinning transmit anchor");
+    } else if complete {
+        tip.push_str(" — usable");
+    }
+    resp.on_hover_text(tip);
+}
+
+/// Compact ephemeris age for the hover.
+fn fmt_age(sec: f64) -> String {
+    if sec < 90.0 {
+        format!("{sec:.0}s")
+    } else if sec < 5400.0 {
+        format!("{:.0}m", sec / 60.0)
+    } else {
+        format!("{:.1}h", sec / 3600.0)
+    }
+}
+
+/// Collapsed ephemeris state once the SV is contributing to the fix: a single
+/// check coloured by ephemeris freshness — green fresh → amber aging → red past
+/// the ~2 h fit interval — with IODE + age in the hover. (On file replay the
+/// ephemeris is contemporaneous so it reads green; the colour earns its keep on
+/// long live runs, and a changed IODE flags a fresh upload.)
+fn draw_eph_used(ui: &mut egui::Ui, iode: u32, age_sec: f64) {
+    let color = if age_sec < 7200.0 {
+        egui::Color32::from_rgb(80, 200, 100)
+    } else if age_sec < 14400.0 {
+        egui::Color32::from_rgb(220, 190, 50)
+    } else {
+        egui::Color32::from_rgb(220, 80, 60)
+    };
+    ui.colored_label(color, "✔").on_hover_text(format!(
+        "used in fix · IODE {iode} · age {}",
+        fmt_age(age_sec)
+    ));
+}
+
+/// SBAS GEO status: a "src" mark for the GEO actually feeding the fix's
+/// corrections (vs. a redundant or other-system bird), plus pips for which
+/// correction message *types* are flowing — the SBAS analog of the ephemeris
+/// page row, replacing the bare message count.
+fn draw_sbas_cell(ui: &mut egui::Ui, sbas_msgs: u64, msg_mask: u64, is_source: bool) {
+    // The correction groups that matter, each lit if any of its message types
+    // has been decoded.
+    let groups: &[(&str, &[u8])] = &[
+        ("PRN mask (MT1)", &[1]),
+        ("fast corrections (MT2-5)", &[2, 3, 4, 5]),
+        ("iono grid mask (MT18)", &[18]),
+        ("iono delays (MT26)", &[26]),
+        ("long-term (MT24/25)", &[24, 25]),
+    ];
+    let got = |mts: &[u8]| mts.iter().any(|&t| msg_mask & (1u64 << t) != 0);
+    let on = constellation_color(Constellation::SBAS);
+
+    ui.horizontal(|ui| {
+        if is_source {
+            ui.colored_label(on, "src")
+                .on_hover_text("active correction source for the fix");
+        }
+        let n = groups.len();
+        let r = 3.5_f32;
+        let gap = 3.0_f32;
+        let h = ui.spacing().interact_size.y;
+        let w = n as f32 * (2.0 * r) + (n as f32 - 1.0) * gap;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
+        let painter = ui.painter();
+        let cy = rect.center().y;
+        let dim = egui::Color32::from_gray(80);
+        for (i, (_, mts)) in groups.iter().enumerate() {
+            let cx = rect.left() + r + i as f32 * (2.0 * r + gap);
+            let c = egui::pos2(cx, cy);
+            if got(mts) {
+                painter.circle_filled(c, r, on);
+            } else {
+                painter.circle_stroke(c, r, egui::Stroke::new(1.0, dim));
+            }
+        }
+        let mut tip = String::new();
+        for (label, mts) in groups {
+            tip.push_str(if got(mts) { "✔ " } else { "· " });
+            tip.push_str(label);
+            tip.push('\n');
+        }
+        tip.push_str(&format!("{sbas_msgs} CRC-valid messages"));
+        resp.on_hover_text(tip);
+    });
 }
 
 /// Polar sky plot: azimuth around the circle, elevation as radial distance from
