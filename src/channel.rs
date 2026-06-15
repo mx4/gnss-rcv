@@ -171,6 +171,14 @@ const E1C_COH_PERIODS_DEFAULT: usize = 5;
 // Stability budget for the 2nd-order pilot PLL: cap the loop bandwidth so
 // B·T_int ≤ this, auto-narrowing the loop as the coherent window grows.
 const E1C_PLL_BT_MAX: f64 = 0.2;
+// Adaptive-coherent-length phase-error gate (cycles): snap the coherent window
+// back to one period the moment the folded pilot phase error reaches this; grow
+// it one period per E1C_COH_GROW_STREAK consecutive cleaner updates. ~0.05 cyc = 18°.
+const E1C_COH_GROW_ERR: f64 = 0.05;
+const E1C_COH_GROW_STREAK: usize = 16;
+// C/N0 (dB-Hz) above which a high pilot phase error is read as dynamics (snap the
+// coherent window short) rather than thermal noise (keep integrating).
+const E1C_COH_STRONG_CN0: f64 = 40.0;
 
 #[derive(PartialEq, Debug, Clone)]
 pub enum State {
@@ -213,6 +221,8 @@ pub struct Tracking {
     sec_sync_buf: Vec<Complex64>, // prompts collected to search the 25 CS25 phases
     coh_p: Complex64,             // secondary-wiped prompt accumulated over the coherent window
     coh_count: usize,             // primary periods accumulated into coh_p so far
+    coh_len_cur: usize,           // adaptive coherent length (periods), 1..=e1c_coh_periods
+    coh_clean_streak: usize,      // consecutive clean loop updates (drives the grow)
 }
 
 // Rolling per-channel diagnostics. These are capped ring buffers: new samples
@@ -985,6 +995,8 @@ impl Channel {
         self.trk.sec_sync_buf = Vec::new();
         self.trk.coh_p = Complex64::default();
         self.trk.coh_count = 0;
+        self.trk.coh_len_cur = 1;
+        self.trk.coh_clean_streak = 0;
         self.num_trk_periods = 0;
         self.num_acq_periods = 0;
         self.num_idl_periods = 0;
@@ -1290,12 +1302,33 @@ impl Channel {
         let s = self.e1c_sec_code[idx] as f64;
         self.trk.coh_p += corr_prompt * s;
         self.trk.coh_count += 1;
-        if self.trk.coh_count >= self.e1c_coh_periods {
+        if self.trk.coh_count >= self.trk.coh_len_cur {
             let t_int = self.trk.coh_count as f64 * self.code_sec;
             let coh_p = self.trk.coh_p;
             self.run_pll_pilot(coh_p, t_int);
             self.trk.coh_p = Complex64::default();
             self.trk.coh_count = 0;
+            // Adaptive coherent length. Long integration lowers carrier-phase
+            // jitter (the pilot's weak-signal win) but updates the loop slowly, so
+            // it cannot follow fast carrier dynamics. A large phase error means
+            // "shorten" only when it is *dynamics*, not thermal noise — and C/N0
+            // tells them apart: a strong SV has little thermal phase noise, so a
+            // high error on it is dynamics (snap short, as the inverted ion-ifen
+            // E30 needs), whereas a weak SV's error is noise that long integration
+            // averages out (keep growing, as tuni's 33-36 dB-Hz SVs need). Grow
+            // one period per sustained clean streak, up to the configured max.
+            let abs_err = self.trk.err_phase.abs(); // cycles, |·| ≤ 0.25 (folded)
+            let dynamics = self.trk.cn0 > E1C_COH_STRONG_CN0 && abs_err >= E1C_COH_GROW_ERR;
+            if dynamics {
+                self.trk.coh_len_cur = 1;
+                self.trk.coh_clean_streak = 0;
+            } else {
+                self.trk.coh_clean_streak += 1;
+                if self.trk.coh_clean_streak >= E1C_COH_GROW_STREAK {
+                    self.trk.coh_len_cur = (self.trk.coh_len_cur + 1).min(self.e1c_coh_periods);
+                    self.trk.coh_clean_streak = 0;
+                }
+            }
         }
     }
 
@@ -1318,26 +1351,36 @@ impl Channel {
         self.trk.sec_sync_buf = Vec::new();
         self.trk.coh_p = Complex64::default();
         self.trk.coh_count = 0;
+        self.trk.coh_len_cur = 1; // start short; the adaptive loop grows it when stable
+        self.trk.coh_clean_streak = 0;
         self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the loop switch
         log::warn!(
-            "{}: E1C secondary-code synced (phase {best_d}, coh {} periods) ts={:.1}",
+            "{}: E1C secondary-code synced (phase {best_d}, coh ≤{} periods) ts={:.1}",
             self.sv,
             self.e1c_coh_periods,
             self.ts_sec,
         );
     }
 
-    /// 4-quadrant (non-Costas) PLL for the E1-C pilot: with the secondary code
-    /// stripped there is no ±1 data ambiguity, so the full `atan2` phase error
-    /// is usable (resolving the 180° lock the Costas loop merely tolerates).
-    /// `coh_p` is the secondary-wiped prompt integrated over `t_int` seconds; the
-    /// loop bandwidth auto-narrows so `B·t_int ≤ E1C_PLL_BT_MAX` stays stable as
-    /// the coherent window grows.
+    /// Carrier PLL for the E1-C pilot. The secondary code is stripped, so the
+    /// coherent sum is a clean (data-free) carrier vector; we lock it to the real
+    /// axis. The pilot's overall sign — the E1 OS `−e_C` subtraction plus the
+    /// code-polarity convention — puts the natural lock at *negative*-real, which
+    /// is the `atan2` ±π wrap: noise there flips the error ±0.5 cycle and the
+    /// integrator ramps the carrier off (the inverted-spectrum ion-ifen E30
+    /// carrier hunted ±15 Hz, spinning the data prompt out of I and breaking the
+    /// I/NAV decode; other captures lock at a phase that happens to dodge the
+    /// wrap). Folding the coherent sum into the +real half-plane makes the
+    /// discriminator a stable Costas — free here, since the pilot carries no data
+    /// (the 180° fold is immaterial) and the data sign is recovered downstream by
+    /// the decoder's polarity search. `t_int` is the coherent window (s); the loop
+    /// bandwidth auto-narrows so `B·t_int ≤ E1C_PLL_BT_MAX` as the window grows.
     fn run_pll_pilot(&mut self, coh_p: Complex64, t_int: f64) {
         if coh_p.re == 0.0 && coh_p.im == 0.0 {
             return;
         }
-        let err_phase = coh_p.im.atan2(coh_p.re) / (2.0 * PI);
+        let c = if coh_p.re >= 0.0 { coh_p } else { -coh_p };
+        let err_phase = c.im.atan2(c.re) / (2.0 * PI);
         let b_pll = B_PLL.min(E1C_PLL_BT_MAX / t_int);
         let w = b_pll / 0.53;
         self.trk.doppler_hz +=
