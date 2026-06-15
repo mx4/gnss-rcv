@@ -82,6 +82,11 @@ struct Options {
     no_sbas: bool,
     #[arg(long, help = "also search the QZSS L1 block (PRN 193-202)")]
     qzss: bool,
+    #[arg(
+        long,
+        help = "experimental: track the Galileo E1-C pilot (CS25 secondary-code sync + extended coherent integration). Use with --sig E1C to assess pilot tracking quality vs E1B"
+    )]
+    e1c: bool,
     #[arg(short = 'u', long, help = "use ui")]
     use_ui: bool,
     #[arg(short = 'p', long, help = "write diagnostic plots to plots/")]
@@ -232,6 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diagnostics: opt.plots,
         exit_on_fix: opt.exit_on_fix,
         json: opt.json.clone(),
+        e1c_pilot: opt.e1c,
     };
     let mut receiver = Receiver::new(
         &config,

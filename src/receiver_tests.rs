@@ -153,6 +153,68 @@ fn synthetic_e1_acquires_and_tracks() {
     );
 }
 
+// E1-C pilot (--e1c): the dataless pilot, generated as the E1-C primary code
+// overlaid with the CS25 secondary code at a non-zero start phase. The receiver
+// must acquire on the primary, lock the carrier with the Costas loop, then sync
+// the secondary-code phase and hold a coherent-integration track on the
+// 4-quadrant pilot PLL. Heavy (several seconds at 4.092 Msps to clear the FLL +
+// sync-settle window), so #[ignore]'d like the sibling geometry test; run with
+// `cargo test -- --ignored synthetic_e1c_pilot`.
+#[test]
+#[ignore]
+fn synthetic_e1c_pilot_syncs_and_tracks() {
+    let (fs, fi) = (4_092_000.0, 0.0);
+    let prn = 1u8;
+    // CS25 secondary code, rotated to a non-zero start phase to exercise the search.
+    let cs25: Vec<u8> = "0011100000001010110110010"
+        .bytes()
+        .map(|b| b - b'0')
+        .collect();
+    let phase0 = 7usize;
+    let symbols: Vec<u8> = (0..cs25.len())
+        .map(|i| cs25[(i + phase0) % cs25.len()])
+        .collect();
+    let svs = [SynthE1Sv::new(prn, 600.0, 1000.0, 0.0)
+        .pilot()
+        .with_symbols(symbols)];
+    // ~12 s: sync waits out the half-rate-monitor window (E1C_SYNC_SETTLE_SEC ≈ 9 s)
+    // before locking CS25, then a coherent-track tail. Clean signal → no half-rate
+    // event, but the settle still gates sync.
+    let sig = synth_e1(&svs, fs, fi, 12000, None);
+
+    let cfg = ReceiverConfig {
+        sats: prn.to_string(),
+        sig: Signal::GalileoE1c,
+        fs,
+        fi,
+        e1c_pilot: true,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(MockIQReader::new(sig)),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(GnssState::new())),
+    );
+    rx.run_loop(0);
+
+    let sv = SV::new(Constellation::Galileo, prn);
+    let ch = &rx.channels[&sv];
+    assert!(
+        ch.is_state_tracking(),
+        "E1-C pilot for {sv} should reach Tracking"
+    );
+    assert!(
+        ch.e1c_secondary_synced(),
+        "E1-C pilot should lock the CS25 secondary-code phase"
+    );
+    assert!(
+        ch.cn0() > 45.0,
+        "a noiseless E1-C pilot should track at very high C/N0, got {:.1}",
+        ch.cn0()
+    );
+}
+
 // Regression: a code phase of exactly 0 makes the first tracking step wrap
 // `code_off_sec` below zero while corr_p is still empty. That used to panic
 // (`corr_p.back().unwrap()` in get_code_and_carrier_phase); it must now track.

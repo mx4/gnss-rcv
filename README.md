@@ -119,6 +119,12 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
   4 ms BOC(1,1) code and Galileo I/NAV decode, and **automatically verifies
   Galileo OSNMA** message authentication (anti-spoofing) — the trust anchor is
   picked from the decoded epoch (2023/2024/2025). See [docs/osnma.md](docs/osnma.md).
+- `--e1c` (experimental): on an `--sig E1C` session, track the dataless Galileo
+  pilot — sync its CS25 secondary code and integrate coherently past the 4 ms
+  primary period with a 4-quadrant (non-Costas) PLL. The pilot carries no nav
+  data; the flag is a bring-up gate for assessing its tracking quality (lower
+  carrier-phase jitter, no half-rate false lock) vs `E1B`. Coherent length is
+  tunable via `GNSS_E1C_COH_MS` (default 20 ms).
 - `--num-msec N` / `--off-msec N`: process only N ms, or start N ms into the file.
 - `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
 - `-p` / `--plots`: write per-SV diagnostic PNGs to `plots/` (off by default).

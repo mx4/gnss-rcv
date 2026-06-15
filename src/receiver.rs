@@ -94,6 +94,12 @@ pub struct ReceiverConfig {
     pub exit_on_fix: bool,
     /// Write an end-of-run JSON summary to this path (`-` = stdout). None = off.
     pub json: Option<PathBuf>,
+    /// Experimental Galileo E1-C pilot tracking (`--e1c`): on an E1-C channel,
+    /// sync the CS25 secondary code and integrate coherently past the 4 ms
+    /// primary period with a 4-quadrant PLL. Off by default — a bring-up gate
+    /// for assessing the pilot's tracking-quality benefit vs E1-B. No effect on
+    /// non-E1-C signals.
+    pub e1c_pilot: bool,
 }
 
 impl Default for ReceiverConfig {
@@ -116,6 +122,7 @@ impl Default for ReceiverConfig {
             diagnostics: false,
             exit_on_fix: false,
             json: None,
+            e1c_pilot: false,
         }
     }
 }
@@ -245,6 +252,9 @@ struct JsonSat {
     cn0: f64,
     /// Peak C/N0 ever seen while tracking; can far overstate a faded SV.
     peak_cn0: f64,
+    /// RMS steady-state carrier-loop phase error (milliradians) — the carrier
+    /// tracking-quality figure for the E1-B vs E1-C-pilot A/B (lower = cleaner).
+    phase_rms_mrad: f64,
     subframes: u64,
     parity_errors: u64,
     ephemeris: bool,
@@ -503,6 +513,7 @@ impl Receiver {
                             invert_spectrum: cfg.invert_spectrum,
                             plots: cfg.plots,
                             diagnostics: cfg.diagnostics,
+                            e1c_pilot: cfg.e1c_pilot,
                         },
                         state.clone(),
                         carriers.clone(),
@@ -874,6 +885,7 @@ impl Receiver {
                     ttfl_s: (st.first_lock_ts > 0.0).then_some(st.first_lock_ts),
                     cn0: st.mean_cn0,
                     peak_cn0: st.peak_cn0,
+                    phase_rms_mrad: st.phase_rms_rad() * 1e3,
                     subframes: st.subframes,
                     parity_errors: st.parity_errors,
                     ephemeris: c.is_ephemeris_complete(),
@@ -948,14 +960,16 @@ fn print_summary(sum: &RunSummary) {
     );
 
     // cn0 = sustained (EMA) C/N0, pk = peak ever seen while tracking.
-    println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0   pk subfr parity eph fix");
+    println!(
+        "  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0   pk phRMS subfr parity eph fix"
+    );
     for s in &sum.sats {
         let ttfl = s
             .ttfl_s
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>4.1} {:>5} {:>6} {:>3} {:>3}",
+            "  {:<5} {:>5} {:>6} {:>7.1} {:>8.1} {:>7} {:>4.1} {:>4.1} {:>5.0} {:>5} {:>6} {:>3} {:>3}",
             s.sv,
             s.locks,
             s.losses,
@@ -964,6 +978,7 @@ fn print_summary(sum: &RunSummary) {
             ttfl,
             s.cn0,
             s.peak_cn0,
+            s.phase_rms_mrad,
             s.subframes,
             s.parity_errors,
             if s.ephemeris { "y" } else { "-" },

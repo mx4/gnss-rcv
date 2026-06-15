@@ -170,8 +170,12 @@ pub struct SynthE1Sv {
     pub code_phase_subchips: f64,
     pub cn0_dbhz: f64,
     /// I/NAV symbols (0/1). Empty = held at 0 (no data), which still acquires and
-    /// tracks; supply a stream to exercise frame sync / ephemeris decode.
+    /// tracks; supply a stream to exercise frame sync / ephemeris decode. For a
+    /// pilot SV this is the CS25 secondary-code bit stream instead of data.
     pub symbols: Vec<u8>,
+    /// Use the E1-C (pilot) primary code instead of E1-B. With `symbols` set to
+    /// the CS25 sequence this generates the dataless pilot for `--e1c` tests.
+    pub pilot: bool,
 }
 
 impl SynthE1Sv {
@@ -182,11 +186,19 @@ impl SynthE1Sv {
             code_phase_subchips,
             cn0_dbhz,
             symbols: Vec::new(),
+            pilot: false,
         }
     }
 
     pub fn with_symbols(mut self, symbols: Vec<u8>) -> Self {
         self.symbols = symbols;
+        self
+    }
+
+    /// Emit the E1-C pilot code (vs E1-B). Pair with [`with_symbols`] carrying
+    /// the CS25 secondary-code bits.
+    pub fn pilot(mut self) -> Self {
+        self.pilot = true;
         self
     }
 }
@@ -207,7 +219,14 @@ pub fn synth_e1(
 
     let codes: Vec<Vec<i8>> = svs
         .iter()
-        .map(|s| Signal::GalileoE1b.spreading_code(s.prn).expect("E1-B code"))
+        .map(|s| {
+            let sig = if s.pilot {
+                Signal::GalileoE1c
+            } else {
+                Signal::GalileoE1b
+            };
+            sig.spreading_code(s.prn).expect("E1 code")
+        })
         .collect();
     let subchip_rate: Vec<f64> = svs
         .iter()
