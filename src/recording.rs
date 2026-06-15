@@ -35,6 +35,13 @@ pub enum IQFileType {
     // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
     // e.g. jks.com's gps.samples.1bit.I.fs5456.if4092.bin.
     TypeOneBit,
+    // PocketSDR FE multi-channel RAW16: 4 channels × (2-bit I + 2-bit Q) packed
+    // into each 16-bit word (little-endian). Channel 0 lives in bits[3:0] of the
+    // low byte: I = bits[1:0], Q = bits[3:2].  Sign+magnitude encoding:
+    //   00 → +1/3,  01 → +1,  10 → -1/3,  11 → -1  (normalized to [-1, 1]).
+    // Use --fi 7420000 for recordings made with the standard FE4CH L1/E1 config
+    // (F_LO = 1568 MHz; GPS L1 / Galileo E1 at 1575.42 - 1568 = 7.42 MHz IF).
+    TypePocketSdrRaw16,
 }
 
 impl FromStr for IQFileType {
@@ -50,6 +57,7 @@ impl FromStr for IQFileType {
             "4bit" => Ok(IQFileType::TypeOne4Bit),
             "2bit" => Ok(IQFileType::TypeOne2Bit),
             "1bit" => Ok(IQFileType::TypeOneBit),
+            "pocketsdr-raw16" => Ok(IQFileType::TypePocketSdrRaw16),
             _ => Err(format!("Failed to parse {}", input).into()),
         }
     }
@@ -67,6 +75,7 @@ impl fmt::Display for IQFileType {
             IQFileType::TypeOne4Bit => write!(f, "4bit"),
             IQFileType::TypeOne2Bit => write!(f, "2bit"),
             IQFileType::TypeOneBit => write!(f, "1bit"),
+            IQFileType::TypePocketSdrRaw16 => write!(f, "pocketsdr-raw16"),
         }
     }
 }
@@ -110,6 +119,9 @@ impl IQReader for IQRecording {
         }
         if let IQFileType::TypeOne2Bit = self.file_type {
             return self.get_iq_data_2bit(off_samples, num_samples);
+        }
+        if let IQFileType::TypePocketSdrRaw16 = self.file_type {
+            return self.get_iq_data_pocketsdr_raw16(off_samples, num_samples);
         }
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
 
@@ -201,10 +213,11 @@ impl IQReader for IQRecording {
                     });
                 }
             }
-            // Returned early above via get_iq_data_1bit / _2bit / _4bit.
+            // Returned early above via get_iq_data_1bit / _2bit / _4bit / _pocketsdr_raw16.
             IQFileType::TypeOneBit => unreachable!(),
             IQFileType::TypeOne2Bit => unreachable!(),
             IQFileType::TypeOne4Bit => unreachable!(),
+            IQFileType::TypePocketSdrRaw16 => unreachable!(),
         }
 
         Ok(iq_vec)
@@ -222,6 +235,8 @@ impl IQRecording {
             IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
             IQFileType::TypeOne2Bit => (file_size * 4) as f64 / fs,
             IQFileType::TypeOne4Bit => (file_size * 2) as f64 / fs,
+            // RAW16: 4 channels packed in 2 bytes; we read 1 channel = 2 bytes/sample.
+            IQFileType::TypePocketSdrRaw16 => file_size as f64 / fs / 2.0,
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
         };
 
@@ -248,10 +263,13 @@ impl IQRecording {
             IQFileType::TypePairInt8 => 2,
             IQFileType::TypePairInt16 | IQFileType::TypePairInt16Be => 2 * 2,
             IQFileType::TypePairFloat32 => 2 * 4,
-            // Sub-byte; not expressible here -- handled on their own read paths.
+            // Not expressible here -- handled on their own read paths.
             IQFileType::TypeOneBit => unreachable!("1-bit uses get_iq_data_1bit"),
             IQFileType::TypeOne2Bit => unreachable!("2-bit uses get_iq_data_2bit"),
             IQFileType::TypeOne4Bit => unreachable!("4-bit uses get_iq_data_4bit"),
+            IQFileType::TypePocketSdrRaw16 => {
+                unreachable!("RAW16 uses get_iq_data_pocketsdr_raw16")
+            }
         }
     }
 
@@ -351,6 +369,50 @@ impl IQRecording {
                     im: 0.0,
                 });
             }
+        }
+        Ok(iq_vec)
+    }
+
+    // Read PocketSDR FE RAW16 channel 0 IQ samples.
+    // Each 16-bit word (2 bytes, little-endian) holds 4 channels of 2-bit I+Q.
+    // CH0 lives in bits[3:0] of the low byte: I = bits[1:0], Q = bits[3:2].
+    // Sign+magnitude encoding: {00,01,10,11} → {+1,+3,-1,-3} / 3 ∈ [-1, +1].
+    fn get_iq_data_pocketsdr_raw16(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
+        const BYTES_PER_SAMPLE: usize = 2; // one 16-bit word per sample time
+
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX;
+        }
+        let reader = self.reader.as_mut().unwrap();
+
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples * BYTES_PER_SAMPLE) as u64))?;
+            self.pos_samples = off_samples;
+        }
+
+        let mut bytes = vec![0u8; BYTES_PER_SAMPLE * num_samples];
+        if reader.read_exact(&mut bytes).is_err() {
+            return Err("end of file".into());
+        }
+        self.pos_samples += num_samples;
+
+        // Sign+magnitude LUT: index is the 2-bit value, result is normalized [-1,1].
+        // PocketSDR val_2b = {+1, +3, -1, -3}; normalize by 3.
+        const VAL: [f32; 4] = [1.0 / 3.0, 1.0, -1.0 / 3.0, -1.0];
+
+        let mut iq_vec = Vec::with_capacity(num_samples);
+        for off in (0..bytes.len()).step_by(BYTES_PER_SAMPLE) {
+            let b = bytes[off]; // low byte = CH0 (bits[3:0]) and CH1 (bits[7:4])
+            iq_vec.push(Complex32 {
+                re: VAL[(b & 0x03) as usize],
+                im: VAL[((b >> 2) & 0x03) as usize],
+            });
         }
         Ok(iq_vec)
     }

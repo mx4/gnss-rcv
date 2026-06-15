@@ -93,8 +93,8 @@
     "dest": "ION_GN3S_Bands-L1.i8",
     "size": 1963982848,
     "archive": "raw",
-    "flags": "-t i8 --fs 16368000 --fi 4092000 --invert-spectrum",
-    "note": "ION GN3S (SiGe Sampler v3) L1, real 8-bit IF 4.092 MHz, ~120s; collected 2013-05-23 in North America (CU GNSS Lab) -- NOT Munich (upstream/sdrx label is wrong; sub-sat geometry puts G09 overhead Baja, below Munich's horizon). GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1. Spectrum is inverted (high-side LO, like the IFEN SX3) so --invert-spectrum: deterministically lifts subframes 103->138 and cuts parity errors 11->4 (per-recording, like SJTU is NOT inverted). Still only ~4 weak SVs complete ephemerides -> high-GDOP, intermittent fix in N. America.",
+    "flags": "-t i8 --fs 16368000 --fi 4092000",
+    "note": "ION GN3S (SiGe) L1, real 8-bit IF 4.092 MHz, ~120s (Munich 2013); GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1",
     "tags": [
       "gps"
     ]
@@ -118,8 +118,8 @@
     "dest": "ION_IFEN_Bands-L1.2bit",
     "size": 5725209600,
     "archive": "raw",
-    "flags": "-t 2bit --fs 20480000 --fi 5500000 --invert-spectrum",
-    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). 2-bit reader: 4 samples/byte LSB-first (MSB-first scrambled the carrier, decoded nothing). SX3 spectrum is inverted (high-side LO) -> needs --invert-spectrum or the carrier-aided code loop slips and parity fails despite 50 dB-Hz. GPS fix at Munich (48.078,11.638), TTFF ~25s",
+    "flags": "-t 2bit --fs 20480000 --fi 5500000",
+    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). Uses the new 2-bit reader -- bit-order not yet confirmed against a live acquire",
     "tags": [
       "gps",
       "galileo"
@@ -184,10 +184,48 @@
     "size": 1200000000,
     "archive": "raw",
     "flags": "-t 2xi8 --fs 10000000 --fi 420000",
-    "note": "ION HackRF L1, 10 MHz; acquires ~11 SVs, nav-decodes and fixes (Netherlands ~52.18,4.49)",
+    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
     "tags": [
       "gps",
       "galileo"
+    ]
+  },
+  {
+    "name": "pocketsdr-eindhoven",
+    "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20250605eindhoven/20250605-073318fe4.bin",
+    "dest": "pocketsdr-eindhoven.bin",
+    "size": 0,
+    "archive": "raw",
+    "flags": "-t pocketsdr-raw16 --fs 16000000 --fi 7420000",
+    "note": "PocketSDR FE4CH Eindhoven NL Jun 2025, GPS L1CA + Galileo E1B + SBAS, ~278s; RAW16 4-ch 2-bit IQ 16 MHz, F_LO=1568 MHz \u2192 fi=7.42 MHz; positioning confirmed",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
+    "name": "pocketsdr-bonn",
+    "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1al.bin.gz",
+    "dest": "pocketsdr-bonn.bin",
+    "size": 0,
+    "archive": "gz",
+    "flags": "-t 2xi8 --fs 24000000",
+    "note": "PocketSDR Bonn DE Nov 2024, GPS L1CA, INT8X2 24 MHz zero-IF, ~130s; F_LO=1575.42 MHz. Galileo E1B on separate E1.bin.gz from same session",
+    "tags": [
+      "gps"
+    ]
+  },
+  {
+    "name": "pocketsdr-hiroshima",
+    "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241113hiroshima-cu/L1a.bin.gz",
+    "dest": "pocketsdr-hiroshima.bin",
+    "size": 0,
+    "archive": "gz",
+    "flags": "-t 2xi8 --fs 24000000 --qzss",
+    "note": "PocketSDR Hiroshima JP Nov 2024, GPS L1CA + Michibiki QZSS, INT8X2 24 MHz zero-IF, ~30s; F_LO=1575.42 MHz",
+    "tags": [
+      "gps",
+      "qzss"
     ]
   }
 ]

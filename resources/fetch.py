@@ -128,6 +128,27 @@ RECORDINGS: List[Rec] = [
         "ION_HackRF_Bands-L1.2xi8", 1200000000, "raw",
         "-t 2xi8 --fs 10000000 --fi 420000",
         "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)", ("gps", "galileo")),
+    Rec("pocketsdr-eindhoven",
+        "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20250605eindhoven/20250605-073318fe4.bin",
+        "pocketsdr-eindhoven.bin", 0, "raw",
+        "-t pocketsdr-raw16 --fs 16000000 --fi 7420000",
+        "PocketSDR FE4CH Eindhoven NL Jun 2025, GPS L1CA + Galileo E1B + SBAS, ~278s; "
+        "RAW16 4-ch 2-bit IQ 16 MHz, F_LO=1568 MHz → fi=7.42 MHz; positioning confirmed",
+        ("gps", "galileo")),
+    Rec("pocketsdr-bonn",
+        "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1al.bin.gz",
+        "pocketsdr-bonn.bin", 0, "gz",
+        "-t 2xi8 --fs 24000000",
+        "PocketSDR Bonn DE Nov 2024, GPS L1CA, INT8X2 24 MHz zero-IF, ~130s; "
+        "F_LO=1575.42 MHz. Galileo E1B on separate E1.bin.gz from same session",
+        ("gps",)),
+    Rec("pocketsdr-hiroshima",
+        "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241113hiroshima-cu/L1a.bin.gz",
+        "pocketsdr-hiroshima.bin", 0, "gz",
+        "-t 2xi8 --fs 24000000 --qzss",
+        "PocketSDR Hiroshima JP Nov 2024, GPS L1CA + Michibiki QZSS, INT8X2 24 MHz zero-IF, ~30s; "
+        "F_LO=1575.42 MHz",
+        ("gps", "qzss")),
 ]
 # fmt: on
 
@@ -308,6 +329,16 @@ def fetch_one(rec: Rec) -> bool:
         ok = _run(curl_base + [tmp, rec.url]) and _run(["tar", "xzf", tmp])
         if (HERE / tmp).exists():
             (HERE / tmp).unlink()
+    elif rec.archive == "gz":
+        # Plain gzip (not tar): download as <dest>.gz, gunzip in-place → <dest>.
+        dst_name = Path(rec.dest).name          # e.g. "pocketsdr-bonn.bin"
+        gz_tmp   = dst_name + ".gz"
+        ok = _run(curl_base + [gz_tmp, rec.url])
+        if ok:
+            ok = _run(["gunzip", "-f", gz_tmp]) # removes gz_tmp, creates dst_name
+        gz_path = HERE / gz_tmp
+        if gz_path.exists():
+            gz_path.unlink()
     else:  # raw
         part = rec.dest + ".part"
         ok = _run(curl_base + [part, rec.url])
