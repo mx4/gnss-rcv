@@ -131,11 +131,12 @@ RECORDINGS: List[Rec] = [
     Rec("pocketsdr-eindhoven",
         "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20250605eindhoven/20250605-073318fe4.bin",
         "pocketsdr-eindhoven.bin", 0, "raw",
-        "-t pocketsdr-raw16 --fs 16000000 --fi 7420000",
+        "-t pocketsdr-raw16 --fs 4000000 --fi 0",
         "PocketSDR FE4CH Eindhoven NL Jun 2025, GPS L1CA + Galileo E1B + SBAS, ~300s; "
-        "RAW16 4-ch 2-bit IQ 16 MHz, CH0 F_LO=1568 MHz → fi=7.42 MHz (reader conjugates "
-        "the IQ; without it L1 sits at -7.42 MHz and nothing acquires). Strong multi-SV "
-        "L1CA tracking (cn0 40-48); ephemeris/fix still blocked on nav-bit decode",
+        "RAW16 4-ch 2-bit IQ at 16 MHz, CH0 F_LO=1568 MHz (L1/E1 at +7.42 MHz). The "
+        "reader image-rejects (the wide IF channel aliases a self-image across the 8 MHz "
+        "Nyquist), downconverts and decimates to 4 MHz baseband; pass --fs 4000000 --fi 0. "
+        "Fixes in Eindhoven (cn0 40-48, TTFF ~33s)",
         ("gps", "galileo")),
     Rec("pocketsdr-bonn",
         "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1al.bin.gz",

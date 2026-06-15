@@ -1,5 +1,6 @@
 use bytesize::ByteSize;
 use colored::Colorize;
+use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
 use std::error::Error;
 use std::fmt;
@@ -13,6 +14,24 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use crate::receiver::IQReader;
+
+// === PocketSDR FE4CH RAW16 (CH0 = GPS L1/E1) front-end constants ===
+// The recording's .tag fixes these: F_S = 16 MHz, CH0 F_LO = 1568 MHz, so the
+// L1/E1 band sits at +7.42 MHz (1575.42 - 1568). The reader downconverts CH0 to
+// baseband and decimates to the configured output rate so the receiver runs at a
+// sane low rate and never sees the +7.42 MHz IF (which sits at fs/2 = 8 MHz, where
+// the wide-IF channel's >8 MHz content has aliased to negative frequencies as a
+// self-image of comparable power — left in place it slips the L1 carrier loop and
+// the nav data never decodes). The brick-wall keeps only the positive signal lobe.
+const PSDR_NATIVE_FS: f64 = 16.0e6;
+const PSDR_L1_IF: f64 = 7.42e6;
+// Positive-frequency passband to keep (Hz). The C/A main lobe is 7.42 ± 1.023 MHz;
+// everything above Nyquist (8 MHz) has aliased to negative frequencies, so keep
+// [PSDR_BAND_LO, Nyquist] and zero all negative bins to discard the image.
+const PSDR_BAND_LO: f64 = 6.0e6;
+// Overlap-save guard (native samples each side of a fetch). The band mask has a
+// raised-cosine lower edge so its impulse response decays well within this guard.
+const PSDR_GUARD: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IQFileType {
@@ -35,12 +54,12 @@ pub enum IQFileType {
     // 1-bit hard-limited real samples, 8 packed per byte (MSB first). I-only,
     // e.g. jks.com's gps.samples.1bit.I.fs5456.if4092.bin.
     TypeOneBit,
-    // PocketSDR FE multi-channel RAW16: 4 channels × (2-bit I + 2-bit Q) packed
-    // into each 16-bit word (little-endian). Channel 0 lives in bits[3:0] of the
-    // low byte: I = bits[1:0], Q = bits[3:2].  Sign+magnitude encoding:
-    //   00 → +1/3,  01 → +1,  10 → -1/3,  11 → -1  (normalized to [-1, 1]).
-    // Use --fi 7420000 for recordings made with the standard FE4CH L1/E1 config
-    // (F_LO = 1568 MHz; GPS L1 / Galileo E1 at 1575.42 - 1568 = 7.42 MHz IF).
+    // PocketSDR FE 4CH RAW16: 4 channels × (2-bit I + 2-bit Q) packed into each
+    // 16-bit word (little-endian). Channel 0 lives in bits[3:0] of the low byte:
+    // I = bits[1:0], Q = bits[3:2]. Sign+magnitude {00,01,10,11}→{+1,+3,-1,-3}/3.
+    // The reader image-rejects, downconverts CH0's +7.42 MHz L1/E1 IF to baseband
+    // and decimates to the configured output rate (see PSDR_* and the read path),
+    // so the standard FE4CH L1 config uses `--fs 4000000 --fi 0`.
     TypePocketSdrRaw16,
 }
 
@@ -97,6 +116,10 @@ pub struct IQRecording {
     // Total recording length in seconds (file size / sample rate), for the UI
     // progress bar.
     total_sec: f64,
+    // PocketSDR RAW16 only: decimation factor (native 16 MHz / output rate) and
+    // the FFT planner used by the image-reject downconvert. 1 / unused otherwise.
+    psdr_dec: usize,
+    fft_planner: FftPlanner<f32>,
 }
 
 impl IQReader for IQRecording {
@@ -235,9 +258,16 @@ impl IQRecording {
             IQFileType::TypeOneBit => (file_size * 8) as f64 / fs,
             IQFileType::TypeOne2Bit => (file_size * 4) as f64 / fs,
             IQFileType::TypeOne4Bit => (file_size * 2) as f64 / fs,
-            // RAW16: 4 channels packed in 2 bytes; we read 1 channel = 2 bytes/sample.
-            IQFileType::TypePocketSdrRaw16 => file_size as f64 / fs / 2.0,
+            // RAW16: one 16-bit word per native sample at the fixed 16 MHz rate
+            // (independent of the decimated output rate `fs` the receiver runs at).
+            IQFileType::TypePocketSdrRaw16 => file_size as f64 / 2.0 / PSDR_NATIVE_FS,
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
+        };
+        // RAW16 is downconverted+decimated to the requested output rate `fs`.
+        let psdr_dec = if let IQFileType::TypePocketSdrRaw16 = file_type {
+            ((PSDR_NATIVE_FS / fs).round() as usize).max(1)
+        } else {
+            1
         };
 
         // Diagnostic banner -> stderr (log), so stdout stays clean for `--json -`.
@@ -253,6 +283,8 @@ impl IQRecording {
             reader: None,
             pos_samples: 0,
             total_sec: recording_duration_sec,
+            psdr_dec,
+            fft_planner: FftPlanner::new(),
         })
     }
 
@@ -373,23 +405,39 @@ impl IQRecording {
         Ok(iq_vec)
     }
 
-    // Read PocketSDR FE 4CH RAW16 channel-0 (L1/E1) IQ samples.
+    // Read PocketSDR FE 4CH RAW16 channel-0 (L1/E1) as complex baseband, image-
+    // rejected and decimated to the configured output rate.
+    //
     // Each 16-bit word (2 bytes, little-endian) packs 4 channels, one per nibble,
     // each 2-bit I + 2-bit Q (RAW16, IQ=2, BITS=2 per the recording's .tag). CH0
-    // lives in bits[3:0]: I = bits[1:0], Q = bits[3:2]. The other nibbles are the
-    // L2/L5/L6-band channels (F_LO = 1602 / 1176.45 / 1278.75 MHz) and are skipped.
-    // Sign+magnitude encoding: {00,01,10,11} → {+1,+3,-1,-3} / 3 ∈ [-1, +1].
+    // lives in bits[3:0]: I = bits[1:0], Q = bits[3:2]; the other nibbles are the
+    // L2/L5/L6-band channels and are skipped. Sign+magnitude {00,01,10,11} →
+    // {+1,+3,-1,-3}/3. Q is conjugated: with PocketSDR's convention the GPS L1 C/A
+    // lands at -7.42 MHz, so conjugating moves it to +7.42 MHz.
     //
-    // The IQ is conjugated (Q negated): with PocketSDR's I/Q convention the GPS L1
-    // C/A lands at NEGATIVE frequency, so without the conjugate it sits at -7.42 MHz
-    // while --fi 7420000 searches +7.42 MHz and nothing acquires. Conjugating moves
-    // it to +7.42 MHz (F_LO=1568 → 1575.42-1568); pass --fs 16000000 --fi 7420000.
+    // `off_samples`/`num_samples` are at the *output* rate (16 MHz / `psdr_dec`).
+    // We read the matching native window (plus an overlap-save guard), FFT it, keep
+    // only the positive L1 lobe [PSDR_BAND_LO, Nyquist] and zero all negative bins
+    // — a brick wall at Nyquist that discards the >8 MHz content that aliased to
+    // negative frequencies as a self-image — then mix +7.42 MHz down to DC and take
+    // every `psdr_dec`-th sample. Without the image rejection the carrier loop slips
+    // and the nav data never decodes; see the PSDR_* constants above.
     fn get_iq_data_pocketsdr_raw16(
         &mut self,
         off_samples: usize,
         num_samples: usize,
     ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
-        const BYTES_PER_SAMPLE: usize = 2; // one 16-bit word per sample time
+        const BYTES_PER_SAMPLE: usize = 2; // one 16-bit word per native sample
+        let dec = self.psdr_dec;
+
+        // Native window: the requested output span plus a guard each side. `pad`
+        // counts samples clamped off the front of the file (zero-filled).
+        let in_center = off_samples * dec; // native index of output sample 0
+        let total = num_samples * dec + 2 * PSDR_GUARD; // logical native span
+        let in_first = in_center as i64 - PSDR_GUARD as i64;
+        let in_start = in_first.max(0) as usize;
+        let pad = (in_start as i64 - in_first) as usize;
+        let to_read = total - pad;
 
         if self.reader.is_none() {
             let file = File::open(&self.file_path)?;
@@ -397,31 +445,71 @@ impl IQRecording {
             self.pos_samples = usize::MAX;
         }
         let reader = self.reader.as_mut().unwrap();
+        reader.seek(SeekFrom::Start((in_start * BYTES_PER_SAMPLE) as u64))?;
 
-        if off_samples != self.pos_samples {
-            reader.seek(SeekFrom::Start((off_samples * BYTES_PER_SAMPLE) as u64))?;
-            self.pos_samples = off_samples;
+        let mut bytes = vec![0u8; BYTES_PER_SAMPLE * to_read];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            match reader.read(&mut bytes[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) => return Err(Box::new(e)),
+            }
         }
-
-        let mut bytes = vec![0u8; BYTES_PER_SAMPLE * num_samples];
-        if reader.read_exact(&mut bytes).is_err() {
+        let got = filled / BYTES_PER_SAMPLE;
+        // The middle (the actual output region) must be fully present; a trailing
+        // guard running past EOF is fine (zero-filled).
+        if pad + got < PSDR_GUARD + num_samples * dec {
             return Err("end of file".into());
         }
-        self.pos_samples += num_samples;
+        self.pos_samples = usize::MAX; // reads are not contiguous on this path
 
-        // Sign+magnitude LUT: index is the 2-bit value, result is normalized [-1,1].
-        // PocketSDR val_2b = {+1, +3, -1, -3}; normalize by 3.
+        // Decode CH0 (conjugated) into a zero-padded FFT buffer.
         const VAL: [f32; 4] = [1.0 / 3.0, 1.0, -1.0 / 3.0, -1.0];
-
-        let mut iq_vec = Vec::with_capacity(num_samples);
-        for off in (0..bytes.len()).step_by(BYTES_PER_SAMPLE) {
-            let lo = bytes[off]; // CH0 = low nibble: I = bits[1:0], Q = bits[3:2]
-            iq_vec.push(Complex32 {
+        let p = total.next_power_of_two();
+        let mut buf = vec![Complex32::new(0.0, 0.0); p];
+        for k in 0..got {
+            let lo = bytes[k * BYTES_PER_SAMPLE]; // CH0 = low nibble
+            buf[pad + k] = Complex32 {
                 re: VAL[(lo & 0x03) as usize],
-                im: -VAL[((lo >> 2) & 0x03) as usize], // conjugate -> L1 at +7.42 MHz
-            });
+                im: -VAL[((lo >> 2) & 0x03) as usize],
+            };
         }
-        Ok(iq_vec)
+
+        // Keep the positive L1 lobe [PSDR_BAND_LO, Nyquist]; zero everything else,
+        // including all negative-frequency bins (the aliased image). Raised-cosine
+        // lower edge so the impulse response stays inside PSDR_GUARD.
+        let fwd = self.fft_planner.plan_fft_forward(p);
+        let inv = self.fft_planner.plan_fft_inverse(p);
+        fwd.process(&mut buf);
+        let lo_bin = (PSDR_BAND_LO / PSDR_NATIVE_FS * p as f64).round() as usize;
+        let nyq = p / 2;
+        let edge = ((0.4e6 / PSDR_NATIVE_FS) * p as f64).round().max(1.0) as usize;
+        for (b, v) in buf.iter_mut().enumerate() {
+            let w = if b < lo_bin || b > nyq {
+                0.0
+            } else if b < lo_bin + edge {
+                let x = (b - lo_bin) as f32 / edge as f32;
+                0.5 - 0.5 * (std::f32::consts::PI * x).cos()
+            } else {
+                1.0
+            };
+            *v *= w;
+        }
+        inv.process(&mut buf);
+        let norm = 1.0 / p as f32;
+
+        // Mix +7.42 MHz -> DC (phase keyed to the absolute native index, so it is
+        // continuous across fetches) and take every dec-th sample.
+        let w0 = -2.0 * std::f64::consts::PI * PSDR_L1_IF / PSDR_NATIVE_FS;
+        let mut out = Vec::with_capacity(num_samples);
+        for j in 0..num_samples {
+            let local = PSDR_GUARD + j * dec; // this output sample's slot in buf
+            let ph = w0 * (in_center + j * dec) as f64;
+            let mix = Complex32::new(ph.cos() as f32, ph.sin() as f32);
+            out.push(buf[local] * norm * mix);
+        }
+        Ok(out)
     }
 
     // Read signed 4-bit real samples, 2 per byte (high nibble first), I-only.
@@ -472,5 +560,82 @@ impl IQRecording {
             });
         }
         Ok(iq_vec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustfft::num_complex::Complex32;
+
+    // Encode a complex sample into a PocketSDR RAW16 word: CH0 in the low nibble
+    // (I = bits[1:0], Q = bits[3:2]); the reader decodes im = -VAL[Q], so the Q
+    // field carries -q. Sign+magnitude levels {±1/3, ±1}, threshold at 0.66.
+    fn enc(v: f32) -> u16 {
+        match (v >= 0.0, v.abs() > 0.66) {
+            (true, false) => 0,  // +1/3
+            (true, true) => 1,   // +1
+            (false, false) => 2, // -1/3
+            (false, true) => 3,  // -1
+        }
+    }
+    fn raw16_tone(path: &Path, f_hz: f64, n: usize) {
+        let mut bytes = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            let th = 2.0 * std::f64::consts::PI * f_hz * k as f64 / PSDR_NATIVE_FS;
+            let (i, q) = (th.cos() as f32, th.sin() as f32); // re + j im = exp(j2pi f t)
+            let word = enc(i) | (enc(-q) << 2); // Q field holds -q (im = -VAL[Q])
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        std::fs::write(path, &bytes).unwrap();
+    }
+    fn block_power(path: &Path) -> (f64, f64) {
+        // Returns (DC power, total power) of a decoded output block. The +7.42 MHz
+        // signal mixes to DC; a rejected image leaves little of either.
+        let mut rec = IQRecording::new(path, 4.0e6, &IQFileType::TypePocketSdrRaw16).unwrap();
+        let out = rec.read_iq_block(2000, 8192).unwrap();
+        let n = out.len() as f32;
+        let mean: Complex32 = out.iter().sum::<Complex32>() / n;
+        let total: f64 = out.iter().map(|c| c.norm_sqr() as f64).sum::<f64>() / n as f64;
+        (mean.norm_sqr() as f64, total)
+    }
+
+    #[test]
+    fn raw16_decimates_signal_and_rejects_image() {
+        let dir = std::env::temp_dir();
+        let sig = dir.join(format!("psdr_sig_{}.bin", std::process::id()));
+        let img = dir.join(format!("psdr_img_{}.bin", std::process::id()));
+        // +7.42 MHz: the L1 IF -> mixes to DC, survives the positive-lobe bandpass.
+        raw16_tone(&sig, PSDR_L1_IF, 80_000);
+        // -7.42 MHz: a negative-frequency image -> the brick wall zeros it.
+        raw16_tone(&img, -PSDR_L1_IF, 80_000);
+
+        let (sig_dc, sig_tot) = block_power(&sig);
+        let (_img_dc, img_tot) = block_power(&img);
+        let _ = std::fs::remove_file(&sig);
+        let _ = std::fs::remove_file(&img);
+
+        // The +7.42 MHz tone lands at DC: nearly all its power is in the mean.
+        assert!(
+            sig_dc / sig_tot > 0.8,
+            "signal not at DC: dc/tot={}",
+            sig_dc / sig_tot
+        );
+        // The image is suppressed at least ~15 dB below the signal.
+        assert!(
+            img_tot < sig_tot / 30.0,
+            "image not rejected: {img_tot} vs {sig_tot}"
+        );
+    }
+
+    #[test]
+    fn raw16_duration_uses_native_rate() {
+        let dir = std::env::temp_dir();
+        let f = dir.join(format!("psdr_dur_{}.bin", std::process::id()));
+        raw16_tone(&f, PSDR_L1_IF, 16_000); // 16000 words = 1 ms at 16 MHz native
+        let rec = IQRecording::new(&f, 4.0e6, &IQFileType::TypePocketSdrRaw16).unwrap();
+        let _ = std::fs::remove_file(&f);
+        // Duration is file-size/native-rate (1 ms), independent of the 4 MHz output.
+        assert!((rec.duration_sec().unwrap() - 1.0e-3).abs() < 1e-9);
     }
 }
