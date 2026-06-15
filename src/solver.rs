@@ -424,6 +424,19 @@ impl PositionSolver {
         let (lat_rad, lon_rad, height_m) =
             ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
         let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
+        // SVs RAIM dropped don't count toward the published fix size, and the
+        // names go in the log so a recurring bad SV is visible.
+        let used = meas.len() - sol.excluded.len();
+        let excl = if sol.excluded.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = sol
+                .excluded
+                .iter()
+                .map(|&i| meas[i].sv.to_string())
+                .collect();
+            format!(" raim-excl={}", names.join(","))
+        };
         {
             let mut st = self.pub_state.lock().unwrap();
             st.latitude = lat;
@@ -431,7 +444,7 @@ impl PositionSolver {
             st.height = height_m;
             st.hdop = sol.hdop;
             st.vdop = sol.vdop;
-            st.fix_sv_count = meas.len();
+            st.fix_sv_count = used;
         }
         let mut sig: Vec<String> = sol
             .sigma
@@ -454,10 +467,10 @@ impl PositionSolver {
         log::warn!(
             "{}",
             format!(
-                "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
+                "position fix: {lat:.6},{lon:.6} h={height_m:.1}m  hdop={:.1} vdop={:.1} {}sv {sig}{isb}{excl} cdt={:.3}ms  https://maps.google.com/?ll={lat},{lon}",
                 sol.hdop,
                 sol.vdop,
-                meas.len(),
+                used,
                 sol.cdt_m / SPEED_OF_LIGHT * 1e3
             )
             .green()
