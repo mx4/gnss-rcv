@@ -1096,6 +1096,15 @@ fn draw_sbas_cell(ui: &mut egui::Ui, sbas_msgs: u64, msg_mask: u64, is_source: b
     let got = |mts: &[u8]| mts.iter().any(|&t| msg_mask & (1u64 << t) != 0);
     let on = constellation_color(Constellation::SBAS);
 
+    // The active source with every correction type in: collapse the pips to a
+    // check, mirroring the ephemeris column once an SV is used in the fix.
+    if is_source && groups.iter().all(|(_, mts)| got(mts)) {
+        ui.colored_label(on, "✔").on_hover_text(format!(
+            "active correction source — all types received ({sbas_msgs} CRC-valid messages)"
+        ));
+        return;
+    }
+
     ui.horizontal(|ui| {
         if is_source {
             ui.colored_label(on, "src")

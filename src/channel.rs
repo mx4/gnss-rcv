@@ -638,6 +638,19 @@ impl Channel {
             );
         }
 
+        // SBAS source failover: if this GEO was feeding corrections and has now
+        // lost lock, release the source so another GEO (on its next PRN mask)
+        // can take over -- otherwise corrections stall on a bird gone out of
+        // sight. The correction state is left intact: a same-system successor
+        // continues it seamlessly, and a different generation gets wiped on its
+        // own MT1/MT18 (see GnssState::sbas_source).
+        if self.sv.constellation == Constellation::SBAS {
+            let mut st = self.pub_state.lock().unwrap();
+            if st.sbas_source == Some(self.sv) {
+                st.sbas_source = None;
+            }
+        }
+
         self.set_state(State::Idle);
         self.num_idl_periods = 0;
         self.num_trk_periods = 0;
