@@ -92,8 +92,15 @@ impl Channel {
             let detail = {
                 let mut st = self.pub_state.lock().unwrap();
                 // One GEO feeds the correction state (see GnssState::sbas_source).
-                let source = *st.sbas_source.get_or_insert(self.sv);
-                let (iono, corr) = if source == self.sv {
+                // Lock onto the first to decode the PRN mask (MT1): the fast and
+                // long-term corrections index into it, so a GEO that emits only
+                // fast/iono messages first would lock in unusable while a
+                // fully-provisioned GEO sits idle. No usable source exists until
+                // some GEO has the mask, so nothing is fed before then.
+                if st.sbas_source.is_none() && msg.mtype == 1 {
+                    st.sbas_source = Some(self.sv);
+                }
+                let (iono, corr) = if st.sbas_source == Some(self.sv) {
                     (
                         st.sbas_iono.feed(&msg),
                         st.sbas_corr.feed(&msg, self.ts_sec),
