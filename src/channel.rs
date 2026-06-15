@@ -1630,7 +1630,14 @@ impl Channel {
                         k,
                     );
                 }
-                if k != 0.0 {
+                // Only an exactly ±1-step divergence is a half-symbol Costas
+                // false lock (the FLL/acquisition land within one step, so the
+                // alias is ±125 Hz). A larger |k| is not a half-rate ambiguity —
+                // it is a spurious large divergence (e.g. on an inverted-spectrum
+                // capture the `phys_dopp` negation makes div ≈ 2·doppler, giving
+                // k ≈ −12 on a healthy −800 Hz SV like ion-ifen's E30). Snapping
+                // that would wreck a good lock, so leave the carrier alone.
+                if k.abs() == 1.0 {
                     self.trk.doppler_hz += k * step;
                     self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the jump
                     self.update_state_doppler_hz();
