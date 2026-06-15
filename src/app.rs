@@ -179,6 +179,24 @@ fn sv_hover_text(sv: SV) -> String {
     }
 }
 
+/// Short SBAS system name for a GEO PRN, so the corrections flag names the
+/// actual augmentation system (the source could be WAAS, MSAS, … not just the
+/// European EGNOS). Mirrors the PRN→system map in `sv_hover_text`; unmapped PRNs
+/// fall back to the generic "SBAS".
+fn sbas_system_short(sv: SV) -> &'static str {
+    match sv.prn {
+        120 | 121 | 123 | 124 | 126 | 136 => "EGNOS",
+        131 | 133 | 135 | 138 => "WAAS",
+        129 | 137 => "MSAS",
+        127 | 128 | 132 => "GAGAN",
+        125 | 140 | 141 => "SDCM",
+        130 | 143 | 144 => "BDSBAS",
+        134 => "KASS",
+        122 => "SouthPAN",
+        _ => "SBAS",
+    }
+}
+
 /// Colour a dilution-of-precision value by the usual GNSS quality bands (lower is
 /// better): ≤2 excellent, ≤5 good, ≤10 moderate, else poor.
 fn dop_color(dop: f64) -> egui::Color32 {
@@ -543,7 +561,7 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, egnos, run) = {
+        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, sbas, run) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64, f64)> = st
                 .channels
@@ -583,6 +601,7 @@ impl GnssRcvApp {
                     st.sbas_iono.len(),
                     st.sbas_corr.fast_len(),
                     st.sbas_corr.long_len(),
+                    st.sbas_source.map(sbas_system_short).unwrap_or("SBAS"),
                 ),
                 (st.run_progress, st.realtime_x),
             )
@@ -683,11 +702,11 @@ impl GnssRcvApp {
                                                 if has_utc {
                                                     ui.monospace("utc");
                                                 }
-                                                let (n_igp, n_fast, n_long) = egnos;
+                                                let (n_igp, n_fast, n_long, sbas_sys) = sbas;
                                                 if n_igp + n_fast + n_long > 0 {
                                                     ui.colored_label(
                                                         constellation_color(Constellation::SBAS),
-                                                        "EGNOS",
+                                                        sbas_sys,
                                                     )
                                                     .on_hover_text(format!(
                                                         "SBAS corrections applied to the fix: iono \
