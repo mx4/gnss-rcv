@@ -319,7 +319,9 @@ def fetch_one(rec: Rec) -> bool:
         return True
 
     print("%s %s -> resources/%s" % (paint("↓", "yellow"), paint(rec.name + ": downloading", "bold"), rec.dest))
-    curl_base = ["curl", "-L", "--fail", "--progress-bar", "-C", "-", "-o"]
+    curl_base = ["curl", "-L", "--fail", "--progress-bar", "-C", "-",
+                 "--connect-timeout", "30", "--retry", "2", "--retry-delay", "5",
+                 "-o"]
 
     if rec.archive == "zip":
         tmp = rec.name + ".zip"
