@@ -14,7 +14,7 @@
 //! bare code.
 
 use rustfft::num_complex::{Complex32, Complex64};
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 
 use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
 use crate::constants::{EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT};
@@ -176,6 +176,10 @@ pub struct SynthE1Sv {
     /// Use the E1-C (pilot) primary code instead of E1-B. With `symbols` set to
     /// the CS25 sequence this generates the dataless pilot for `--e1c` tests.
     pub pilot: bool,
+    /// Emit the *combined* E1 OS signal: E1-B (data, from `symbols`) plus
+    /// CS25-modulated E1-C, 50/50 power. Exercises combined / pilot-aided
+    /// acquisition and tracking. Overrides `pilot`.
+    pub combined: bool,
 }
 
 impl SynthE1Sv {
@@ -187,6 +191,7 @@ impl SynthE1Sv {
             cn0_dbhz,
             symbols: Vec::new(),
             pilot: false,
+            combined: false,
         }
     }
 
@@ -199,6 +204,12 @@ impl SynthE1Sv {
     /// the CS25 secondary-code bits.
     pub fn pilot(mut self) -> Self {
         self.pilot = true;
+        self
+    }
+
+    /// Emit the combined E1-B+E1-C OS signal (data on E1-B, CS25 pilot on E1-C).
+    pub fn combined(mut self) -> Self {
+        self.combined = true;
         self
     }
 }
@@ -217,6 +228,8 @@ pub fn synth_e1(
     let code_sp = (fs * 1e-3) as usize;
     let n_total = code_sp * num_msec;
 
+    // Data code: E1-C for a standalone pilot SV, else E1-B (combined SVs carry
+    // data on E1-B and add the E1-C pilot below).
     let codes: Vec<Vec<i8>> = svs
         .iter()
         .map(|s| {
@@ -227,6 +240,19 @@ pub fn synth_e1(
             };
             sig.spreading_code(s.prn).expect("E1 code")
         })
+        .collect();
+    // Combined SVs also carry the E1-C pilot replica (CS25-modulated, below).
+    let pilot_codes: Vec<Option<Vec<i8>>> = svs
+        .iter()
+        .map(|s| {
+            s.combined
+                .then(|| Signal::GalileoE1c.spreading_code(s.prn).expect("E1-C code"))
+        })
+        .collect();
+    // CS25 secondary code as ±1 (one chip per 4 ms primary period).
+    let cs25: Vec<f64> = crate::galileo_e1_codes::E1C_SECONDARY_CODE
+        .bytes()
+        .map(|b| if b == b'0' { 1.0 } else { -1.0 })
         .collect();
     let subchip_rate: Vec<f64> = svs
         .iter()
@@ -249,17 +275,26 @@ pub fn synth_e1(
         let mut x = Complex32::new(0.0, 0.0);
         for (k, s) in svs.iter().enumerate() {
             let pos = s.code_phase_subchips + subchip_rate[k] * t;
-            let c = codes[k][pos.rem_euclid(E1_BOC_LEN as f64) as usize] as f64;
+            let idx_code = pos.rem_euclid(E1_BOC_LEN as f64) as usize;
+            let period = (pos / E1_BOC_LEN as f64).floor() as i64;
+            let c = codes[k][idx_code] as f64;
             // One I/NAV symbol per code period (every 8184 sub-chips).
             let b = if s.symbols.is_empty() {
                 1.0
             } else {
-                let period = (pos / E1_BOC_LEN as f64).floor() as i64;
                 let idx = period.rem_euclid(s.symbols.len() as i64) as usize;
                 if s.symbols[idx] == 0 { 1.0 } else { -1.0 }
             };
+            // Combined SVs split power 50/50 between data and pilot; the E1 OS
+            // sum is (data − pilot), the pilot carrying the CS25 secondary code.
+            let scale = if s.combined { FRAC_1_SQRT_2 } else { 1.0 };
+            let mut mag = c * b * scale;
+            if let Some(pc) = &pilot_codes[k] {
+                let sec = cs25[period.rem_euclid(cs25.len() as i64) as usize];
+                mag -= pc[idx_code] as f64 * sec * scale;
+            }
             let phase = TAU * (fi + s.doppler_hz) * t;
-            let sv64 = Complex64::from_polar(amp[k] * c * b, phase);
+            let sv64 = Complex64::from_polar(amp[k] * mag, phase);
             x += Complex32::new(sv64.re as f32, sv64.im as f32);
         }
         if let Some(rng) = rng.as_mut() {

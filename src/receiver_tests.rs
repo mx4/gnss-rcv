@@ -215,6 +215,55 @@ fn synthetic_e1c_pilot_syncs_and_tracks() {
     );
 }
 
+// Tier-2 combined channel on a synthetic combined E1 signal (E1-B data + CS25
+// E1-C pilot, 50/50 power): the channel acquires on E1-B, then the pilot's
+// 4-quadrant PLL drives the carrier while E1-B carries the data. Verifies it
+// tracks and locks the secondary code on a real combined waveform. Heavy (sync
+// waits out the half-rate window), so #[ignore].
+#[test]
+#[ignore]
+fn synthetic_e1_combined_pilot_tracks() {
+    let (fs, fi) = (4_092_000.0, 0.0);
+    let prn = 1u8;
+    // A small E1-B data pattern (flips every 5 periods); the pilot's CS25 is
+    // applied internally by the generator.
+    let symbols: Vec<u8> = (0..50).map(|i| (i / 5 % 2) as u8).collect();
+    let svs = [SynthE1Sv::new(prn, 600.0, 1000.0, 0.0)
+        .combined()
+        .with_symbols(symbols)];
+    let sig = synth_e1(&svs, fs, fi, 12000, None);
+    let cfg = ReceiverConfig {
+        sats: prn.to_string(),
+        sig: Signal::GalileoE1b,
+        fs,
+        fi,
+        e1c_pilot: true,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(MockIQReader::new(sig)),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(GnssState::new())),
+    );
+    rx.run_loop(0);
+    let sv = SV::new(Constellation::Galileo, prn);
+    let ch = &rx.channels[&sv];
+    assert!(
+        ch.is_state_tracking(),
+        "combined E1-B+E1-C channel for {sv} should track"
+    );
+    assert!(
+        ch.e1c_secondary_synced(),
+        "combined channel should lock the CS25 secondary-code phase"
+    );
+    assert!(
+        ch.cn0() > 40.0,
+        "combined noiseless track should be high C/N0, got {:.1}",
+        ch.cn0()
+    );
+}
+
 // Regression: a code phase of exactly 0 makes the first tracking step wrap
 // `code_off_sec` below zero while corr_p is still empty. That used to panic
 // (`corr_p.back().unwrap()` in get_code_and_carrier_phase); it must now track.
