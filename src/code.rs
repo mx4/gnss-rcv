@@ -4,6 +4,9 @@ use std::str::FromStr;
 pub const L1CA_CODE_LEN: usize = 1023;
 /// Galileo E1-B/E1-C primary "memory" code length (chips), 4 ms at 1.023 Mcps.
 pub const E1_CODE_LEN: usize = 4092;
+/// Galileo E1-C secondary (tiered) code length: one chip per 4 ms primary period,
+/// so the full E1-C code repeats every 25 × 4 ms = 100 ms.
+pub const E1C_SECONDARY_LEN: usize = 25;
 
 pub struct Code {}
 
@@ -101,6 +104,23 @@ fn e1_primary_code(prn: u8, pilot: bool) -> Option<Vec<i8>> {
     }
     debug_assert_eq!(code.len(), E1_CODE_LEN);
     Some(code)
+}
+
+/// Galileo E1-C secondary (tiered) code CS25 as bipolar ±1 (length 25). A single
+/// sequence common to all PRNs, overlaid one chip per 4 ms E1-C primary period
+/// (full period 25 × 4 ms = 100 ms). From the OS SIS ICD; bit→sign matches the
+/// primary memory codes (`0 → +1, 1 → −1`). Stripping it off the prompt lets the
+/// pilot integrate coherently past the 4 ms primary period and run a 4-quadrant
+/// (non-Costas) PLL — the E1-C pilot-tracking advantage over E1-B.
+pub fn e1c_secondary_code() -> [i8; E1C_SECONDARY_LEN] {
+    use crate::galileo_e1_codes::E1C_SECONDARY_CODE;
+    let mut out = [0i8; E1C_SECONDARY_LEN];
+    debug_assert_eq!(E1C_SECONDARY_CODE.len(), E1C_SECONDARY_LEN);
+    for (o, b) in out.iter_mut().zip(E1C_SECONDARY_CODE.bytes()) {
+        // '0' -> +1, '1' -> -1.
+        *o = 1 - 2 * (b - b'0') as i8;
+    }
+    out
 }
 
 /// Which GNSS signal a channel is configured for. Carries the per-signal
@@ -248,6 +268,28 @@ mod tests {
         // E1-C (pilot) is embedded too; PRNs are 1..=50.
         assert_eq!(e1_primary_code(1, true).unwrap().len(), E1_CODE_LEN);
         assert!(e1_primary_code(51, false).is_none());
+    }
+
+    #[test]
+    fn e1c_secondary_code_is_valid() {
+        // CS25 from the OS SIS ICD, decoded 0 -> +1, 1 -> -1.
+        let s = e1c_secondary_code();
+        assert_eq!(s.len(), E1C_SECONDARY_LEN);
+        assert!(s.iter().all(|&c| c == 1 || c == -1), "bipolar");
+        let expect = "0011100000001010110110010";
+        for (c, b) in s.iter().zip(expect.bytes()) {
+            assert_eq!(*c, 1 - 2 * (b - b'0') as i8);
+        }
+        // Periodic autocorrelation peaks unambiguously at zero shift, so the 25
+        // rotation hypotheses in secondary-code sync are separable.
+        let n = s.len();
+        let peak: i32 = s.iter().map(|&c| c as i32 * c as i32).sum();
+        assert_eq!(peak, n as i32);
+        let max_off = (1..n)
+            .map(|sh| (0..n).map(|i| s[i] as i32 * s[(i + sh) % n] as i32).sum::<i32>().abs())
+            .max()
+            .unwrap();
+        assert!(max_off < n as i32, "off-peak {max_off} must be < {n}");
     }
 
     // Circular correlation of `a` against `b` shifted by `shift` chips.

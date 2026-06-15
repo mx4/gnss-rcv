@@ -10,6 +10,7 @@
 //! solver consumes); each signal keeps its own decoder state next to it.
 
 use crate::channel::Channel;
+use crate::code::Signal;
 use crate::ephemeris::{Ephemeris, Measurement};
 use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
@@ -72,6 +73,12 @@ impl Channel {
     /// Decode the navigation message for this channel's signal. Generic entry
     /// point: dispatches by constellation to the signal-specific decoder.
     pub fn nav_decode(&mut self) {
+        // E1-C is the dataless pilot — no I/NAV rides it, so there is nothing to
+        // decode (feeding its prompt sign to the I/NAV decoder is meaningless).
+        // All Galileo nav data is on E1-B; the pilot only improves tracking.
+        if self.sig == Signal::GalileoE1c {
+            return;
+        }
         match self.sv.constellation {
             Constellation::Galileo => self.nav_decode_inav(),
             Constellation::SBAS => self.nav_decode_sbas(),

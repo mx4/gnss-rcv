@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 const PI: f64 = std::f64::consts::PI;
 
-use crate::code::Signal;
+use crate::code::{E1C_SECONDARY_LEN, Signal, e1c_secondary_code};
 use crate::navigation::Navigation;
 use crate::plots::plot_channel;
 use crate::state::ChannelState;
@@ -151,6 +151,35 @@ const HISTORY_MIN: usize = 4;
 const CN0_THRESHOLD_LOCKED: f64 = 35.0;
 const CN0_THRESHOLD_LOST: f64 = 29.0;
 
+// === Galileo E1-C pilot (experimental, --e1c) ===
+// CS25 secondary-code sync collects this many primary periods (2 full 25-chip
+// secondary periods) before searching the 25 phase hypotheses — enough for a
+// clean, unambiguous correlation peak.
+const E1C_SYNC_PERIODS: usize = 50;
+// Begin secondary-code sync only once the carrier is in a *true* lock — past the
+// half-rate false-lock monitor's first correction (its baseline at T_FPULLIN+4,
+// first check one HALF_RATE_WINDOW later). Syncing earlier risks locking the CS25
+// phase against a half-symbol-aliased carrier (the pre-sync Costas loop can sit
+// 125 Hz off, flipping every other symbol): the snap then fixes the frequency but
+// leaves the secondary offset stale, costing a chronic phase-error bias.
+const E1C_SYNC_SETTLE_SEC: f64 = T_FPULLIN + 4.0 + HALF_RATE_WINDOW + 1.0;
+// Default coherent integration length (primary periods) once CS25 is stripped:
+// 5 × 4 ms = 20 ms, 5× the E1-B per-symbol limit. Longer lowers carrier-phase
+// jitter; the pilot PLL bandwidth auto-narrows to keep B·T stable (run_pll_pilot).
+// Tunable via GNSS_E1C_COH_MS for the assessment.
+const E1C_COH_PERIODS_DEFAULT: usize = 5;
+// Stability budget for the 2nd-order pilot PLL: cap the loop bandwidth so
+// B·T_int ≤ this, auto-narrowing the loop as the coherent window grows.
+const E1C_PLL_BT_MAX: f64 = 0.2;
+// Adaptive-coherent-length phase-error gate (cycles): snap the coherent window
+// back to one period the moment the folded pilot phase error reaches this; grow
+// it one period per E1C_COH_GROW_STREAK consecutive cleaner updates. ~0.05 cyc = 18°.
+const E1C_COH_GROW_ERR: f64 = 0.05;
+const E1C_COH_GROW_STREAK: usize = 16;
+// C/N0 (dB-Hz) above which a high pilot phase error is read as dynamics (snap the
+// coherent window short) rather than thermal noise (keep integrating).
+const E1C_COH_STRONG_CN0: f64 = 40.0;
+
 #[derive(PartialEq, Debug, Clone)]
 pub enum State {
     Tracking,
@@ -161,6 +190,9 @@ pub enum State {
 #[derive(Default)]
 pub struct Tracking {
     prn_code: Vec<f32>, // upsampled real (±1) code; built on lock, freed on idle
+    // Combined E1-B+E1-C channel only: the upsampled E1-C pilot replica,
+    // correlated alongside prn_code (E1-B data). Empty otherwise.
+    pilot_code: Vec<f32>,
     doppler_hz: f64,
     code_off_sec: f64,
     code_rate_trim: f64,        // DLL integrator: residual code-rate error (s/s)
@@ -177,6 +209,20 @@ pub struct Tracking {
     tx_phase_ref: f64,    // baseline transmit phase paired with tx_phase_ref_ts
     divergence_ema: f64,  // self-calibrated healthy code-carrier divergence, Hz (0 = unset)
     divergence_streak: u32, // consecutive windows the divergence exceeds the gate
+
+    // --- E1-C pilot (CS25 secondary code); inert unless the channel is e1c_pilot ---
+    sec_synced: bool,             // CS25 phase found → coherent integration active
+    // Alignment of the 25-chip secondary code to the transmit grid: the chip for
+    // a period is `CS25[(num_tx_codes + sec_offset) mod 25]`. Keyed off the
+    // wrap-corrected transmit counter (not a private increment) so a code-phase
+    // wrap can't slip the secondary phase off the transmit grid (the
+    // wrap-grid invariant the LNAV/SBAS decoders also honour).
+    sec_offset: i64,
+    sec_sync_buf: Vec<Complex64>, // prompts collected to search the 25 CS25 phases
+    coh_p: Complex64,             // secondary-wiped prompt accumulated over the coherent window
+    coh_count: usize,             // primary periods accumulated into coh_p so far
+    coh_len_cur: usize,           // adaptive coherent length (periods), 1..=e1c_coh_periods
+    coh_clean_streak: usize,      // consecutive clean loop updates (drives the grow)
 }
 
 // Rolling per-channel diagnostics. These are capped ring buffers: new samples
@@ -257,6 +303,84 @@ fn doppler_bin_range(center_hz: f64, spread_hz: f64) -> (usize, usize) {
     )
 }
 
+/// One correlation triple (prompt, early, late).
+type Corr3 = (Complex64, Complex64, Complex64);
+/// A tracking period's correlations: data (prompt, early, late, noise) plus the
+/// optional pilot (prompt, early, late) when the channel is a combined E1-B+E1-C
+/// pilot channel.
+type TrackCorr = (Complex64, Complex64, Complex64, Complex64, Option<Corr3>);
+
+/// One fused early/prompt/late/noise correlation of a mixed (baseband) code
+/// period `sig` against a real (±1) `code` replica, normalized by tap count.
+/// `pos` is the early/late half-spacing (samples), `pos_noise` the off-peak
+/// noise-reference offset. Pulled out so a combined channel can run it twice
+/// (data + pilot replica) over the same mixed samples.
+fn correlate(
+    sig: &[Complex32],
+    code: &[f32],
+    pos: usize,
+    pos_noise: usize,
+) -> (Complex64, Complex64, Complex64, Complex64) {
+    // f64 accumulators: 50k f32 products summed in f32 would cost ~3 significant
+    // digits of the discriminator inputs. The multiplies (the SIMD-heavy part)
+    // stay f32. The code is real (±1), so sig·code is two scalar multiplies.
+    #[inline]
+    fn acc(a: &mut Complex64, s: Complex32, c: f32) {
+        a.re += (s.re * c) as f64;
+        a.im += (s.im * c) as f64;
+    }
+    let len = sig.len();
+    let mut corr_prompt = Complex64::default();
+    let mut corr_early = Complex64::default();
+    let mut corr_late = Complex64::default();
+    let mut corr_noise = Complex64::default();
+
+    // Single fused pass: prompt (full), early/late (offset by ±pos) and noise
+    // (offset by pos_noise) accumulated together, reading sig[j] and code[j]
+    // once each instead of in four separate passes.
+    for j in 0..len {
+        let sj = sig[j];
+        let cj = code[j];
+        acc(&mut corr_prompt, sj, cj);
+        if j + pos < len {
+            acc(&mut corr_early, sj, code[j + pos]);
+            acc(&mut corr_late, sig[j + pos], cj);
+        }
+        if j + pos_noise < len {
+            acc(&mut corr_noise, sj, code[j + pos_noise]);
+        }
+    }
+
+    corr_prompt /= len as f64;
+    corr_early /= (len - pos) as f64;
+    corr_late /= (len - pos) as f64;
+    corr_noise /= (len - pos_noise) as f64;
+    (corr_prompt, corr_early, corr_late, corr_noise)
+}
+
+/// CS25 secondary-code phase search: for each of the 25 cyclic offsets `d`,
+/// coherently sum `prompts[i]·code[(i+d) mod 25]` and return the offset whose
+/// sum has the largest magnitude. `|Σ|` is sign-blind, so the result is robust
+/// to the PLL's 180° lock ambiguity (the pilot carries no data — absolute
+/// polarity is irrelevant). The recovered offset aligns `code` to the prompts:
+/// prompt period `i` was modulated by `code[(i + d) mod 25]`.
+fn e1c_best_secondary_offset(prompts: &[Complex64], code: &[i8; E1C_SECONDARY_LEN]) -> usize {
+    let mut best_d = 0usize;
+    let mut best_mag = -1.0f64;
+    for d in 0..E1C_SECONDARY_LEN {
+        let mut acc = Complex64::default();
+        for (i, &p) in prompts.iter().enumerate() {
+            acc += p * code[(i + d) % E1C_SECONDARY_LEN] as f64;
+        }
+        let mag = acc.norm();
+        if mag > best_mag {
+            best_mag = mag;
+            best_d = d;
+        }
+    }
+    best_d
+}
+
 /// Per-channel work/quality counters, aggregated and printed at end of run.
 /// Plain counters bumped in the hot path (no locking).
 #[derive(Default, Clone)]
@@ -274,6 +398,24 @@ pub struct ChannelStats {
     pub subframes: u64,      // LNAV subframes decoded (parity OK)
     pub parity_errors: u64,  // LNAV parity failures
     pub used_in_fix: bool,   // contributed to at least one successful fix
+    // Steady-state carrier-loop phase-error (PLL discriminator residual)
+    // accumulators, summed only past pull-in/settle — the carrier-phase jitter
+    // figure for the E1-B vs E1-C-pilot A/B (see phase_rms_rad).
+    pub phi_err_sq_sum: f64,
+    pub phi_err_n: u64,
+}
+
+impl ChannelStats {
+    /// RMS of the steady-state carrier-loop phase error (radians); 0 if never
+    /// accumulated. Lower = cleaner carrier tracking — the E1-C pilot's expected
+    /// win over the E1-B Costas loop at equal C/N0.
+    pub fn phase_rms_rad(&self) -> f64 {
+        if self.phi_err_n == 0 {
+            0.0
+        } else {
+            (self.phi_err_sq_sum / self.phi_err_n as f64).sqrt()
+        }
+    }
 }
 
 /// The per-channel scalar parameters passed to [`Channel::new`] — signal
@@ -288,12 +430,16 @@ pub struct ChannelConfig {
     pub invert_spectrum: bool,
     pub plots: bool,
     pub diagnostics: bool,
+    /// Experimental E1-C pilot tracking (`--e1c`): sync the CS25 secondary code
+    /// and integrate coherently past the 4 ms primary period. Only meaningful for
+    /// [`Signal::GalileoE1c`]; ignored otherwise.
+    pub e1c_pilot: bool,
 }
 
 pub struct Channel {
     pub pub_state: Arc<Mutex<GnssState>>,
     pub sv: SV,
-    sig: Signal, // kept so the tracking code / acq FFT can be rebuilt on demand
+    pub(crate) sig: Signal, // kept so the tracking code / acq FFT can be rebuilt on demand
     pub stats: ChannelStats,
     plots: bool,
     // Diagnostics consumer present (--plots or the egui tab): keep the full
@@ -308,6 +454,18 @@ pub struct Channel {
     // code Doppler (code_dopp = -doppler_hz), so the carrier->code aiding and the
     // code-carrier divergence monitor must negate doppler_hz's physical sense.
     invert_spectrum: bool,
+    /// Experimental E1-C pilot tracking (`--e1c`). Set only for an E1-C channel
+    /// when the flag is on; gates the CS25 secondary-code sync and the extended
+    /// coherent integration / 4-quadrant PLL in the tracking loop.
+    e1c_pilot: bool,
+    /// CS25 secondary code (±1, length 25), decoded once. Inert unless e1c_pilot.
+    e1c_sec_code: [i8; E1C_SECONDARY_LEN],
+    /// Coherent integration length (primary periods) for the pilot carrier loop.
+    e1c_coh_periods: usize,
+    /// Tracking time (s) after which carrier-phase-error samples count toward the
+    /// steady-state RMS — past pull-in/settle. Env GNSS_PHASE_RMS_START_SEC
+    /// overrides it (diagnostic: exclude the half-rate-recovery transient).
+    phase_rms_start_sec: f64,
 
     code_sec: f64,   // code duration in sec
     code_len: usize, // prn code len: e.g. 1023
@@ -383,6 +541,13 @@ impl Channel {
 
     pub fn is_state_tracking(&self) -> bool {
         self.state == State::Tracking
+    }
+
+    /// True once the E1-C pilot has locked the CS25 secondary-code phase (always
+    /// false for non-pilot channels). Test accessor for the pilot-tracking path.
+    #[cfg(test)]
+    pub(crate) fn e1c_secondary_synced(&self) -> bool {
+        self.trk.sec_synced
     }
 
     pub fn is_ephemeris_complete(&self) -> bool {
@@ -496,7 +661,12 @@ impl Channel {
             invert_spectrum,
             plots,
             diagnostics,
+            e1c_pilot,
         } = config;
+        // The pilot path applies to E1-C (standalone pilot, Tier-1) and E1-B
+        // (combined: the pilot folds into the data channel, Tier-2); ignore the
+        // flag for any other signal (L1CA etc.).
+        let e1c_pilot = e1c_pilot && matches!(sig, Signal::GalileoE1c | Signal::GalileoE1b);
         let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
             panic!(
                 "no spreading code for {sig} PRN {} (Galileo E1 codes pending)",
@@ -504,6 +674,13 @@ impl Channel {
             )
         });
         let code_sec = sig.code_period_sec();
+        // E1-C pilot coherent integration length (primary periods). GNSS_E1C_COH_MS
+        // overrides the default for the assessment, rounded to the 4 ms grid.
+        let e1c_coh_periods = std::env::var("GNSS_E1C_COH_MS")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|ms| ((ms * 1e-3) / code_sec).round().max(1.0) as usize)
+            .unwrap_or(E1C_COH_PERIODS_DEFAULT);
         let code_len = sig.code_len();
         let code_sp = (fs * code_sec) as usize;
         // Per-signal code-loop time constant (sets the pull-in and rate-trim
@@ -551,6 +728,13 @@ impl Channel {
             fs,
             fi,
             invert_spectrum,
+            e1c_pilot,
+            e1c_sec_code: e1c_secondary_code(),
+            e1c_coh_periods,
+            phase_rms_start_sec: std::env::var("GNSS_PHASE_RMS_START_SEC")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(T_FPULLIN + 3.0),
             code_sec,
             code_len,
             code_sp,
@@ -587,13 +771,26 @@ impl Channel {
     /// tracking correlator. Cheap (one resample, no FFT); built on lock so an
     /// un-acquired channel holds none of it.
     fn build_prn_code(&self) -> Vec<f32> {
-        let code_buf = self
-            .sig
+        self.resample_code(self.sig)
+    }
+
+    /// Resample `sig`'s spreading replica to `code_sp` real (±1) tracking
+    /// samples. Used for the data code (`self.sig`) and, on a combined channel,
+    /// the E1-C pilot replica (E1-B and E1-C share code length and period).
+    fn resample_code(&self, sig: Signal) -> Vec<f32> {
+        let code_buf = sig
             .spreading_code(self.sv.prn)
             .expect("spreading code present (constructed in Channel::new)");
         (0..self.code_sp)
             .map(|i| code_buf[i * self.code_len / self.code_sp] as f32)
             .collect()
+    }
+
+    /// Combined E1-B+E1-C channel: the E1-C pilot is folded into the E1-B data
+    /// channel (pilot drives the carrier loop, DLL combines, E1-B carries I/NAV).
+    /// Distinct from the standalone E1-C pilot (Tier-1), which has no data code.
+    fn is_combined_pilot(&self) -> bool {
+        self.e1c_pilot && matches!(self.sig, Signal::GalileoE1b)
     }
 
     /// The forward-FFT'd complex code replica for FFT acquisition. Rebuilt when a
@@ -618,6 +815,7 @@ impl Channel {
         self.acq.sum_p = Vec::new();
         self.scratch = Vec::new();
         self.trk.prn_code = Vec::new();
+        self.trk.pilot_code = Vec::new();
         if self.state == State::Tracking {
             self.stats.lock_losses += 1;
             log::warn!(
@@ -778,6 +976,14 @@ impl Channel {
         self.acq.sum_p = Vec::new();
         self.acq.prn_code_fft = Vec::new();
         self.trk.prn_code = self.build_prn_code();
+        // Combined channel: build the E1-C pilot replica alongside the E1-B data
+        // code (empty otherwise — that emptiness is how the correlator and the
+        // loops detect combined mode).
+        self.trk.pilot_code = if self.is_combined_pilot() {
+            self.resample_code(Signal::GalileoE1c)
+        } else {
+            Vec::new()
+        };
         self.trk.doppler_hz = 0.0;
         self.trk.cn0 = 0.0;
         self.trk.accum_doppler_cyc = 0.0;
@@ -797,6 +1003,13 @@ impl Channel {
         self.trk.tx_phase_ref = 0.0;
         self.trk.divergence_ema = 0.0;
         self.trk.divergence_streak = 0;
+        self.trk.sec_synced = false;
+        self.trk.sec_offset = 0;
+        self.trk.sec_sync_buf = Vec::new();
+        self.trk.coh_p = Complex64::default();
+        self.trk.coh_count = 0;
+        self.trk.coh_len_cur = 1;
+        self.trk.coh_clean_streak = 0;
         self.num_trk_periods = 0;
         self.num_acq_periods = 0;
         self.num_idl_periods = 0;
@@ -960,10 +1173,12 @@ impl Channel {
         }
     }
 
-    fn tracking_compute_correlation(
-        &mut self,
-        window: &[Complex32],
-    ) -> (Complex64, Complex64, Complex64, Complex64) {
+    /// Correlate one mixed (baseband) code period against the data replica and,
+    /// for a combined E1-B+E1-C pilot channel, also against the pilot replica.
+    /// Returns the data (prompt, early, late, noise) plus, when `pilot_code` is
+    /// present, the pilot (prompt, early, late). The carrier is removed once
+    /// (shared mix); the two replicas are correlated over the same samples.
+    fn tracking_compute_correlation(&mut self, window: &[Complex32]) -> TrackCorr {
         let n = self.code_sp as i32;
         let code_idx = *self.hist.code_phase_offset.back().unwrap() as i32;
         assert!(-n < code_idx && code_idx < n);
@@ -997,46 +1212,19 @@ impl Channel {
         let pos = (SP_CORR * sp_per_chip) as usize;
         let pos_noise = (NEUTRAL_CORR * sp_per_chip) as usize;
 
-        let sig = &self.scratch;
-        let code = &self.trk.prn_code;
-        let len = sig.len();
+        let (corr_prompt, corr_early, corr_late, corr_noise) =
+            correlate(&self.scratch, &self.trk.prn_code, pos, pos_noise);
+        // Combined channel: also correlate the E1-C pilot replica over the same
+        // mixed samples (the pilot drives the carrier loop; the DLL combines the
+        // two). Empty pilot_code => not a combined channel, so None.
+        let pilot = if self.trk.pilot_code.is_empty() {
+            None
+        } else {
+            let (p, e, l, _) = correlate(&self.scratch, &self.trk.pilot_code, pos, pos_noise);
+            Some((p, e, l))
+        };
 
-        // f64 accumulators: 50k f32 products summed in f32 would cost ~3
-        // significant digits of the discriminator inputs. The multiplies (the
-        // SIMD-heavy part) stay f32. The code is real (±1), so sig·code is two
-        // scalar multiplies (sig.re·c, sig.im·c), not a full complex product.
-        #[inline]
-        fn acc(a: &mut Complex64, s: Complex32, c: f32) {
-            a.re += (s.re * c) as f64;
-            a.im += (s.im * c) as f64;
-        }
-        let mut corr_prompt = Complex64::default();
-        let mut corr_early = Complex64::default();
-        let mut corr_late = Complex64::default();
-        let mut corr_noise = Complex64::default();
-
-        // Single fused pass: prompt (full), early/late (offset by +/-pos) and
-        // noise (offset by pos_noise) accumulated together, reading sig[j]
-        // and code[j] once each instead of in four separate passes.
-        for j in 0..len {
-            let sj = sig[j];
-            let cj = code[j];
-            acc(&mut corr_prompt, sj, cj);
-            if j + pos < len {
-                acc(&mut corr_early, sj, code[j + pos]);
-                acc(&mut corr_late, sig[j + pos], cj);
-            }
-            if j + pos_noise < len {
-                acc(&mut corr_noise, sj, code[j + pos_noise]);
-            }
-        }
-
-        corr_prompt /= len as f64;
-        corr_early /= (len - pos) as f64;
-        corr_late /= (len - pos) as f64;
-        corr_noise /= (len - pos_noise) as f64;
-
-        (corr_prompt, corr_early, corr_late, corr_noise)
+        (corr_prompt, corr_early, corr_late, corr_noise, pilot)
     }
 
     fn run_fll(&mut self) {
@@ -1078,14 +1266,160 @@ impl Channel {
             1.4 * w * (err_phase - self.trk.err_phase) + w * w * err_phase * self.code_sec;
         self.update_state_doppler_hz();
         self.trk.err_phase = err_phase;
-        self.hist.phi_error.push_back(err_phase * 2.0 * PI);
+        self.record_phase_error(err_phase * 2.0 * PI);
     }
 
-    fn run_dll(&mut self, corr_early: Complex64, corr_late: Complex64) {
+    /// Record one carrier-loop phase-error sample (radians): push it to the
+    /// diagnostic ring and, once past pull-in/settle, accumulate it into the
+    /// steady-state RMS (the E1-B vs E1-C-pilot carrier-jitter figure). The
+    /// settle gate keeps the lock/sync transient out of the RMS.
+    fn record_phase_error(&mut self, err_rad: f64) {
+        self.hist.phi_error.push_back(err_rad);
+        // Steady-state only (past pull-in/settle). For the pilot, count only the
+        // synced 4-quadrant loop's residual — the pre-sync Costas samples are not
+        // the pilot's tracking quality.
+        let steady = self.trk_elapsed_sec() > self.phase_rms_start_sec
+            && (!self.e1c_pilot || self.trk.sec_synced);
+        if steady {
+            self.stats.phi_err_sq_sum += err_rad * err_rad;
+            self.stats.phi_err_n += 1;
+        }
+    }
+
+    /// E1-C pilot carrier loop. Until the CS25 secondary code is synced the
+    /// pilot is tracked with the ordinary Costas PLL (the unknown secondary chip
+    /// looks like data), while prompts are collected to find the secondary-code
+    /// phase. Once synced, each period's prompt is multiplied by the known
+    /// secondary chip and accumulated over `e1c_coh_periods` primary periods,
+    /// then a 4-quadrant PLL runs on the coherent sum — longer coherent
+    /// integration and no Costas squaring loss vs the per-4 ms E1-B loop.
+    fn run_pilot_carrier(&mut self, corr_prompt: Complex64) {
+        if !self.trk.sec_synced {
+            // Keep the carrier locked with the data-tolerant Costas loop while a
+            // clean window is gathered to search the secondary-code phase.
+            self.run_pll(corr_prompt);
+            if self.trk_elapsed_sec() >= E1C_SYNC_SETTLE_SEC {
+                self.trk.sec_sync_buf.push(corr_prompt);
+                if self.trk.sec_sync_buf.len() >= E1C_SYNC_PERIODS {
+                    self.sync_secondary_code();
+                }
+            }
+            return;
+        }
+        // Synced: strip the secondary chip and integrate coherently. The chip
+        // index is derived from the wrap-corrected transmit counter, so a
+        // code-phase wrap (which steps num_tx_codes) carries the secondary phase
+        // with it — no separate wrap mirror needed.
+        let idx = (self.num_tx_codes as i64 + self.trk.sec_offset)
+            .rem_euclid(E1C_SECONDARY_LEN as i64) as usize;
+        let s = self.e1c_sec_code[idx] as f64;
+        self.trk.coh_p += corr_prompt * s;
+        self.trk.coh_count += 1;
+        if self.trk.coh_count >= self.trk.coh_len_cur {
+            let t_int = self.trk.coh_count as f64 * self.code_sec;
+            let coh_p = self.trk.coh_p;
+            self.run_pll_pilot(coh_p, t_int);
+            self.trk.coh_p = Complex64::default();
+            self.trk.coh_count = 0;
+            // Adaptive coherent length. Long integration lowers carrier-phase
+            // jitter (the pilot's weak-signal win) but updates the loop slowly, so
+            // it cannot follow fast carrier dynamics. A large phase error means
+            // "shorten" only when it is *dynamics*, not thermal noise — and C/N0
+            // tells them apart: a strong SV has little thermal phase noise, so a
+            // high error on it is dynamics (snap short, as the inverted ion-ifen
+            // E30 needs), whereas a weak SV's error is noise that long integration
+            // averages out (keep growing, as tuni's 33-36 dB-Hz SVs need). Grow
+            // one period per sustained clean streak, up to the configured max.
+            let abs_err = self.trk.err_phase.abs(); // cycles, |·| ≤ 0.25 (folded)
+            let dynamics = self.trk.cn0 > E1C_COH_STRONG_CN0 && abs_err >= E1C_COH_GROW_ERR;
+            if dynamics {
+                self.trk.coh_len_cur = 1;
+                self.trk.coh_clean_streak = 0;
+            } else {
+                self.trk.coh_clean_streak += 1;
+                if self.trk.coh_clean_streak >= E1C_COH_GROW_STREAK {
+                    self.trk.coh_len_cur = (self.trk.coh_len_cur + 1).min(self.e1c_coh_periods);
+                    self.trk.coh_clean_streak = 0;
+                }
+            }
+        }
+    }
+
+    /// Find the CS25 secondary-code phase from the collected prompt window: for
+    /// each of the 25 cyclic offsets, coherently sum `prompt[i]·CS25[(i+d) mod
+    /// 25]` and pick the offset with the largest magnitude. `|Σ|` is sign-blind,
+    /// so this is robust to the PLL's 180° lock ambiguity (the pilot carries no
+    /// data, so absolute polarity is irrelevant). Sets `sec_phase` for the next
+    /// period and switches the carrier loop to coherent integration.
+    fn sync_secondary_code(&mut self) {
+        let n = self.trk.sec_sync_buf.len();
+        let best_d = e1c_best_secondary_offset(&self.trk.sec_sync_buf, &self.e1c_sec_code);
+        // `best_d` aligns CS25 to the buffer: prompt[i] (transmit count tx0 + i)
+        // was modulated by CS25[(i + best_d) mod 25]. The last collected prompt
+        // (index n-1) is this period's transmit count, so tx0 = num_tx_codes -
+        // (n-1); the per-period chip is then CS25[(num_tx_codes + sec_offset)].
+        let tx0 = self.num_tx_codes as i64 - (n as i64 - 1);
+        self.trk.sec_offset = (best_d as i64 - tx0).rem_euclid(E1C_SECONDARY_LEN as i64);
+        self.trk.sec_synced = true;
+        self.trk.sec_sync_buf = Vec::new();
+        self.trk.coh_p = Complex64::default();
+        self.trk.coh_count = 0;
+        self.trk.coh_len_cur = 1; // start short; the adaptive loop grows it when stable
+        self.trk.coh_clean_streak = 0;
+        self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the loop switch
+        log::warn!(
+            "{}: E1C secondary-code synced (phase {best_d}, coh ≤{} periods) ts={:.1}",
+            self.sv,
+            self.e1c_coh_periods,
+            self.ts_sec,
+        );
+    }
+
+    /// Carrier PLL for the E1-C pilot. The secondary code is stripped, so the
+    /// coherent sum is a clean (data-free) carrier vector; we lock it to the real
+    /// axis. The pilot's overall sign — the E1 OS `−e_C` subtraction plus the
+    /// code-polarity convention — puts the natural lock at *negative*-real, which
+    /// is the `atan2` ±π wrap: noise there flips the error ±0.5 cycle and the
+    /// integrator ramps the carrier off (the inverted-spectrum ion-ifen E30
+    /// carrier hunted ±15 Hz, spinning the data prompt out of I and breaking the
+    /// I/NAV decode; other captures lock at a phase that happens to dodge the
+    /// wrap). Folding the coherent sum into the +real half-plane makes the
+    /// discriminator a stable Costas — free here, since the pilot carries no data
+    /// (the 180° fold is immaterial) and the data sign is recovered downstream by
+    /// the decoder's polarity search. `t_int` is the coherent window (s); the loop
+    /// bandwidth auto-narrows so `B·t_int ≤ E1C_PLL_BT_MAX` as the window grows.
+    fn run_pll_pilot(&mut self, coh_p: Complex64, t_int: f64) {
+        if coh_p.re == 0.0 && coh_p.im == 0.0 {
+            return;
+        }
+        let c = if coh_p.re >= 0.0 { coh_p } else { -coh_p };
+        let err_phase = c.im.atan2(c.re) / (2.0 * PI);
+        let b_pll = B_PLL.min(E1C_PLL_BT_MAX / t_int);
+        let w = b_pll / 0.53;
+        self.trk.doppler_hz +=
+            1.4 * w * (err_phase - self.trk.err_phase) + w * w * err_phase * t_int;
+        self.update_state_doppler_hz();
+        self.trk.err_phase = err_phase;
+        self.record_phase_error(err_phase * 2.0 * PI);
+    }
+
+    fn run_dll(
+        &mut self,
+        corr_early: Complex64,
+        corr_late: Complex64,
+        pilot_el: Option<(Complex64, Complex64)>,
+    ) {
         // DLL update cadence in code periods (10 for L1CA's 1 ms, 2 for E1's 4 ms).
         let n = usize::max(1, (T_DLL / self.code_sec) as usize);
-        self.trk.sum_corr_e += corr_early.norm();
-        self.trk.sum_corr_l += corr_late.norm();
+        // Combined channel: add the E1-C pilot early/late magnitudes non-
+        // coherently — the data and pilot codes share the same code timing, so
+        // this is a ~3 dB stronger discriminator (the full E1 OS power) on one
+        // code loop. `pilot_el` is None off the combined path → data-only.
+        let (pe, pl) = pilot_el
+            .map(|(e, l)| (e.norm(), l.norm()))
+            .unwrap_or((0.0, 0.0));
+        self.trk.sum_corr_e += corr_early.norm() + pe;
+        self.trk.sum_corr_l += corr_late.norm() + pl;
         if self.num_trk_periods.is_multiple_of(n) {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
@@ -1352,10 +1686,30 @@ impl Channel {
                         k,
                     );
                 }
-                if k != 0.0 {
+                // Only an exactly ±1-step divergence is a half-symbol Costas
+                // false lock (the FLL/acquisition land within one step, so the
+                // alias is ±125 Hz). A larger |k| is not a half-rate ambiguity —
+                // it is a spurious large divergence (e.g. on an inverted-spectrum
+                // capture the `phys_dopp` negation makes div ≈ 2·doppler, giving
+                // k ≈ −12 on a healthy −800 Hz SV like ion-ifen's E30). Snapping
+                // that would wreck a good lock, so leave the carrier alone.
+                if k.abs() == 1.0 {
                     self.trk.doppler_hz += k * step;
                     self.trk.err_phase = 0.0; // avoid a PLL derivative spike on the jump
                     self.update_state_doppler_hz();
+                    // A synced pilot that just got half-rate corrected found its
+                    // CS25 phase against the half-symbol-aliased carrier, so the
+                    // secondary offset is now stale (the wipe would carry a
+                    // residual (−1)ⁿ). Drop the sync and re-find it at the
+                    // corrected frequency. (E1C_SYNC_SETTLE_SEC delays the first
+                    // sync past this correction, so this is the rare-straggler
+                    // safety net.)
+                    if self.e1c_pilot && self.trk.sec_synced {
+                        self.trk.sec_synced = false;
+                        self.trk.sec_sync_buf = Vec::new();
+                        self.trk.coh_p = Complex64::default();
+                        self.trk.coh_count = 0;
+                    }
                     log::warn!(
                         "{}: half-rate false lock corrected {:+.0} Hz -> {:.0} Hz at ts={:.1}",
                         self.sv,
@@ -1413,8 +1767,11 @@ impl Channel {
 
     fn tracking_process(&mut self, iq_vec: &[Complex32]) {
         self.advance_code_and_carrier_phase();
-        let (corr_prompt, corr_early, corr_late, corr_noise) =
+        let (corr_prompt, corr_early, corr_late, corr_noise, pilot) =
             self.tracking_compute_correlation(iq_vec);
+        // corr_p holds the DATA prompt (E1-B on a combined channel): I/NAV, the
+        // FLL and the diagnostics read it. The pilot prompt (when present) drives
+        // the carrier loop instead.
         self.hist.corr_p.push_back(corr_prompt);
         self.num_trk_periods += 1;
         self.num_tx_codes += 1.0;
@@ -1453,13 +1810,21 @@ impl Channel {
         // signature of an epoch error, not of anything on the sampling grid.
         self.nav.meas.code_off_sec = self.trk.code_off_sec;
 
+        // The pilot prompt: the separate E1-C correlation on a combined channel,
+        // else the channel's own prompt (standalone E1-C, where prn_code already
+        // is the pilot). `pilot_el` lets the DLL combine the two replicas.
+        let pilot_prompt = pilot.map(|(p, _, _)| p).unwrap_or(corr_prompt);
+        let pilot_el = pilot.map(|(_, e, l)| (e, l));
+
         if self.trk_elapsed_sec() < T_FPULLIN {
             self.run_fll();
+        } else if self.e1c_pilot {
+            self.run_pilot_carrier(pilot_prompt);
         } else {
             self.run_pll(corr_prompt);
         }
 
-        self.run_dll(corr_early, corr_late);
+        self.run_dll(corr_early, corr_late, pilot_el);
         self.update_cn0(corr_prompt, corr_noise);
 
         if self.trk_elapsed_sec() >= T_NPULLIN {
@@ -1531,6 +1896,38 @@ impl Channel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn e1c_secondary_offset_recovers_phase() {
+        let code = e1c_secondary_code();
+        // A locked-carrier prompt window: each period carries its CS25 chip on a
+        // fixed complex amplitude (constant carrier phase) plus deterministic
+        // noise. The search must recover the starting offset for any carrier
+        // phase — including a 180° flip (amp negated), which it is blind to.
+        for &d0 in &[0usize, 1, 7, 24] {
+            for &amp_phase in &[0.0f64, 0.9, PI] {
+                let amp = Complex64::from_polar(3.0, amp_phase);
+                let mut seed = 0x1234_5678u64;
+                let mut noise = || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (seed as f64 / u64::MAX as f64) - 0.5
+                };
+                let prompts: Vec<Complex64> = (0..E1C_SYNC_PERIODS)
+                    .map(|i| {
+                        let s = code[(i + d0) % E1C_SECONDARY_LEN] as f64;
+                        amp * s + Complex64::new(noise(), noise())
+                    })
+                    .collect();
+                assert_eq!(
+                    e1c_best_secondary_offset(&prompts, &code),
+                    d0,
+                    "d0={d0} amp_phase={amp_phase}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn doppler_bin_range_covers_and_clamps() {
