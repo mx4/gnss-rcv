@@ -1102,13 +1102,13 @@ fn draw_sbas_cell(ui: &mut egui::Ui, sbas_msgs: u64, msg_mask: u64, is_source: b
     let on = constellation_color(Constellation::SBAS);
 
     // Every correction type in: collapse the pips to a check (like the
-    // ephemeris column). The active source is marked "src ✔"; a complete
+    // ephemeris column). The active source is marked "✔ src"; a complete
     // non-source GEO gets a plain ✔ — fully provisioned, standing by to take
     // over if the source goes dark.
     if groups.iter().all(|(_, mts)| got(mts)) {
         let (label, tip) = if is_source {
             (
-                "src ✔",
+                "✔ src",
                 format!(
                     "active correction source — all types received ({sbas_msgs} CRC-valid messages)"
                 ),
