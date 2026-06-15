@@ -140,9 +140,10 @@ real tracking bug: the carrier de-rotation removed only the Doppler, not the
 intermediate frequency, so a non-zero `--fi` left a residual that gutted the
 prompt (acquisition cn0 ~48 collapsed to ~30 the moment tracking began). Fixed in
 [channel.rs](../src/channel.rs) by mixing tracking down by `fi + doppler` (a no-op
-for the fi=0 baseband captures). Now some SVs decode ephemeris, but it still does
-**not** get a full fix on this file — nav decode is intermittent (remaining open
-issue, separate from the carrier fix).
+for the fi=0 baseband captures). With nav decode now solid it **fixes** at
+≈ 52.150 N, 4.497 E (Netherlands — the same scene as the LimeSDR/RTL-SDR
+captures), 4 SVs, TTFF ≈ 34 s. (Earlier this file got no fix because nav decode
+was intermittent; that is now resolved.)
 
 ## gioveAandB_short.bin
 http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/
@@ -181,10 +182,11 @@ cargo run --release -- -f resources/SJTU_Bands-L1E1.dat -t 4bit --fs 25000000 --
 ```
 Acquires/tracks **15–29 GPS SVs at 45–50 dB-Hz** (G05 ≈ 50, G02 ≈ 49, G29 ≈ 47)
 with many holding lock the full 60 s, and decodes LNAV subframes (e.g. G05
-subframe-5, svid 14). It does **not** complete a full ephemeris within 60 s:
-bit-sync is slow here (~8 s on the SVs that do sync, and several strong SVs never
-sync), so SF1+2+3 of one frame aren't all captured — an open nav-decode issue,
-not a signal one. Being an Asia-Pacific (China) L1+E1 capture it is also the
+subframe-5, svid 14). It now completes ephemerides and **fixes** at ≈ 31.025 N,
+121.439 E (Shanghai Jiao Tong University, matching the site truth), 4 SVs,
+TTFF ≈ 26 s — the DLL PI-loop and full-decode-latency anchor work closed the
+earlier slow-bit-sync stall that used to leave it short of a full ephemeris.
+Being an Asia-Pacific (China) L1+E1 capture it is also the
 foundation recording for QZSS/BeiDou/Galileo work.
 
 (Historical note: an earlier pass mis-read fs as 12.5 MHz and concluded "SJTU GPS

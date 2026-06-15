@@ -93,8 +93,8 @@
     "dest": "ION_GN3S_Bands-L1.i8",
     "size": 1963982848,
     "archive": "raw",
-    "flags": "-t i8 --fs 16368000 --fi 4092000",
-    "note": "ION GN3S (SiGe) L1, real 8-bit IF 4.092 MHz, ~120s (Munich 2013); GPS L1 C/A -- GN3S ~2 MHz BW too narrow for E1",
+    "flags": "-t i8 --fs 16368000 --fi 4092000 --invert-spectrum",
+    "note": "ION GN3S (SiGe) L1, real 8-bit IF 4.092 MHz, ~120s (North America 2013, CU GNSS Lab -- not Munich); GPS L1 C/A, inverted IF spectrum (--invert-spectrum). Weak/high-GDOP fix lands in eastern N. America (~37-39N, 82W)",
     "tags": [
       "gps"
     ]
@@ -106,7 +106,7 @@
     "size": 749899776,
     "archive": "raw",
     "flags": "-t 4bit --fs 25000000 --fi 6250000",
-    "note": "ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs, no full fix",
+    "note": "ION SJTU Shanghai L1+E1, SX3 4-bit, 60s; tracks 15-29 SVs; GPS fix at 31.025,121.439 (TTFF ~26s)",
     "tags": [
       "gps",
       "galileo"
@@ -118,8 +118,8 @@
     "dest": "ION_IFEN_Bands-L1.2bit",
     "size": 5725209600,
     "archive": "raw",
-    "flags": "-t 2bit --fs 20480000 --fi 5500000",
-    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). Uses the new 2-bit reader -- bit-order not yet confirmed against a live acquire",
+    "flags": "-t 2bit --fs 20480000 --fi 5500000 --invert-spectrum",
+    "note": "ION IFEN SX3 dual-RF L1, real 2-bit IF 5.5 MHz, 10 MHz BW, ~18 min (Munich 2016, 5.7 GiB); GPS L1 + 4 Galileo E1 (E11/E12/E19/E20). 2-bit reader is LSB-first + inverted IF spectrum (--invert-spectrum); GPS fix at Munich 48.078,11.638 (TTFF ~25s)",
     "tags": [
       "gps",
       "galileo"
@@ -184,7 +184,7 @@
     "size": 1200000000,
     "archive": "raw",
     "flags": "-t 2xi8 --fs 10000000 --fi 420000",
-    "note": "ION HackRF L1; acquires 11 SVs but doesn't nav-decode (open)",
+    "note": "ION HackRF L1, 60s; acquires 11 SVs; GPS fix at 52.150,4.497 (Netherlands, TTFF ~34s)",
     "tags": [
       "gps",
       "galileo"
