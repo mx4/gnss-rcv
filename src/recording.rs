@@ -373,10 +373,17 @@ impl IQRecording {
         Ok(iq_vec)
     }
 
-    // Read PocketSDR FE RAW16 channel 0 IQ samples.
-    // Each 16-bit word (2 bytes, little-endian) holds 4 channels of 2-bit I+Q.
-    // CH0 lives in bits[3:0] of the low byte: I = bits[1:0], Q = bits[3:2].
+    // Read PocketSDR FE 4CH RAW16 channel-0 (L1/E1) IQ samples.
+    // Each 16-bit word (2 bytes, little-endian) packs 4 channels, one per nibble,
+    // each 2-bit I + 2-bit Q (RAW16, IQ=2, BITS=2 per the recording's .tag). CH0
+    // lives in bits[3:0]: I = bits[1:0], Q = bits[3:2]. The other nibbles are the
+    // L2/L5/L6-band channels (F_LO = 1602 / 1176.45 / 1278.75 MHz) and are skipped.
     // Sign+magnitude encoding: {00,01,10,11} → {+1,+3,-1,-3} / 3 ∈ [-1, +1].
+    //
+    // The IQ is conjugated (Q negated): with PocketSDR's I/Q convention the GPS L1
+    // C/A lands at NEGATIVE frequency, so without the conjugate it sits at -7.42 MHz
+    // while --fi 7420000 searches +7.42 MHz and nothing acquires. Conjugating moves
+    // it to +7.42 MHz (F_LO=1568 → 1575.42-1568); pass --fs 16000000 --fi 7420000.
     fn get_iq_data_pocketsdr_raw16(
         &mut self,
         off_samples: usize,
@@ -408,10 +415,10 @@ impl IQRecording {
 
         let mut iq_vec = Vec::with_capacity(num_samples);
         for off in (0..bytes.len()).step_by(BYTES_PER_SAMPLE) {
-            let b = bytes[off]; // low byte = CH0 (bits[3:0]) and CH1 (bits[7:4])
+            let lo = bytes[off]; // CH0 = low nibble: I = bits[1:0], Q = bits[3:2]
             iq_vec.push(Complex32 {
-                re: VAL[(b & 0x03) as usize],
-                im: VAL[((b >> 2) & 0x03) as usize],
+                re: VAL[(lo & 0x03) as usize],
+                im: -VAL[((lo >> 2) & 0x03) as usize], // conjugate -> L1 at +7.42 MHz
             });
         }
         Ok(iq_vec)
