@@ -182,6 +182,9 @@ pub enum State {
 #[derive(Default)]
 pub struct Tracking {
     prn_code: Vec<f32>, // upsampled real (±1) code; built on lock, freed on idle
+    // Combined E1-B+E1-C channel only: the upsampled E1-C pilot replica,
+    // correlated alongside prn_code (E1-B data). Empty otherwise.
+    pilot_code: Vec<f32>,
     doppler_hz: f64,
     code_off_sec: f64,
     code_rate_trim: f64,        // DLL integrator: residual code-rate error (s/s)
@@ -288,6 +291,61 @@ fn doppler_bin_range(center_hz: f64, spread_hz: f64) -> (usize, usize) {
         lo.clamp(0, DOPPLER_SPREAD_BINS as isize) as usize,
         hi.clamp(0, DOPPLER_SPREAD_BINS as isize) as usize,
     )
+}
+
+/// One correlation triple (prompt, early, late).
+type Corr3 = (Complex64, Complex64, Complex64);
+/// A tracking period's correlations: data (prompt, early, late, noise) plus the
+/// optional pilot (prompt, early, late) when the channel is a combined E1-B+E1-C
+/// pilot channel.
+type TrackCorr = (Complex64, Complex64, Complex64, Complex64, Option<Corr3>);
+
+/// One fused early/prompt/late/noise correlation of a mixed (baseband) code
+/// period `sig` against a real (±1) `code` replica, normalized by tap count.
+/// `pos` is the early/late half-spacing (samples), `pos_noise` the off-peak
+/// noise-reference offset. Pulled out so a combined channel can run it twice
+/// (data + pilot replica) over the same mixed samples.
+fn correlate(
+    sig: &[Complex32],
+    code: &[f32],
+    pos: usize,
+    pos_noise: usize,
+) -> (Complex64, Complex64, Complex64, Complex64) {
+    // f64 accumulators: 50k f32 products summed in f32 would cost ~3 significant
+    // digits of the discriminator inputs. The multiplies (the SIMD-heavy part)
+    // stay f32. The code is real (±1), so sig·code is two scalar multiplies.
+    #[inline]
+    fn acc(a: &mut Complex64, s: Complex32, c: f32) {
+        a.re += (s.re * c) as f64;
+        a.im += (s.im * c) as f64;
+    }
+    let len = sig.len();
+    let mut corr_prompt = Complex64::default();
+    let mut corr_early = Complex64::default();
+    let mut corr_late = Complex64::default();
+    let mut corr_noise = Complex64::default();
+
+    // Single fused pass: prompt (full), early/late (offset by ±pos) and noise
+    // (offset by pos_noise) accumulated together, reading sig[j] and code[j]
+    // once each instead of in four separate passes.
+    for j in 0..len {
+        let sj = sig[j];
+        let cj = code[j];
+        acc(&mut corr_prompt, sj, cj);
+        if j + pos < len {
+            acc(&mut corr_early, sj, code[j + pos]);
+            acc(&mut corr_late, sig[j + pos], cj);
+        }
+        if j + pos_noise < len {
+            acc(&mut corr_noise, sj, code[j + pos_noise]);
+        }
+    }
+
+    corr_prompt /= len as f64;
+    corr_early /= (len - pos) as f64;
+    corr_late /= (len - pos) as f64;
+    corr_noise /= (len - pos_noise) as f64;
+    (corr_prompt, corr_early, corr_late, corr_noise)
 }
 
 /// CS25 secondary-code phase search: for each of the 25 cyclic offsets `d`,
@@ -595,9 +653,10 @@ impl Channel {
             diagnostics,
             e1c_pilot,
         } = config;
-        // The pilot path only exists for E1-C; ignore the flag for any other
-        // signal so a mixed session can't accidentally enable it on E1-B/L1CA.
-        let e1c_pilot = e1c_pilot && matches!(sig, Signal::GalileoE1c);
+        // The pilot path applies to E1-C (standalone pilot, Tier-1) and E1-B
+        // (combined: the pilot folds into the data channel, Tier-2); ignore the
+        // flag for any other signal (L1CA etc.).
+        let e1c_pilot = e1c_pilot && matches!(sig, Signal::GalileoE1c | Signal::GalileoE1b);
         let code_buf = sig.spreading_code(sv.prn).unwrap_or_else(|| {
             panic!(
                 "no spreading code for {sig} PRN {} (Galileo E1 codes pending)",
@@ -702,13 +761,26 @@ impl Channel {
     /// tracking correlator. Cheap (one resample, no FFT); built on lock so an
     /// un-acquired channel holds none of it.
     fn build_prn_code(&self) -> Vec<f32> {
-        let code_buf = self
-            .sig
+        self.resample_code(self.sig)
+    }
+
+    /// Resample `sig`'s spreading replica to `code_sp` real (±1) tracking
+    /// samples. Used for the data code (`self.sig`) and, on a combined channel,
+    /// the E1-C pilot replica (E1-B and E1-C share code length and period).
+    fn resample_code(&self, sig: Signal) -> Vec<f32> {
+        let code_buf = sig
             .spreading_code(self.sv.prn)
             .expect("spreading code present (constructed in Channel::new)");
         (0..self.code_sp)
             .map(|i| code_buf[i * self.code_len / self.code_sp] as f32)
             .collect()
+    }
+
+    /// Combined E1-B+E1-C channel: the E1-C pilot is folded into the E1-B data
+    /// channel (pilot drives the carrier loop, DLL combines, E1-B carries I/NAV).
+    /// Distinct from the standalone E1-C pilot (Tier-1), which has no data code.
+    fn is_combined_pilot(&self) -> bool {
+        self.e1c_pilot && matches!(self.sig, Signal::GalileoE1b)
     }
 
     /// The forward-FFT'd complex code replica for FFT acquisition. Rebuilt when a
@@ -733,6 +805,7 @@ impl Channel {
         self.acq.sum_p = Vec::new();
         self.scratch = Vec::new();
         self.trk.prn_code = Vec::new();
+        self.trk.pilot_code = Vec::new();
         if self.state == State::Tracking {
             self.stats.lock_losses += 1;
             log::warn!(
@@ -880,6 +953,14 @@ impl Channel {
         self.acq.sum_p = Vec::new();
         self.acq.prn_code_fft = Vec::new();
         self.trk.prn_code = self.build_prn_code();
+        // Combined channel: build the E1-C pilot replica alongside the E1-B data
+        // code (empty otherwise — that emptiness is how the correlator and the
+        // loops detect combined mode).
+        self.trk.pilot_code = if self.is_combined_pilot() {
+            self.resample_code(Signal::GalileoE1c)
+        } else {
+            Vec::new()
+        };
         self.trk.doppler_hz = 0.0;
         self.trk.cn0 = 0.0;
         self.trk.accum_doppler_cyc = 0.0;
@@ -1067,10 +1148,12 @@ impl Channel {
         }
     }
 
-    fn tracking_compute_correlation(
-        &mut self,
-        window: &[Complex32],
-    ) -> (Complex64, Complex64, Complex64, Complex64) {
+    /// Correlate one mixed (baseband) code period against the data replica and,
+    /// for a combined E1-B+E1-C pilot channel, also against the pilot replica.
+    /// Returns the data (prompt, early, late, noise) plus, when `pilot_code` is
+    /// present, the pilot (prompt, early, late). The carrier is removed once
+    /// (shared mix); the two replicas are correlated over the same samples.
+    fn tracking_compute_correlation(&mut self, window: &[Complex32]) -> TrackCorr {
         let n = self.code_sp as i32;
         let code_idx = *self.hist.code_phase_offset.back().unwrap() as i32;
         assert!(-n < code_idx && code_idx < n);
@@ -1104,46 +1187,19 @@ impl Channel {
         let pos = (SP_CORR * sp_per_chip) as usize;
         let pos_noise = (NEUTRAL_CORR * sp_per_chip) as usize;
 
-        let sig = &self.scratch;
-        let code = &self.trk.prn_code;
-        let len = sig.len();
+        let (corr_prompt, corr_early, corr_late, corr_noise) =
+            correlate(&self.scratch, &self.trk.prn_code, pos, pos_noise);
+        // Combined channel: also correlate the E1-C pilot replica over the same
+        // mixed samples (the pilot drives the carrier loop; the DLL combines the
+        // two). Empty pilot_code => not a combined channel, so None.
+        let pilot = if self.trk.pilot_code.is_empty() {
+            None
+        } else {
+            let (p, e, l, _) = correlate(&self.scratch, &self.trk.pilot_code, pos, pos_noise);
+            Some((p, e, l))
+        };
 
-        // f64 accumulators: 50k f32 products summed in f32 would cost ~3
-        // significant digits of the discriminator inputs. The multiplies (the
-        // SIMD-heavy part) stay f32. The code is real (±1), so sig·code is two
-        // scalar multiplies (sig.re·c, sig.im·c), not a full complex product.
-        #[inline]
-        fn acc(a: &mut Complex64, s: Complex32, c: f32) {
-            a.re += (s.re * c) as f64;
-            a.im += (s.im * c) as f64;
-        }
-        let mut corr_prompt = Complex64::default();
-        let mut corr_early = Complex64::default();
-        let mut corr_late = Complex64::default();
-        let mut corr_noise = Complex64::default();
-
-        // Single fused pass: prompt (full), early/late (offset by +/-pos) and
-        // noise (offset by pos_noise) accumulated together, reading sig[j]
-        // and code[j] once each instead of in four separate passes.
-        for j in 0..len {
-            let sj = sig[j];
-            let cj = code[j];
-            acc(&mut corr_prompt, sj, cj);
-            if j + pos < len {
-                acc(&mut corr_early, sj, code[j + pos]);
-                acc(&mut corr_late, sig[j + pos], cj);
-            }
-            if j + pos_noise < len {
-                acc(&mut corr_noise, sj, code[j + pos_noise]);
-            }
-        }
-
-        corr_prompt /= len as f64;
-        corr_early /= (len - pos) as f64;
-        corr_late /= (len - pos) as f64;
-        corr_noise /= (len - pos_noise) as f64;
-
-        (corr_prompt, corr_early, corr_late, corr_noise)
+        (corr_prompt, corr_early, corr_late, corr_noise, pilot)
     }
 
     fn run_fll(&mut self) {
@@ -1291,11 +1347,23 @@ impl Channel {
         self.record_phase_error(err_phase * 2.0 * PI);
     }
 
-    fn run_dll(&mut self, corr_early: Complex64, corr_late: Complex64) {
+    fn run_dll(
+        &mut self,
+        corr_early: Complex64,
+        corr_late: Complex64,
+        pilot_el: Option<(Complex64, Complex64)>,
+    ) {
         // DLL update cadence in code periods (10 for L1CA's 1 ms, 2 for E1's 4 ms).
         let n = usize::max(1, (T_DLL / self.code_sec) as usize);
-        self.trk.sum_corr_e += corr_early.norm();
-        self.trk.sum_corr_l += corr_late.norm();
+        // Combined channel: add the E1-C pilot early/late magnitudes non-
+        // coherently — the data and pilot codes share the same code timing, so
+        // this is a ~3 dB stronger discriminator (the full E1 OS power) on one
+        // code loop. `pilot_el` is None off the combined path → data-only.
+        let (pe, pl) = pilot_el
+            .map(|(e, l)| (e.norm(), l.norm()))
+            .unwrap_or((0.0, 0.0));
+        self.trk.sum_corr_e += corr_early.norm() + pe;
+        self.trk.sum_corr_l += corr_late.norm() + pl;
         if self.num_trk_periods.is_multiple_of(n) {
             let e = self.trk.sum_corr_e;
             let l = self.trk.sum_corr_l;
@@ -1636,8 +1704,11 @@ impl Channel {
 
     fn tracking_process(&mut self, iq_vec: &[Complex32]) {
         self.advance_code_and_carrier_phase();
-        let (corr_prompt, corr_early, corr_late, corr_noise) =
+        let (corr_prompt, corr_early, corr_late, corr_noise, pilot) =
             self.tracking_compute_correlation(iq_vec);
+        // corr_p holds the DATA prompt (E1-B on a combined channel): I/NAV, the
+        // FLL and the diagnostics read it. The pilot prompt (when present) drives
+        // the carrier loop instead.
         self.hist.corr_p.push_back(corr_prompt);
         self.num_trk_periods += 1;
         self.num_tx_codes += 1.0;
@@ -1676,15 +1747,21 @@ impl Channel {
         // signature of an epoch error, not of anything on the sampling grid.
         self.nav.meas.code_off_sec = self.trk.code_off_sec;
 
+        // The pilot prompt: the separate E1-C correlation on a combined channel,
+        // else the channel's own prompt (standalone E1-C, where prn_code already
+        // is the pilot). `pilot_el` lets the DLL combine the two replicas.
+        let pilot_prompt = pilot.map(|(p, _, _)| p).unwrap_or(corr_prompt);
+        let pilot_el = pilot.map(|(_, e, l)| (e, l));
+
         if self.trk_elapsed_sec() < T_FPULLIN {
             self.run_fll();
         } else if self.e1c_pilot {
-            self.run_pilot_carrier(corr_prompt);
+            self.run_pilot_carrier(pilot_prompt);
         } else {
             self.run_pll(corr_prompt);
         }
 
-        self.run_dll(corr_early, corr_late);
+        self.run_dll(corr_early, corr_late, pilot_el);
         self.update_cn0(corr_prompt, corr_noise);
 
         if self.trk_elapsed_sec() >= T_NPULLIN {

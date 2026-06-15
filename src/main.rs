@@ -84,7 +84,7 @@ struct Options {
     qzss: bool,
     #[arg(
         long,
-        help = "experimental: track the Galileo E1-C pilot (CS25 secondary-code sync + extended coherent integration). Use with --sig E1C to assess pilot tracking quality vs E1B"
+        help = "experimental: use the Galileo E1-C pilot (CS25 secondary-code sync + extended coherent integration). With --sig E1B it folds the pilot into the data channel (pilot drives the carrier, combined DLL, E1B carries I/NAV); with --sig E1C it tracks the pilot standalone (tracking-quality assessment)"
     )]
     e1c: bool,
     #[arg(short = 'u', long, help = "use ui")]

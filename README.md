@@ -119,12 +119,16 @@ $ cargo run --release -- -f resources/gps.samples.1bit.I.fs5456.if4092.bin \
   4 ms BOC(1,1) code and Galileo I/NAV decode, and **automatically verifies
   Galileo OSNMA** message authentication (anti-spoofing) — the trust anchor is
   picked from the decoded epoch (2023/2024/2025). See [docs/osnma.md](docs/osnma.md).
-- `--e1c` (experimental): on an `--sig E1C` session, track the dataless Galileo
-  pilot — sync its CS25 secondary code and integrate coherently past the 4 ms
-  primary period with a 4-quadrant (non-Costas) PLL. The pilot carries no nav
-  data; the flag is a bring-up gate for assessing its tracking quality (lower
-  carrier-phase jitter, no half-rate false lock) vs `E1B`. Coherent length is
-  tunable via `GNSS_E1C_COH_MS` (default 20 ms).
+- `--e1c` (experimental): use the Galileo E1-C pilot. Two modes:
+  - With `--sig E1B`: **combined** channel — the pilot folds into the data
+    channel. Its 4-quadrant PLL drives the carrier (also disambiguating the E1-B
+    data sign, so no half-rate false lock on the data), the DLL combines E1-B+E1-C,
+    and E1-B still carries I/NAV. One measurement/ephemeris per SV.
+  - With `--sig E1C`: **standalone** pilot — tracking-quality assessment only
+    (dataless, no fix). Cuts carrier-phase jitter ~40% vs E1-B at equal C/N0.
+
+  CS25 sync waits out the half-rate window; coherent length is tunable via
+  `GNSS_E1C_COH_MS` (default 20 ms).
 - `--num-msec N` / `--off-msec N`: process only N ms, or start N ms into the file.
 - `--sats 1,11,30`: restrict acquisition to a subset of PRNs.
 - `-p` / `--plots`: write per-SV diagnostic PNGs to `plots/` (off by default).
