@@ -960,9 +960,7 @@ fn print_summary(sum: &RunSummary) {
     );
 
     // cn0 = sustained (EMA) C/N0, pk = peak ever seen while tracking.
-    println!(
-        "  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0   pk phRMS subfr parity eph fix"
-    );
+    println!("  SV    locks losses  trk(s) maxlk(s) ttfl(s)  cn0   pk phRMS subfr parity eph fix");
     for s in &sum.sats {
         let ttfl = s
             .ttfl_s

@@ -211,7 +211,7 @@ pub struct Tracking {
     divergence_streak: u32, // consecutive windows the divergence exceeds the gate
 
     // --- E1-C pilot (CS25 secondary code); inert unless the channel is e1c_pilot ---
-    sec_synced: bool,             // CS25 phase found → coherent integration active
+    sec_synced: bool, // CS25 phase found → coherent integration active
     // Alignment of the 25-chip secondary code to the transmit grid: the chip for
     // a period is `CS25[(num_tx_codes + sec_offset) mod 25]`. Keyed off the
     // wrap-corrected transmit counter (not a private increment) so a code-phase

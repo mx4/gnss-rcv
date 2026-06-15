@@ -286,7 +286,12 @@ mod tests {
         let peak: i32 = s.iter().map(|&c| c as i32 * c as i32).sum();
         assert_eq!(peak, n as i32);
         let max_off = (1..n)
-            .map(|sh| (0..n).map(|i| s[i] as i32 * s[(i + sh) % n] as i32).sum::<i32>().abs())
+            .map(|sh| {
+                (0..n)
+                    .map(|i| s[i] as i32 * s[(i + sh) % n] as i32)
+                    .sum::<i32>()
+                    .abs()
+            })
             .max()
             .unwrap();
         assert!(max_off < n as i32, "off-peak {max_off} must be < {n}");
