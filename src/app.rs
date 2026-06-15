@@ -897,7 +897,12 @@ impl GnssRcvApp {
                 ui.strong("code_idx");
             });
             header.col(|ui| {
-                ui.strong("ephemeris");
+                // "decode", not "ephemeris": ranging SVs show ephemeris pages,
+                // but SBAS GEOs show decoded correction message types.
+                ui.strong("decode").on_hover_text(
+                    "decode progress: ephemeris pages (GPS/Galileo/QZSS) or \
+                     correction message types (SBAS GEOs)",
+                );
             });
             if is_galileo {
                 header.col(|ui| {
@@ -1096,12 +1101,27 @@ fn draw_sbas_cell(ui: &mut egui::Ui, sbas_msgs: u64, msg_mask: u64, is_source: b
     let got = |mts: &[u8]| mts.iter().any(|&t| msg_mask & (1u64 << t) != 0);
     let on = constellation_color(Constellation::SBAS);
 
-    // The active source with every correction type in: collapse the pips to a
-    // check, mirroring the ephemeris column once an SV is used in the fix.
-    if is_source && groups.iter().all(|(_, mts)| got(mts)) {
-        ui.colored_label(on, "✔").on_hover_text(format!(
-            "active correction source — all types received ({sbas_msgs} CRC-valid messages)"
-        ));
+    // Every correction type in: collapse the pips to a check (like the
+    // ephemeris column). The active source is marked "src ✔"; a complete
+    // non-source GEO gets a plain ✔ — fully provisioned, standing by to take
+    // over if the source goes dark.
+    if groups.iter().all(|(_, mts)| got(mts)) {
+        let (label, tip) = if is_source {
+            (
+                "src ✔",
+                format!(
+                    "active correction source — all types received ({sbas_msgs} CRC-valid messages)"
+                ),
+            )
+        } else {
+            (
+                "✔",
+                format!(
+                    "all correction types received — standby backup ({sbas_msgs} CRC-valid messages)"
+                ),
+            )
+        };
+        ui.colored_label(on, label).on_hover_text(tip);
         return;
     }
 
