@@ -12,6 +12,19 @@ pub struct Measurement {
     /// Fractional code phase (s) paired with `trk_phase` (includes the DLL
     /// group-delay compensation; see channel.rs).
     pub code_off_sec: f64,
+    /// Accumulated carrier phase (cycles) within the current continuous lock:
+    /// Σ f_doppler·τ (the integrated Doppler, i.e. accumulated delta range).
+    /// Resets to 0 on every (re)acquisition, so only *differences within one
+    /// `lock_id`* are meaningful. Sign convention: f_doppler = −ρ̇/λ, so a range
+    /// *decrease* (SV approaching, positive Doppler) makes this grow — the
+    /// inter-epoch range change is Δρ = −λ·Δ(carrier_cyc). Fed to the TDCP
+    /// velocity solve (the integer cycle ambiguity cancels in the difference).
+    pub carrier_cyc: f64,
+    /// Lock generation: the channel's successful-acquisition count at the time
+    /// of this snapshot. A change between epochs means the carrier phase reset,
+    /// so `carrier_cyc` must NOT be differenced across the boundary (it marks a
+    /// cycle slip / re-acquisition).
+    pub lock_id: u64,
     // Integer transmit-time in seconds since tracking start: num_trk_periods *
     // code_sec. Because num_trk_periods counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver

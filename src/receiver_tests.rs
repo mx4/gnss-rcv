@@ -70,6 +70,61 @@ fn synthetic_signal_acquires_and_tracks() {
     );
 }
 
+// Pins the sign + scale of the accumulated carrier phase (Measurement::carrier_cyc),
+// the observable the TDCP velocity solve differences. carrier_cyc = Σ f_doppler·τ,
+// so over a continuous lock its time-average rate must equal the SV Doppler: a
+// +2500 Hz (approaching) SV accumulates *positive* cycles, a −2500 Hz one negative.
+// This is the convention the velocity solve relies on (Δρ = −λ·Δcarrier_cyc); if it
+// ever flips, velocities come out with the wrong sign and this test catches it.
+#[test]
+fn carrier_phase_accumulates_with_doppler_sign() {
+    let (fs, fi) = (2_046_000.0, 0.0);
+    let svs = [
+        SynthSv::new(5, 2500.0, 137.0, 0.0), // approaching: positive Doppler
+        SynthSv::new(12, -2500.0, 512.0, 0.0), // receding: negative Doppler
+    ];
+    let sig = synth_l1ca(&svs, fs, fi, 200, None); // 200 ms: acquire + a long track arc
+
+    let cfg = ReceiverConfig {
+        sats: "5,12".to_string(),
+        fs,
+        fi,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(MockIQReader::new(sig)),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(GnssState::new())),
+    );
+    rx.run_loop(0);
+
+    for s in &svs {
+        let sv = SV::new(Constellation::GPS, s.prn);
+        let ch = &rx.channels[&sv];
+        let m = &ch.nav.meas;
+        assert!(ch.is_state_tracking(), "{sv} should be tracking");
+        assert_eq!(m.lock_id, 1, "{sv} locked once → lock generation 1");
+        assert!(
+            m.trk_phase > 0.1,
+            "{sv} should have a substantial track arc, got {:.3}s",
+            m.trk_phase
+        );
+        // Time-averaged carrier-phase rate over the lock ≈ the SV Doppler. Wide
+        // tolerance absorbs the FLL/PLL pull-in transient; it only needs to pin
+        // the sign and order of magnitude, not the steady-state rate.
+        let rate_hz = m.carrier_cyc / m.trk_phase;
+        assert!(
+            (rate_hz - s.doppler_hz).abs() < 0.2 * s.doppler_hz.abs(),
+            "{sv}: carrier_cyc rate {rate_hz:.0} Hz should track Doppler {:.0} Hz \
+             (carrier_cyc={:.1} cyc over {:.3}s)",
+            s.doppler_hz,
+            m.carrier_cyc,
+            m.trk_phase
+        );
+    }
+}
+
 // Point-4 regression at a realistic SNR: three SVs at different Doppler,
 // code phase and strength share one AWGN realization; each must still
 // acquire and hold tracking. Catches DSP regressions the noiseless test can

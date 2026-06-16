@@ -1810,6 +1810,15 @@ impl Channel {
         // signature of an epoch error, not of anything on the sampling grid.
         self.nav.meas.code_off_sec = self.trk.code_off_sec;
 
+        // Carrier-phase observable for the TDCP velocity solve: the accumulated
+        // Doppler within this lock, tagged with the lock generation so the solver
+        // only differences it within one continuous lock (a lock_id change marks
+        // a re-acquisition / cycle slip). accum_doppler_cyc resets to 0 at every
+        // lock, so the absolute value is arbitrary per pass — only inter-epoch
+        // differences are used. Sign convention is on Measurement::carrier_cyc.
+        self.nav.meas.carrier_cyc = self.trk.accum_doppler_cyc;
+        self.nav.meas.lock_id = self.stats.locks;
+
         // The pilot prompt: the separate E1-C correlation on a combined channel,
         // else the channel's own prompt (standalone E1-C, where prn_code already
         // is the pilot). `pilot_el` lets the DLL combine the two replicas.
