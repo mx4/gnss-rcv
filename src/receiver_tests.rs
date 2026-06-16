@@ -403,6 +403,67 @@ fn run_geo_scene_fix_error_m(label: &str, cn0_dbhz: f64, seed: Option<u64>) -> f
     err
 }
 
+// TDCP velocity end-to-end: a *static* synthetic scene must report ~0 receiver
+// velocity. The carrier phase is differenced across consecutive solve epochs and
+// the predicted SV-motion range change is removed against the same fix, so a
+// static receiver leaves only its (absorbed) clock drift — speed ≈ 0. A wrong
+// carrier sign or a wrong predicted-range removal would surface ~2× the LOS rate
+// (hundreds of m/s), so this pins the whole velocity chain. vel_fix_count
+// guards against a false pass when the velocity never solved at all.
+#[test]
+#[ignore] // ~6 s — runs via `just test-all` / `cargo test -- --ignored`
+fn synthetic_static_receiver_velocity_near_zero() {
+    let (fs, fi) = (2_046_000.0, 0.0);
+    let truth = [4_396_463.3, 474_169.7, 4_581_510.0]; // the gpssim Geneva site
+    let ephs = pick_geo_constellation(truth, 2348, 36_000, 6);
+    assert!(ephs.len() >= 5, "picked only {} SVs", ephs.len());
+    let sats = ephs
+        .iter()
+        .map(|e| e.sv.prn.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // No exit_on_fix: the velocity solve needs a second epoch (~2 s after the
+    // first fix), so run a few seconds past the first fix.
+    let feed = GeoFeed::new(&ephs, truth, fs, fi, 40_000, 45.0, None);
+    let state = Arc::new(Mutex::new(GnssState::new()));
+    let cfg = ReceiverConfig {
+        sats,
+        fs,
+        fi,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(feed),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        state.clone(),
+    );
+    rx.run_loop(0);
+
+    let st = state.lock().unwrap();
+    assert!(st.longitude != 0.0, "no fix from the static scene");
+    assert!(
+        st.vel_fix_count >= 1,
+        "velocity never solved (need two consecutive fixes sharing ≥4 SVs)"
+    );
+    eprintln!(
+        "static-scene TDCP velocity: speed {:.3} m/s (E/N/U {:+.3}/{:+.3}/{:+.3}, {} solves)",
+        st.speed_mps, st.vel_enu[0], st.vel_enu[1], st.vel_enu[2], st.vel_fix_count
+    );
+    // Observed ~0.001 m/s on the clean scene; 0.5 keeps huge margin while still
+    // catching a sign flip or frame bug (those surface at O(100) m/s).
+    assert!(
+        st.speed_mps < 0.5,
+        "static receiver should report ~0 velocity, got {:.2} m/s (E/N/U {:+.2}/{:+.2}/{:+.2}, {} solves)",
+        st.speed_mps,
+        st.vel_enu[0],
+        st.vel_enu[1],
+        st.vel_enu[2],
+        st.vel_fix_count,
+    );
+}
+
 // The hermetic end-to-end positioning regression: a geometry-consistent
 // synthetic scene (per-SV code phase, Doppler and LNAV timing all derived
 // from true ranges — see synth::GeoFeed) must drive the full real pipeline

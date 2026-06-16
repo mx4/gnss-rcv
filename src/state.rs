@@ -110,6 +110,13 @@ pub struct GnssState {
     pub hdop: f64,
     pub vdop: f64,
     pub fix_sv_count: usize,
+    /// Receiver velocity from the TDCP solve: ENU components and ground speed
+    /// (m/s). Zero until two consecutive WLS epochs share ≥4 slip-free SVs.
+    pub vel_enu: [f64; 3],
+    pub speed_mps: f64,
+    /// Number of epochs that produced a TDCP velocity (distinguishes a true
+    /// ~0 velocity from "never solved").
+    pub vel_fix_count: usize,
     /// SVs that contributed to the most recent successful fix. The per-SV table
     /// collapses a contributing SV's ephemeris pips to a freshness check.
     pub fix_svs: Vec<SV>,
@@ -150,6 +157,9 @@ impl GnssState {
             hdop: 0.0,
             vdop: 0.0,
             fix_sv_count: 0,
+            vel_enu: [0.0; 3],
+            speed_mps: 0.0,
+            vel_fix_count: 0,
             fix_svs: Vec::new(),
             run_progress: None,
             realtime_x: 0.0,

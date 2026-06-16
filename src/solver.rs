@@ -7,10 +7,11 @@ use gnss_rtk::prelude::{
     UserProfile, Vector3,
 };
 use map_3d::{Ellipsoid, ecef2geodetic};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
+    constants::{EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT},
     ephemeris::{Ephemeris as RxEphemeris, Measurement},
     models::{
         compute_sv_position_ecef, elevation_azimuth, klobuchar_l1_delay_m, saastamoinen_tropo_m,
@@ -19,7 +20,7 @@ use crate::{
     sbas_corr::SbasCorrections,
     sbas_iono::SbasIonoGrid,
     state::GnssState,
-    wls::wls_solve,
+    wls::{tdcp_solve, wls_solve},
 };
 use gnss_rs::constellation::Constellation;
 
@@ -131,6 +132,25 @@ pub(crate) struct SvMeasurement {
     pub galileo: bool,
     /// Broadcast residual-error variance prior (SBAS UDRE + slant GIVE), m².
     pub var_m2: f64,
+    /// Accumulated carrier phase (cycles) and its lock generation, for the TDCP
+    /// velocity solve; `ts_sec` is this SV's snapshot instant (its own epoch
+    /// interval in a multi-rate session). See [`PositionSolver::update_velocity`].
+    pub carrier_cyc: f64,
+    pub lock_id: u64,
+    pub ts_sec: f64,
+}
+
+/// One SV's previous-epoch state cached for the TDCP velocity solve. Carrier
+/// phase may only be differenced within one continuous lock, so `lock_id` is
+/// checked before forming Δφ; `svp`/`clk_m` let the predicted SV-motion range
+/// change and SV-clock drift be removed against the *same* current fix.
+#[derive(Clone, Copy)]
+struct PrevCarrier {
+    carrier_cyc: f64,
+    lock_id: u64,
+    ts_sec: f64,
+    svp: [f64; 3],
+    clk_m: f64,
 }
 
 pub struct PositionSolver {
@@ -141,6 +161,8 @@ pub struct PositionSolver {
     // Last fix, used only as the receiver position for the ionosphere pierce
     // point; the solver itself needs no a-priori (it bootstraps via Bancroft).
     last_fix_ecef: Option<Vector3<f64>>,
+    /// Previous solve epoch's per-SV carrier phase, for the TDCP velocity solve.
+    prev_carrier: HashMap<SV, PrevCarrier>,
     pub_state: Arc<Mutex<GnssState>>,
 }
 
@@ -288,6 +310,7 @@ impl PositionSolver {
             solver,
             ephs,
             last_fix_ecef: None,
+            prev_carrier: HashMap::new(),
             pub_state,
         }
     }
@@ -421,6 +444,9 @@ impl PositionSolver {
             return false;
         }
         self.last_fix_ecef = Some(pos);
+        // TDCP velocity from this fix and the carrier phase carried over from the
+        // previous epoch (no-op until a second epoch exists). WLS path only.
+        self.update_velocity(meas, sol.pos);
         let (lat_rad, lon_rad, height_m) =
             ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
         let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
@@ -476,6 +502,100 @@ impl PositionSolver {
             .green()
         );
         true
+    }
+
+    /// TDCP velocity: difference each SV's carrier phase against the previous
+    /// solve epoch (within one continuous lock only), remove the predicted
+    /// SV-motion range change and SV-clock drift against *this* epoch's fix `x`,
+    /// and solve the residual range rates for receiver velocity + clock drift
+    /// (the integer cycle ambiguity cancels in the difference — no resolution
+    /// needed). Publishes ENU velocity + ground speed, then refreshes the per-SV
+    /// cache. A no-op on the first epoch or with fewer than 4 slip-free carry-over
+    /// SVs. Runs only on the live WLS path; GNSS_SOLVER=rtk skips it.
+    fn update_velocity(&mut self, meas: &[SvMeasurement], x: [f64; 3]) {
+        let lambda = SPEED_OF_LIGHT / L1_HZ; // m/cycle; every signal here is L1
+        // Bounds on the inter-epoch gap: below, the difference is dominated by
+        // phase noise; above, a long idle gap (or a stale cache entry left by a
+        // rejected fix) is not a trustworthy continuous arc. The fix cadence is
+        // ~2 s (compute_fix), so the ceiling must clear it with margin while
+        // still rejecting genuine outages.
+        const MIN_DT: f64 = 0.02;
+        const MAX_DT: f64 = 3.0;
+        let dist = |p: [f64; 3]| {
+            ((p[0] - x[0]).powi(2) + (p[1] - x[1]).powi(2) + (p[2] - x[2]).powi(2)).sqrt()
+        };
+
+        let (mut svp, mut rate, mut cn0) = (Vec::new(), Vec::new(), Vec::new());
+        for m in meas {
+            let Some(p) = self.prev_carrier.get(&m.sv) else {
+                continue;
+            };
+            if p.lock_id != m.lock_id {
+                continue; // re-acquisition / cycle slip across the boundary
+            }
+            let dt = m.ts_sec - p.ts_sec;
+            if !(MIN_DT..=MAX_DT).contains(&dt) {
+                continue;
+            }
+            // Measured accumulated delta range (m): −λ·Δφ = Δ(ρ + c·dt_rx − c·clk).
+            let adr = -lambda * (m.carrier_cyc - p.carrier_cyc);
+            // Predicted geometric range change for a static receiver at this fix,
+            // and the SV-clock drift the pseudorange already removes (clk_m). What
+            // is left is the receiver's own motion + clock drift: −ê·Δr_rx + c·Δdt.
+            let o = adr - (dist(m.svp) - dist(p.svp)) + (m.clk_m - p.clk_m);
+            rate.push(o / dt);
+            svp.push(m.svp);
+            cn0.push(m.cn0);
+        }
+
+        if let Some(sol) = tdcp_solve(&rate, &svp, x, &cn0) {
+            let (lat, lon, _) = ecef2geodetic(x[0], x[1], x[2], Ellipsoid::WGS84);
+            let (sp, cp, sl, cl) = (lat.sin(), lat.cos(), lon.sin(), lon.cos());
+            let v = sol.vel_ecef;
+            let enu = [
+                -sl * v[0] + cl * v[1],
+                -sp * cl * v[0] - sp * sl * v[1] + cp * v[2],
+                cp * cl * v[0] + cp * sl * v[1] + sp * v[2],
+            ];
+            let speed = (enu[0] * enu[0] + enu[1] * enu[1] + enu[2] * enu[2]).sqrt();
+            {
+                let mut st = self.pub_state.lock().unwrap();
+                st.vel_enu = enu;
+                st.speed_mps = speed;
+                st.vel_fix_count += 1;
+            }
+            let excl = if sol.excluded > 0 {
+                format!(" slip-excl={}", sol.excluded)
+            } else {
+                String::new()
+            };
+            log::warn!(
+                "velocity (TDCP): E={:+.2} N={:+.2} U={:+.2} speed={:.2} m/s {}sv drift={:+.2} m/s{excl}",
+                enu[0],
+                enu[1],
+                enu[2],
+                speed,
+                sol.n_sv,
+                sol.clock_drift_mps,
+            );
+        }
+
+        // Refresh the cache for the next epoch (every SV in this solve, used or not).
+        self.prev_carrier = meas
+            .iter()
+            .map(|m| {
+                (
+                    m.sv,
+                    PrevCarrier {
+                        carrier_cyc: m.carrier_cyc,
+                        lock_id: m.lock_id,
+                        ts_sec: m.ts_sec,
+                        svp: m.svp,
+                        clk_m: m.clk_m,
+                    },
+                )
+            })
+            .collect();
     }
 
     /// gnss-rtk fallback/cross-check (also the path when GNSS_SOLVER=rtk): its
@@ -697,6 +817,9 @@ impl PositionSolver {
             svp: [cw * s.0 + sw * s.1, -sw * s.0 + cw * s.1, s.2],
             galileo: eph.sv.constellation == Constellation::Galileo,
             var_m2: sv_var_m2,
+            carrier_cyc: mm.carrier_cyc,
+            lock_id: mm.lock_id,
+            ts_sec: mm.ts_sec,
         };
 
         if let Some(truth) = ctx.truth_ecef {
