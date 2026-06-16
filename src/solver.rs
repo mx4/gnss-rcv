@@ -444,9 +444,6 @@ impl PositionSolver {
             return false;
         }
         self.last_fix_ecef = Some(pos);
-        // TDCP velocity from this fix and the carrier phase carried over from the
-        // previous epoch (no-op until a second epoch exists). WLS path only.
-        self.update_velocity(meas, sol.pos);
         let (lat_rad, lon_rad, height_m) =
             ecef2geodetic(sol.pos[0], sol.pos[1], sol.pos[2], Ellipsoid::WGS84);
         let (lat, lon) = (lat_rad.to_degrees(), lon_rad.to_degrees());
@@ -501,6 +498,10 @@ impl PositionSolver {
             )
             .green()
         );
+        // TDCP velocity from this fix and the carrier phase carried over from the
+        // previous epoch (no-op until a second epoch exists). Logged after the fix
+        // line so the log reads fix-then-velocity. WLS path only.
+        self.update_velocity(meas, sol.pos);
         true
     }
 
