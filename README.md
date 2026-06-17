@@ -79,7 +79,7 @@ With no `-f`, it runs against the default development recording (2xf32,
 The live UI (`-u`) shows real-time tracking status, a sky plot, and per-SV
 diagnostics:
 
-![gnss-rcv UI](./assets/gnss-rcv-ui.png)
+<img src="./assets/gnss-rcv-ui.png" alt="gnss-rcv UI" style="max-width: none;">
 
 The receiver also writes a diagnostic web page (`plots/index.html` + images,
 enabled with `-p`) showing the decoder's internal state per satellite:
