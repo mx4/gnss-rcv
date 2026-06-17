@@ -464,6 +464,75 @@ fn synthetic_static_receiver_velocity_near_zero() {
     );
 }
 
+// TDCP velocity *accuracy*: fly the synthetic receiver at a known constant ENU
+// velocity and check the solve recovers it. The static test pins velocity→0;
+// this pins the scale/direction of a non-zero velocity (the thing no on-disk
+// recording can validate — none are kinematic with a velocity truth). The
+// injected velocity enters both code phase and carrier Doppler via GeoFeed's
+// moving receiver, so a recovered match exercises the whole TDCP chain.
+#[test]
+#[ignore] // ~6 s — runs via `just test-all` / `cargo test -- --ignored`
+fn synthetic_moving_receiver_velocity_recovered() {
+    let (fs, fi) = (2_046_000.0, 0.0);
+    let truth = [4_396_463.3, 474_169.7, 4_581_510.0]; // Geneva site
+    let ephs = pick_geo_constellation(truth, 2348, 36_000, 6);
+    assert!(ephs.len() >= 5, "picked only {} SVs", ephs.len());
+    let sats = ephs
+        .iter()
+        .map(|e| e.sv.prn.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Known horizontal velocity: 10 m/s East, 5 m/s North (vertical is the
+    // weakly-observed axis, so keep its truth at 0 and bound it loosely).
+    let (ve, vn, vu) = (10.0, 5.0, 0.0);
+    let (lat, lon, _) =
+        map_3d::ecef2geodetic(truth[0], truth[1], truth[2], map_3d::Ellipsoid::WGS84);
+    let (sp, cp, sl, cl) = (lat.sin(), lat.cos(), lon.sin(), lon.cos());
+    // ENU → ECEF (transpose of the solver's ECEF→ENU rotation).
+    let vel_ecef = [
+        -sl * ve - sp * cl * vn + cp * cl * vu,
+        cl * ve - sp * sl * vn + cp * sl * vu,
+        cp * vn + sp * vu,
+    ];
+
+    let feed = GeoFeed::new(&ephs, truth, fs, fi, 40_000, 45.0, None).with_velocity(vel_ecef);
+    let state = Arc::new(Mutex::new(GnssState::new()));
+    let cfg = ReceiverConfig {
+        sats,
+        fs,
+        fi,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(feed),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        state.clone(),
+    );
+    rx.run_loop(0);
+
+    let st = state.lock().unwrap();
+    assert!(st.vel_fix_count >= 1, "velocity never solved");
+    eprintln!(
+        "moving-scene TDCP velocity: E {:+.2} (truth {ve:+.1})  N {:+.2} (truth {vn:+.1})  U {:+.2} (truth {vu:+.1})  speed {:.2} m/s, {} solves",
+        st.vel_enu[0], st.vel_enu[1], st.vel_enu[2], st.speed_mps, st.vel_fix_count
+    );
+    // Recovered exact to 0.00/0.01 m/s on the clean scene; tight bounds make
+    // this a real scale/direction regression (a wrong λ or geometry would miss).
+    assert!(
+        (st.vel_enu[0] - ve).abs() < 0.1 && (st.vel_enu[1] - vn).abs() < 0.1,
+        "horizontal velocity should match truth ({ve},{vn}) m/s, got ({:+.2},{:+.2})",
+        st.vel_enu[0],
+        st.vel_enu[1],
+    );
+    assert!(
+        st.vel_enu[2].abs() < 0.2,
+        "vertical velocity (truth 0) should be small, got {:+.2} m/s",
+        st.vel_enu[2],
+    );
+}
+
 // The hermetic end-to-end positioning regression: a geometry-consistent
 // synthetic scene (per-SV code phase, Doppler and LNAV timing all derived
 // from true ranges — see synth::GeoFeed) must drive the full real pipeline

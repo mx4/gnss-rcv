@@ -343,6 +343,11 @@ struct GeoSv {
 pub struct GeoFeed {
     svs: Vec<GeoSv>,
     rx: [f64; 3],
+    /// Receiver ECEF velocity (m/s); `[0,0,0]` is a static scene. A constant
+    /// velocity flies the receiver from `rx` over scene time (see
+    /// `travel_time_sec`), injecting a known velocity into both code phase and
+    /// carrier Doppler for the TDCP velocity solve to recover.
+    vel: [f64; 3],
     fs: f64,
     fi: f64,
     week: u32,
@@ -369,6 +374,14 @@ impl GeoFeed {
         seed: Option<u64>,
     ) -> Self {
         Self::new_diverged(ephs, ephs, rx_ecef, fs, fi, num_msec, cn0_dbhz, seed)
+    }
+
+    /// Fly the receiver at a constant ECEF velocity (m/s) instead of holding it
+    /// static at `rx_ecef`. Chainable on any constructor; the scene then carries
+    /// a known velocity truth for the TDCP velocity regression.
+    pub fn with_velocity(mut self, vel_ecef: [f64; 3]) -> Self {
+        self.vel = vel_ecef;
+        self
     }
 
     /// [`new`](Self::new), but the LNAV bits broadcast `bcast` while the
@@ -443,6 +456,7 @@ impl GeoFeed {
         Self {
             svs,
             rx: rx_ecef,
+            vel: [0.0; 3],
             fs,
             fi,
             week,
@@ -526,6 +540,7 @@ impl GeoFeed {
         Self {
             svs,
             rx: rx_ecef,
+            vel: [0.0; 3],
             fs,
             fi,
             week,
@@ -564,13 +579,23 @@ impl GeoFeed {
     /// the SV rotated into the reception-instant ECEF frame (Earth turns by
     /// ωe·τ while the signal travels — the solver's Sagnac convention).
     fn travel_time_sec(&self, eph: &Ephemeris, t_rx_sow: f64) -> f64 {
+        // Receiver position at the reception instant: the static base plus a
+        // constant ECEF velocity over scene time (t_rx_sow − t0_sow). A moving
+        // receiver changes every SV's range over the run, so its velocity enters
+        // both the code phase and the carrier Doppler — what TDCP must recover.
+        let scene_t = t_rx_sow - self.t0_sow;
+        let rx = [
+            self.rx[0] + self.vel[0] * scene_t,
+            self.rx[1] + self.vel[1] * scene_t,
+            self.rx[2] + self.vel[2] * scene_t,
+        ];
         let mut tau = 0.07;
         for _ in 0..3 {
             let (x, y, z) = compute_sv_position_ecef(eph, self.epoch_at(t_rx_sow - tau));
             let w = EARTH_ROTATION_RATE * tau;
             let (cw, sw) = (w.cos(), w.sin());
             let (sx, sy) = (cw * x + sw * y, -sw * x + cw * y);
-            let (dx, dy, dz) = (sx - self.rx[0], sy - self.rx[1], z - self.rx[2]);
+            let (dx, dy, dz) = (sx - rx[0], sy - rx[1], z - rx[2]);
             tau = (dx * dx + dy * dy + dz * dz).sqrt() / SPEED_OF_LIGHT;
         }
         tau
