@@ -34,6 +34,9 @@ const SIM_SATS: &str = "1,2,3,4,6,9,17,19,28,31";
 const GEN_SCRIPT: &str = "resources/gen_gpssim.py";
 const GEN_GPSSIM: &str = "resources/gpssim_gen_2xi16";
 const GEN_META: &str = "resources/gpssim_gen.meta";
+// Dynamic (moving-receiver) variant, written by `gen_gpssim.py --vel`.
+const GEN_DYN_GPSSIM: &str = "resources/gpssim_dyn_2xi16";
+const GEN_DYN_META: &str = "resources/gpssim_dyn.meta";
 
 /// Run the receiver over `num_msec` of `recording` (0 = until EOF/fix),
 /// restricting the search to `sats`. Returns the shared state, or `None`
@@ -142,4 +145,57 @@ fn generates_and_solves_gpssim() {
     // Step 5: run the receiver against the generated recording and check the fix.
     let state = run(GEN_GPSSIM, &sats, 0, true).expect("generated recording present");
     assert_fix_near(&state, lat, lon);
+}
+
+/// End-to-end TDCP velocity on a real recording *file*: generate a dynamic
+/// gps-sdr-sim scene flying a known ENU velocity (`--vel`) and verify the
+/// receiver recovers it through the full pipeline (the file-level counterpart
+/// to the hermetic `synthetic_moving_receiver_velocity_recovered`). Needs
+/// gps-sdr-sim + network; skips cleanly otherwise.
+#[test]
+#[ignore = "needs gps-sdr-sim + network: generates a fresh dynamic recording"]
+fn generates_and_recovers_velocity_gpssim() {
+    let (ve, vn, vu) = (10.0, 5.0, 0.0);
+    match Command::new(GEN_SCRIPT)
+        .arg("--vel")
+        .arg(format!("{ve},{vn},{vu}"))
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("skipping: {GEN_SCRIPT} exited {s} (missing gps-sdr-sim/network?)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("skipping: cannot run {GEN_SCRIPT}: {e}");
+            return;
+        }
+    }
+
+    let meta = std::fs::read_to_string(GEN_DYN_META).expect("generator wrote a dynamic meta");
+    let sats = meta
+        .lines()
+        .find_map(|l| l.strip_prefix("sats="))
+        .expect("meta missing 'sats'")
+        .to_string();
+
+    // No exit_on_fix: the velocity solve needs a second epoch, so run to EOF.
+    let state = run(GEN_DYN_GPSSIM, &sats, 0, false).expect("dynamic recording present");
+    let st = state.lock().unwrap();
+    assert!(st.vel_fix_count >= 1, "velocity never solved");
+    eprintln!(
+        "dynamic gps-sdr-sim TDCP velocity: E {:+.2} (truth {ve}) N {:+.2} (truth {vn}) U {:+.2} (truth {vu}) speed {:.2} m/s, {} solves",
+        st.vel_enu[0], st.vel_enu[1], st.vel_enu[2], st.speed_mps, st.vel_fix_count
+    );
+    assert!(
+        (st.vel_enu[0] - ve).abs() < 0.5 && (st.vel_enu[1] - vn).abs() < 0.5,
+        "horizontal velocity should match truth ({ve},{vn}) m/s, got ({:+.2},{:+.2})",
+        st.vel_enu[0],
+        st.vel_enu[1],
+    );
+    assert!(
+        st.vel_enu[2].abs() < 1.0,
+        "vertical velocity (truth 0) should be small, got {:+.2} m/s",
+        st.vel_enu[2],
+    );
 }
