@@ -29,7 +29,7 @@ struct Options {
     hostname: String,
     #[arg(
         long,
-        help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B).                 Default: every family the bandwidth admits (L1CA always; +E1B at fs >= 4.092 MHz)"
+        help = "signal family/families: L1CA, E1B, E1C, or a comma list (L1CA,E1B).                 E5A/E5AQ are the second band (1176.45 MHz) — need an L5/E5a capture (--fs/--fi).                 Default: every L1 family the bandwidth admits (L1CA always; +E1B at fs >= 4.092 MHz)"
     )]
     sig: Option<String>,
     #[arg(short = 'd', long, help = "use rtl-sdr device")]

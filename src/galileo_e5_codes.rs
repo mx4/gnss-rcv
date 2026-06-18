@@ -13,16 +13,18 @@
 //! Secondary (tiered) codes: E5a-I overlays the common length-20 CS20 sequence;
 //! E5a-Q overlays a per-PRN length-100 CS100 sequence (ICD Tables 20-22).
 //!
-//! Phase-0 foundation: validated standalone (ICD test vectors) but not yet wired
-//! into the `Signal` enum / tracking — Phase 1 does that and drops this allow.
-#![allow(dead_code)]
+//! The primary codes are consumed by the `Signal` enum (Phase 1); the secondary
+//! codes wait for the E5a-Q pilot / F-NAV tiering (Phase 3) — hence the targeted
+//! `allow(dead_code)` on those helpers below.
 
 /// E5a primary code length (chips): 10230 at 10.23 Mcps = 1 ms primary epoch.
 pub const E5_PRIMARY_LEN: usize = 10230;
 
 /// E5a-I secondary code length (CS20), one common 20-chip sequence (20 ms).
+#[allow(dead_code)] // Phase 3 (E5a-I tiering)
 pub const E5A_I_SECONDARY_LEN: usize = 20;
 /// E5a-Q secondary code length (CS100), per-PRN 100-chip sequence (100 ms).
+#[allow(dead_code)] // Phase 3 (E5a-Q pilot)
 pub const E5A_Q_SECONDARY_LEN: usize = 100;
 
 // 14-bit base-register feedback taps (octal), ICD Table 15. E5a-I and E5a-Q
@@ -95,11 +97,13 @@ pub fn e5a_primary_code(prn: u8, pilot: bool) -> Option<Vec<i8>> {
 
 /// E5a-I secondary code (CS20): the common 20-chip sequence (ICD Table 20/22),
 /// hex MSB-first, overlaid one chip per 1 ms primary epoch.
+#[allow(dead_code)] // Phase 3 (tiering)
 const E5A_I_SECONDARY_HEX: &str = "842E9";
 
 /// E5a-Q secondary codes (CS100): per-PRN 100-chip sequences, ICD Tables 20/21
 /// assigned CS100_1..50 to E5a-Q PRN 1..50 by Table 22. Hex MSB-first; PRN n at
 /// index n-1.
+#[allow(dead_code)] // Phase 3 (pilot)
 const E5A_Q_SECONDARY_HEX: [&str; 50] = [
     "83F6F69D8F6E15411FB8C9B1C",
     "66558BD3CE0C7792E83350525",
@@ -156,6 +160,7 @@ const E5A_Q_SECONDARY_HEX: [&str; 50] = [
 /// Decode a hex secondary code into `n_bits` bipolar chips (+1/-1), MSB-first
 /// (logic 0 -> +1, 1 -> -1). Trailing bits past `n_bits` (zero-padding the last
 /// nibble) are dropped.
+#[allow(dead_code)] // Phase 3 (tiering)
 fn secondary_code(hex: &str, n_bits: usize) -> Vec<i8> {
     let mut bits = Vec::with_capacity(hex.len() * 4);
     for c in hex.chars() {
@@ -169,11 +174,13 @@ fn secondary_code(hex: &str, n_bits: usize) -> Vec<i8> {
 }
 
 /// E5a-I secondary code (CS20) as bipolar chips, common to every PRN.
+#[allow(dead_code)] // Phase 3 (tiering)
 pub fn e5a_i_secondary_code() -> Vec<i8> {
     secondary_code(E5A_I_SECONDARY_HEX, E5A_I_SECONDARY_LEN)
 }
 
 /// E5a-Q secondary code (CS100) as bipolar chips for `prn` (1..=50).
+#[allow(dead_code)] // Phase 3 (pilot)
 pub fn e5a_q_secondary_code(prn: u8) -> Option<Vec<i8>> {
     let hex = E5A_Q_SECONDARY_HEX.get((prn as usize).checked_sub(1)?)?;
     Some(secondary_code(hex, E5A_Q_SECONDARY_LEN))

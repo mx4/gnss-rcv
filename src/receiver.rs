@@ -292,23 +292,24 @@ fn write_json_summary(summary: &RunSummary, path: &Path) -> std::io::Result<()> 
 /// `--sats` list included, so `--sats 1 --sbas` searches PRN 1 plus the GEOs.
 fn build_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     let mut svs: Vec<SV> = if sats.is_empty() {
-        let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) = match sig {
-            Signal::GalileoE1b | Signal::GalileoE1c => (Constellation::Galileo, 1..=36),
-            _ => (Constellation::GPS, 1..=32),
+        let (base_cons, range): (Constellation, std::ops::RangeInclusive<u8>) = if sig.is_galileo()
+        {
+            (Constellation::Galileo, 1..=36)
+        } else {
+            (Constellation::GPS, 1..=32)
         };
         range.map(|prn| SV::new(base_cons, prn)).collect()
     } else {
         // Constellation to fall back to when a bare PRN is given.
-        let fallback_cons = |prn: u8| match sig {
-            Signal::GalileoE1b | Signal::GalileoE1c => Constellation::Galileo,
-            _ => {
-                if (193..=202).contains(&prn) {
-                    Constellation::QZSS
-                } else if prn >= 120 {
-                    Constellation::SBAS
-                } else {
-                    Constellation::GPS
-                }
+        let fallback_cons = |prn: u8| {
+            if sig.is_galileo() {
+                Constellation::Galileo
+            } else if (193..=202).contains(&prn) {
+                Constellation::QZSS
+            } else if prn >= 120 {
+                Constellation::SBAS
+            } else {
+                Constellation::GPS
             }
         };
 
@@ -345,12 +346,12 @@ fn build_sat_list(sats: &str, sig: Signal, sbas: bool, qzss: bool) -> Vec<SV> {
     // spreading code for them (and no multi-signal stepping yet), so building
     // their channels would panic in Channel::new. Drop them with a note — the
     // UI carries a sticky --sbas flag across signal switches.
-    if matches!(sig, Signal::GalileoE1b | Signal::GalileoE1c) {
+    if sig.is_galileo() {
         let before = svs.len();
         svs.retain(|sv| !matches!(sv.constellation, Constellation::SBAS | Constellation::QZSS));
         if svs.len() != before {
             log::warn!(
-                "dropping {} SBAS/QZSS satellites: L1 C/A signals, not decodable in an E1 session",
+                "dropping {} SBAS/QZSS satellites: L1 C/A signals, not decodable in a Galileo session",
                 before - svs.len()
             );
         }
@@ -492,13 +493,13 @@ impl Receiver {
             // family's list — handing them to the E1 pass just made its
             // guard drop them with a spurious "not decodable" warning while
             // the GEOs were alive in the session via the C/A family.
-            let ca = !fam_sig.is_boc11();
+            let ca = !fam_sig.is_galileo();
             for sv in build_sat_list(&cfg.sats, fam_sig, cfg.sbas && ca, cfg.qzss && ca) {
                 // In a mixed session each family contributes only its own
                 // constellations (build_sat_list is per-signal).
                 if families.len() > 1 {
                     let is_gal = sv.constellation == Constellation::Galileo;
-                    if is_gal != fam_sig.is_boc11() {
+                    if is_gal != fam_sig.is_galileo() {
                         continue;
                     }
                 }

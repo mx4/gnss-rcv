@@ -135,46 +135,69 @@ pub enum Signal {
     GalileoE1b,
     /// Galileo E1-C (pilot): 4092-chip memory code, 4 ms, BOC(1,1).
     GalileoE1c,
+    /// Galileo E5a-I (data): 10230-chip LFSR code, 1 ms, BPSK(10), 1176.45 MHz.
+    GalileoE5aI,
+    /// Galileo E5a-Q (pilot): 10230-chip LFSR code, 1 ms, BPSK(10), 1176.45 MHz.
+    GalileoE5aQ,
 }
 
 impl Signal {
-    /// Carrier frequency (Hz). All of these share the L1 band (1575.42 MHz).
+    /// Carrier frequency (Hz). The L1-band signals share 1575.42 MHz; E5a is the
+    /// second band at 1176.45 MHz.
     pub fn carrier_hz(&self) -> f64 {
-        crate::constants::L1_HZ
+        match self {
+            Signal::GalileoE5aI | Signal::GalileoE5aQ => crate::constants::E5A_HZ,
+            _ => crate::constants::L1_HZ,
+        }
     }
 
     /// Primary-code period (s): one full spreading-code repetition.
     pub fn code_period_sec(&self) -> f64 {
         match self {
-            Signal::L1ca => 1e-3,
+            Signal::L1ca | Signal::GalileoE5aI | Signal::GalileoE5aQ => 1e-3,
             Signal::GalileoE1b | Signal::GalileoE1c => 4e-3,
         }
     }
 
     /// Length of the spreading replica `spreading_code` returns (the correlator
     /// resamples this to the sample rate). For BOC(1,1) it is twice the primary
-    /// chip count (two sub-chips per chip).
+    /// chip count (two sub-chips per chip); E5a is plain BPSK (no doubling).
     pub fn code_len(&self) -> usize {
         match self {
             Signal::L1ca => L1CA_CODE_LEN,
             Signal::GalileoE1b | Signal::GalileoE1c => 2 * E1_CODE_LEN,
+            Signal::GalileoE5aI | Signal::GalileoE5aQ => crate::galileo_e5_codes::E5_PRIMARY_LEN,
         }
     }
 
     /// True for BOC(1,1)-modulated signals (square subcarrier at the chip rate),
-    /// false for plain BPSK like L1 C/A.
+    /// false for plain BPSK like L1 C/A and E5a.
     pub fn is_boc11(&self) -> bool {
         matches!(self, Signal::GalileoE1b | Signal::GalileoE1c)
     }
 
+    /// True for the Galileo signals (E1, E5a). Distinct from [`is_boc11`]: E5a is
+    /// Galileo but BPSK, not BOC — constellation checks must use this, not the
+    /// modulation flag.
+    ///
+    /// [`is_boc11`]: Signal::is_boc11
+    pub fn is_galileo(&self) -> bool {
+        matches!(
+            self,
+            Signal::GalileoE1b | Signal::GalileoE1c | Signal::GalileoE5aI | Signal::GalileoE5aQ
+        )
+    }
+
     /// The bipolar (±1) spreading replica for `prn`, already modulated by its
-    /// subcarrier (BOC(1,1) for E1). `None` when the code is not yet available
-    /// (the E1 memory codes still need to be embedded).
+    /// subcarrier (BOC(1,1) for E1; E5a is plain BPSK). `None` for an
+    /// out-of-range PRN.
     pub fn spreading_code(&self, prn: u8) -> Option<Vec<i8>> {
         match self {
             Signal::L1ca => Code::gen_code("L1CA", prn),
             Signal::GalileoE1b => e1_primary_code(prn, false).map(|c| boc11(&c)),
             Signal::GalileoE1c => e1_primary_code(prn, true).map(|c| boc11(&c)),
+            Signal::GalileoE5aI => crate::galileo_e5_codes::e5a_primary_code(prn, false),
+            Signal::GalileoE5aQ => crate::galileo_e5_codes::e5a_primary_code(prn, true),
         }
     }
 }
@@ -186,7 +209,11 @@ impl FromStr for Signal {
             "L1CA" | "L1C/A" => Ok(Signal::L1ca),
             "E1B" => Ok(Signal::GalileoE1b),
             "E1C" => Ok(Signal::GalileoE1c),
-            _ => Err(format!("unknown signal '{s}' (have: L1CA, E1B, E1C)")),
+            "E5A" | "E5AI" => Ok(Signal::GalileoE5aI),
+            "E5AQ" => Ok(Signal::GalileoE5aQ),
+            _ => Err(format!(
+                "unknown signal '{s}' (have: L1CA, E1B, E1C, E5A, E5AQ)"
+            )),
         }
     }
 }
@@ -200,6 +227,8 @@ impl fmt::Display for Signal {
                 Signal::L1ca => "L1CA",
                 Signal::GalileoE1b => "E1B",
                 Signal::GalileoE1c => "E1C",
+                Signal::GalileoE5aI => "E5A",
+                Signal::GalileoE5aQ => "E5AQ",
             }
         )
     }

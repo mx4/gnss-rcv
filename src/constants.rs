@@ -8,9 +8,13 @@ const fn p2(n: u32) -> f64 {
     1.0 / (1u64 << n) as f64
 }
 
-/// L1/E1 carrier frequency (Hz) — the one band this receiver works in (GPS
-/// L1 C/A, Galileo E1, SBAS L1 and QZSS L1 all share it).
+/// L1/E1 carrier frequency (Hz) — the primary band (GPS L1 C/A, Galileo E1,
+/// SBAS L1 and QZSS L1 all share it).
 pub const L1_HZ: f64 = 1_575_420_000.0;
+
+/// Galileo E5a carrier frequency (Hz) — the second band, shared with GPS L5 and
+/// BeiDou B2a.
+pub const E5A_HZ: f64 = 1_176_450_000.0;
 
 /// Seconds in a GPS/GST week — the modulus for time-of-week arithmetic.
 pub const SECONDS_PER_WEEK: u32 = 7 * 24 * 60 * 60; // 604_800

@@ -17,7 +17,7 @@ use rustfft::num_complex::{Complex32, Complex64};
 use std::f64::consts::{FRAC_1_SQRT_2, PI, TAU};
 
 use crate::code::{Code, E1_CODE_LEN, L1CA_CODE_LEN, Signal};
-use crate::constants::{EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT};
+use crate::constants::{E5A_HZ, EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT};
 use crate::ephemeris::Ephemeris;
 use crate::gps_lnav::{encode_lnav_subframe_source, encode_subframe, quantize_via_lnav};
 use crate::models::{compute_sv_position_ecef, elevation_azimuth};
@@ -30,6 +30,8 @@ use gnss_rtk::prelude::{Epoch, Vector3};
 const CODE_RATE_HZ: f64 = 1_023_000.0;
 /// Galileo E1 BOC(1,1) sub-chip rate (8184 sub-chips / 4 ms).
 const E1_SUBCHIP_RATE_HZ: f64 = 2_046_000.0;
+/// Galileo E5a / GPS L5 chip rate (10230 chips / 1 ms), BPSK(10).
+const E5A_CHIP_RATE_HZ: f64 = 10_230_000.0;
 /// E1-B/C BOC code length in sub-chips (4092 chips × 2).
 const E1_BOC_LEN: usize = 2 * E1_CODE_LEN;
 /// One nav data bit lasts 20 ms (50 bps) = 20 code periods.
@@ -148,6 +150,65 @@ pub fn synth_l1ca(
             };
             let phase = TAU * (fi + s.doppler_hz) * t;
             let sv64 = Complex64::from_polar(amp[k] * c * b, phase);
+            x += Complex32::new(sv64.re as f32, sv64.im as f32);
+        }
+        if let Some(rng) = rng.as_mut() {
+            x += Complex32::new((rng.gauss() * nstd) as f32, (rng.gauss() * nstd) as f32);
+        }
+        out.push(x);
+    }
+    out
+}
+
+/// Synthetic Galileo E5a-I signal: the BPSK(10) data-component primary code at
+/// 10.23 Mcps, the E5a analogue of [`synth_l1ca`]. No secondary/data (held at
+/// +1) — enough to acquire and track the primary; the CS20 tiering and F/NAV
+/// come later. Reuses [`SynthSv`] (its `nav_bits` are ignored here). Sums all
+/// `svs` at their Doppler/code phase into one stream, with optional AWGN.
+pub fn synth_e5a(
+    svs: &[SynthSv],
+    fs: f64,
+    fi: f64,
+    num_msec: usize,
+    seed: Option<u64>,
+) -> Vec<Complex32> {
+    let code_sp = (fs * 1e-3) as usize;
+    let n_total = code_sp * num_msec;
+
+    let codes: Vec<Vec<i8>> = svs
+        .iter()
+        .map(|s| {
+            Signal::GalileoE5aI
+                .spreading_code(s.prn)
+                .expect("E5a-I code")
+        })
+        .collect();
+    // E5a code Doppler scales by the E5a carrier (1176.45 MHz), not L1.
+    let chip_rate: Vec<f64> = svs
+        .iter()
+        .map(|s| E5A_CHIP_RATE_HZ * (1.0 + s.doppler_hz / E5A_HZ))
+        .collect();
+    let amp: Vec<f64> = svs
+        .iter()
+        .map(|s| match seed {
+            None => 1.0,
+            Some(_) => (10f64.powf(s.cn0_dbhz / 10.0) / fs).sqrt(),
+        })
+        .collect();
+    let code_len = Signal::GalileoE5aI.code_len() as f64; // 10230
+
+    let mut rng = seed.map(Rng);
+    let nstd = 0.5f64.sqrt();
+    let inv_fs = 1.0 / fs;
+    let mut out = Vec::with_capacity(n_total);
+    for n in 0..n_total {
+        let t = n as f64 * inv_fs;
+        let mut x = Complex32::new(0.0, 0.0);
+        for (k, s) in svs.iter().enumerate() {
+            let chip = (s.code_phase_chips + chip_rate[k] * t).rem_euclid(code_len);
+            let c = codes[k][chip as usize] as f64;
+            let phase = TAU * (fi + s.doppler_hz) * t;
+            let sv64 = Complex64::from_polar(amp[k] * c, phase);
             x += Complex32::new(sv64.re as f32, sv64.im as f32);
         }
         if let Some(rng) = rng.as_mut() {

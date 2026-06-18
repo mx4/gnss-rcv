@@ -10,7 +10,7 @@ use super::*;
 type Snap = (Measurement, RxEphemeris);
 use crate::synth::{
     GeoFeed, SynthE1Sv, SynthSv, pick_geo_constellation, pick_geo_constellation_gal, synth_e1,
-    synth_l1ca,
+    synth_e5a, synth_l1ca,
 };
 
 #[test]
@@ -204,6 +204,47 @@ fn synthetic_e1_acquires_and_tracks() {
     assert!(
         ch.cn0() > 45.0,
         "a noiseless E1 signal should track at very high C/N0, got {:.1}",
+        ch.cn0()
+    );
+}
+
+// Hermetic Galileo E5a-I (second band) regression: a synthetic BPSK(10) signal
+// at 10.23 Mcps / 1176.45 MHz must drive a channel from Acquisition into
+// Tracking — the E5a analogue of `synthetic_e1_acquires_and_tracks`, exercising
+// the LFSR-generated 10230-chip primary code and the wideband (20.46 Msps)
+// BPSK(10) correlator with no recording. Phase 1: primary-code acquire+track
+// only (no secondary/F-NAV).
+#[test]
+fn synthetic_e5a_acquires_and_tracks() {
+    let (fs, fi) = (20_460_000.0, 0.0); // 2 samples / E5a chip
+    let prn = 4u8;
+    let svs = [SynthSv::new(prn, 1200.0, 3000.0, 0.0)]; // noiseless, some Doppler + code phase
+    let sig = synth_e5a(&svs, fs, fi, 120, None); // 120 ms: acquire + track
+
+    let cfg = ReceiverConfig {
+        sats: prn.to_string(),
+        sig: Signal::GalileoE5aI,
+        fs,
+        fi,
+        ..Default::default()
+    };
+    let mut rx = Receiver::with_feed(
+        Box::new(MockIQReader::new(sig)),
+        &cfg,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(GnssState::new())),
+    );
+    rx.run_loop(0);
+
+    let sv = SV::new(Constellation::Galileo, prn);
+    let ch = &rx.channels[&sv];
+    assert!(
+        ch.is_state_tracking(),
+        "synthetic E5a signal for {sv} should reach Tracking"
+    );
+    assert!(
+        ch.cn0() > 45.0,
+        "a noiseless E5a signal should track at very high C/N0, got {:.1}",
         ch.cn0()
     );
 }
