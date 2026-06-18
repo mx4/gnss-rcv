@@ -61,6 +61,12 @@ pub enum IQFileType {
     // and decimates to the configured output rate (see PSDR_* and the read path),
     // so the standard FE4CH L1 config uses `--fs 4000000 --fi 0`.
     TypePocketSdrRaw16,
+    // PocketSDR FE 4CH RAW16, channel 2 (the L5/E5a band). On captures that carry
+    // E5a (e.g. the eindhoven FE4CH, .tag F_LO = …,1176.45,…) channel 2's LO sits
+    // at the band centre, so it is already at zero IF — a plain nibble decode at
+    // the native 16 MHz, no image rejection/downconversion (unlike CH0). Run it as
+    // `-t pocketsdr-raw16-ch2 --fs 16000000 --fi 0 --sig E5A`.
+    TypePocketSdrRaw16Ch2,
 }
 
 impl FromStr for IQFileType {
@@ -77,6 +83,7 @@ impl FromStr for IQFileType {
             "2bit" => Ok(IQFileType::TypeOne2Bit),
             "1bit" => Ok(IQFileType::TypeOneBit),
             "pocketsdr-raw16" => Ok(IQFileType::TypePocketSdrRaw16),
+            "pocketsdr-raw16-ch2" => Ok(IQFileType::TypePocketSdrRaw16Ch2),
             _ => Err(format!("Failed to parse {}", input).into()),
         }
     }
@@ -95,6 +102,7 @@ impl fmt::Display for IQFileType {
             IQFileType::TypeOne2Bit => write!(f, "2bit"),
             IQFileType::TypeOneBit => write!(f, "1bit"),
             IQFileType::TypePocketSdrRaw16 => write!(f, "pocketsdr-raw16"),
+            IQFileType::TypePocketSdrRaw16Ch2 => write!(f, "pocketsdr-raw16-ch2"),
         }
     }
 }
@@ -145,6 +153,9 @@ impl IQReader for IQRecording {
         }
         if let IQFileType::TypePocketSdrRaw16 = self.file_type {
             return self.get_iq_data_pocketsdr_raw16(off_samples, num_samples);
+        }
+        if let IQFileType::TypePocketSdrRaw16Ch2 = self.file_type {
+            return self.get_iq_data_pocketsdr_raw16_ch2(off_samples, num_samples);
         }
         let sample_size = Self::get_sample_size_bytes(&self.file_type);
 
@@ -236,11 +247,12 @@ impl IQReader for IQRecording {
                     });
                 }
             }
-            // Returned early above via get_iq_data_1bit / _2bit / _4bit / _pocketsdr_raw16.
+            // Returned early above via get_iq_data_1bit / _2bit / _4bit / _pocketsdr_raw16[_ch2].
             IQFileType::TypeOneBit => unreachable!(),
             IQFileType::TypeOne2Bit => unreachable!(),
             IQFileType::TypeOne4Bit => unreachable!(),
             IQFileType::TypePocketSdrRaw16 => unreachable!(),
+            IQFileType::TypePocketSdrRaw16Ch2 => unreachable!(),
         }
 
         Ok(iq_vec)
@@ -259,8 +271,10 @@ impl IQRecording {
             IQFileType::TypeOne2Bit => (file_size * 4) as f64 / fs,
             IQFileType::TypeOne4Bit => (file_size * 2) as f64 / fs,
             // RAW16: one 16-bit word per native sample at the fixed 16 MHz rate
-            // (independent of the decimated output rate `fs` the receiver runs at).
-            IQFileType::TypePocketSdrRaw16 => file_size as f64 / 2.0 / PSDR_NATIVE_FS,
+            // (CH0 decimates to `fs`; CH2 runs at the native rate).
+            IQFileType::TypePocketSdrRaw16 | IQFileType::TypePocketSdrRaw16Ch2 => {
+                file_size as f64 / 2.0 / PSDR_NATIVE_FS
+            }
             _ => file_size as f64 / fs / Self::get_sample_size_bytes(file_type) as f64,
         };
         // RAW16 is downconverted+decimated to the requested output rate `fs`.
@@ -301,6 +315,9 @@ impl IQRecording {
             IQFileType::TypeOne4Bit => unreachable!("4-bit uses get_iq_data_4bit"),
             IQFileType::TypePocketSdrRaw16 => {
                 unreachable!("RAW16 uses get_iq_data_pocketsdr_raw16")
+            }
+            IQFileType::TypePocketSdrRaw16Ch2 => {
+                unreachable!("RAW16 CH2 uses get_iq_data_pocketsdr_raw16_ch2")
             }
         }
     }
@@ -510,6 +527,50 @@ impl IQRecording {
             out.push(buf[local] * norm * mix);
         }
         Ok(out)
+    }
+
+    // Read PocketSDR FE 4CH RAW16 channel 2 (the L5/E5a band) as complex baseband
+    // at the native 16 MHz. Each 16-bit word (2 bytes, little-endian) packs four
+    // channels one per nibble; CH2 is the *high* byte's low nibble: I = bits[9:8],
+    // Q = bits[11:10]. Captures carrying E5a tune CH2's LO to the band centre
+    // (1176.45 MHz), so it is already at zero IF — no image rejection or
+    // downconversion (unlike CH0), just the sign+magnitude nibble decode
+    // {00,01,10,11}→{+1,+3,-1,-3}/3. Q is conjugated to match PocketSDR's spectral
+    // convention. Contiguous (no decimation): run with `--fs 16000000 --fi 0`.
+    fn get_iq_data_pocketsdr_raw16_ch2(
+        &mut self,
+        off_samples: usize,
+        num_samples: usize,
+    ) -> Result<Vec<Complex32>, Box<dyn std::error::Error>> {
+        const BYTES_PER_SAMPLE: usize = 2; // one 16-bit word per native sample
+        if self.reader.is_none() {
+            let file = File::open(&self.file_path)?;
+            self.reader = Some(BufReader::with_capacity(READ_BUF_CAPACITY, file));
+            self.pos_samples = usize::MAX; // force an initial seek
+        }
+        let reader = self.reader.as_mut().unwrap();
+        if off_samples != self.pos_samples {
+            reader.seek(SeekFrom::Start((off_samples * BYTES_PER_SAMPLE) as u64))?;
+            self.pos_samples = off_samples;
+        }
+        let mut bytes = vec![0u8; num_samples * BYTES_PER_SAMPLE];
+        if reader.read_exact(&mut bytes).is_err() {
+            return Err("end of file".into());
+        }
+        self.pos_samples += num_samples;
+
+        const VAL: [f32; 4] = [1.0 / 3.0, 1.0, -1.0 / 3.0, -1.0];
+        let iq_vec = bytes
+            .chunks_exact(2)
+            .map(|w| {
+                let hi = w[1]; // CH2/CH3 byte; CH2 = its low nibble
+                Complex32 {
+                    re: VAL[(hi & 0x03) as usize],
+                    im: -VAL[((hi >> 2) & 0x03) as usize], // conjugate (PocketSDR convention)
+                }
+            })
+            .collect();
+        Ok(iq_vec)
     }
 
     // Read signed 4-bit real samples, 2 per byte (high nibble first), I-only.

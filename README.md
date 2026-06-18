@@ -102,6 +102,8 @@ $ RUST_LOG=info cargo run --release -- -f path/to/recording.bin -t <format>
 | `rtlsdr-file` | interleaved uint8 I/Q (an `rtl_sdr` capture)        |
 | `1bit`        | 8 hard-limited 1-bit real samples packed per byte   |
 | `4bit`        | 2 signed 4-bit real samples packed per byte (SX3)   |
+| `pocketsdr-raw16` | PocketSDR FE 4CH RAW16, channel 0 (L1/E1; image-rejected + downconverted) |
+| `pocketsdr-raw16-ch2` | PocketSDR FE 4CH RAW16, channel 2 (L5/**E5a**, zero-IF 16 MHz) |
 
 ### Sample rate & intermediate frequency
 The PRN code is resampled to the actual rate, so any sampling frequency works.
@@ -193,6 +195,7 @@ result (a ✅ fix is the computed lat/lon vs. the recording's true location):
 | ION HackRF (10 MHz, IF 420 kHz) | `fetch.py ion-hackrf` | `-t 2xi8 --fs 10000000 --fi 420000` | tracks 11 SVs (45–51 dB-Hz), decodes some ephemeris; no full fix yet (intermittent nav decode — open) |
 | `gps.samples.1bit…` | `fetch.py jks-1bit` | `-t 1bit --fs 5456000 --fi 1364000` | tracks ~7 SVs at a marginal ~30 dB-Hz; no fix |
 | `gioveAandB_short.bin` | [gfix.dk](http://gfix.dk/matlab-gnss-sdr-book/gnss-signal-records/) (by hand) | `-t i8 --fs 16367600 --fi 4130400` | acquires/tracks; short — no fix |
+| PocketSDR FE4CH **E5a** (Eindhoven) | `fetch.py pocketsdr-eindhoven` (CH2) | `-t pocketsdr-raw16-ch2 --fs 16000000 --fi 0 --sig E5A` | ✅ **51.449, 5.494** — Eindhoven 🇳🇱, **Galileo E5a-only** fix: 8 SVs acquire/track, F/NAV decoded, 4 SVs → fix (σ 1.0 m). Needs ~120 s (F/NAV pages are 10 s) |
 
 Adding `--sig E1B` decodes Galileo E1-B I/NAV on the wideband captures too (e.g.
 PocketSDR Tokyo: 7 SVs decode CRC-valid pages; SJTU Shanghai similarly) — the
