@@ -10,6 +10,7 @@ pub mod ephemeris;
 pub mod fec;
 mod galileo_e1_codes;
 mod galileo_e5_codes;
+pub mod galileo_fnav;
 pub mod galileo_inav;
 pub mod gps_lnav;
 pub mod models;
