@@ -139,12 +139,14 @@ RECORDINGS: List[Rec] = [
         "Fixes in Eindhoven (cn0 40-48, TTFF ~33s)",
         ("gps", "galileo")),
     Rec("pocketsdr-bonn",
-        "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1al.bin.gz",
+        "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1bl.bin.gz",
         "pocketsdr-bonn.bin", 0, "gz",
-        "-t 2xi8 --fs 24000000",
-        "PocketSDR Bonn DE Nov 2024, GPS L1CA, INT8X2 24 MHz zero-IF, ~130s; "
-        "F_LO=1575.42 MHz. Galileo E1B on separate E1.bin.gz from same session",
-        ("gps",)),
+        "-t i8 --fs 12000000 --fi 3000000",
+        "PocketSDR Bonn DE Nov 2024, GPS L1CA + Galileo E1B, INT8 real 12 MHz, "
+        "F_LO=1572.42 MHz (L1/E1 at +3 MHz IF = fs/4), ~285s; acquires ~20 SVs. "
+        "NB: the same session's 24 MHz complex L1a/L1al files carry no recoverable "
+        "C/A code (verified dud channel); this 12 MHz real file is the working long capture",
+        ("gps", "galileo")),
     Rec("pocketsdr-hiroshima",
         "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241113hiroshima-cu/L1a.bin.gz",
         "pocketsdr-hiroshima.bin", 0, "gz",

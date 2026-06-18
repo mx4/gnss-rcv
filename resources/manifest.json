@@ -205,14 +205,15 @@
   },
   {
     "name": "pocketsdr-bonn",
-    "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1al.bin.gz",
+    "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1bl.bin.gz",
     "dest": "pocketsdr-bonn.bin",
     "size": 0,
     "archive": "gz",
-    "flags": "-t 2xi8 --fs 24000000",
-    "note": "PocketSDR Bonn DE Nov 2024, GPS L1CA, INT8X2 24 MHz zero-IF, ~130s; F_LO=1575.42 MHz. Galileo E1B on separate E1.bin.gz from same session",
+    "flags": "-t i8 --fs 12000000 --fi 3000000",
+    "note": "PocketSDR Bonn DE Nov 2024, GPS L1CA + Galileo E1B, INT8 real 12 MHz, F_LO=1572.42 MHz (L1/E1 at +3 MHz IF = fs/4), ~285s; acquires ~20 SVs. NB: the same session's 24 MHz complex L1a/L1al files carry no recoverable C/A code (verified dud channel); this 12 MHz real file is the working long capture",
     "tags": [
-      "gps"
+      "gps",
+      "galileo"
     ]
   },
   {
