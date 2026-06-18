@@ -21,7 +21,6 @@
 pub const E5_PRIMARY_LEN: usize = 10230;
 
 /// E5a-I secondary code length (CS20), one common 20-chip sequence (20 ms).
-#[allow(dead_code)] // Phase 3 (E5a-I tiering)
 pub const E5A_I_SECONDARY_LEN: usize = 20;
 /// E5a-Q secondary code length (CS100), per-PRN 100-chip sequence (100 ms).
 #[allow(dead_code)] // Phase 3 (E5a-Q pilot)
@@ -97,7 +96,6 @@ pub fn e5a_primary_code(prn: u8, pilot: bool) -> Option<Vec<i8>> {
 
 /// E5a-I secondary code (CS20): the common 20-chip sequence (ICD Table 20/22),
 /// hex MSB-first, overlaid one chip per 1 ms primary epoch.
-#[allow(dead_code)] // Phase 3 (tiering)
 const E5A_I_SECONDARY_HEX: &str = "842E9";
 
 /// E5a-Q secondary codes (CS100): per-PRN 100-chip sequences, ICD Tables 20/21
@@ -160,7 +158,6 @@ const E5A_Q_SECONDARY_HEX: [&str; 50] = [
 /// Decode a hex secondary code into `n_bits` bipolar chips (+1/-1), MSB-first
 /// (logic 0 -> +1, 1 -> -1). Trailing bits past `n_bits` (zero-padding the last
 /// nibble) are dropped.
-#[allow(dead_code)] // Phase 3 (tiering)
 fn secondary_code(hex: &str, n_bits: usize) -> Vec<i8> {
     let mut bits = Vec::with_capacity(hex.len() * 4);
     for c in hex.chars() {

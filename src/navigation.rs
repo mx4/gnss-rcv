@@ -12,6 +12,9 @@
 use crate::channel::Channel;
 use crate::code::Signal;
 use crate::ephemeris::{Ephemeris, Measurement};
+use crate::galileo_fnav::{
+    FNAV_DECODE_LATENCY_SEC, FnavDecoder, FnavSymbolizer, decode_fnav_ephemeris,
+};
 use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
 use crate::osnma::OsnmaPage;
@@ -27,8 +30,12 @@ pub struct Navigation {
     /// The per-epoch tracking measurement, snapshotted by the channel each
     /// code period; paired with `eph` for the solve.
     pub meas: Measurement,
-    pub(crate) lnav: LnavState,     // GPS / QZSS L1 C/A
-    pub(crate) inav: InavDecoder,   // Galileo E1-B
+    pub(crate) lnav: LnavState,   // GPS / QZSS L1 C/A
+    pub(crate) inav: InavDecoder, // Galileo E1-B
+    pub(crate) fnav: FnavDecoder, // Galileo E5a-I (page decoder)
+    /// E5a-I CS20 secondary symboliser: tiers 20 primary-epoch prompts into one
+    /// 20 ms F/NAV symbol for [`Navigation::fnav`].
+    pub(crate) fnav_sym: FnavSymbolizer,
     pub(crate) sbas: SbasL1Channel, // SBAS L1
     /// Galileo OSNMA: the GST anchor `(tow, ts_sec)` from the last word-5 page,
     /// and decoded pages buffered for the receiver-level verifier to drain.
@@ -50,6 +57,8 @@ impl Navigation {
             meas: Measurement::default(),
             lnav: LnavState::new(sv),
             inav: InavDecoder::new(),
+            fnav: FnavDecoder::new(),
+            fnav_sym: FnavSymbolizer::new(),
             sbas: SbasL1Channel::new(),
             osnma_anchor: None,
             osnma_pages: Vec::new(),
@@ -61,6 +70,8 @@ impl Navigation {
     pub fn init(&mut self) {
         self.lnav.reset();
         self.inav = InavDecoder::new();
+        self.fnav = FnavDecoder::new();
+        self.fnav_sym = FnavSymbolizer::new();
         self.sbas = SbasL1Channel::new();
         // The I/NAV symbol stream restarts, so the page-timing anchor is stale.
         self.osnma_anchor = None;
@@ -73,16 +84,77 @@ impl Channel {
     /// Decode the navigation message for this channel's signal. Generic entry
     /// point: dispatches by constellation to the signal-specific decoder.
     pub fn nav_decode(&mut self) {
-        // E1-C is the dataless pilot — no I/NAV rides it, so there is nothing to
-        // decode (feeding its prompt sign to the I/NAV decoder is meaningless).
-        // All Galileo nav data is on E1-B; the pilot only improves tracking.
-        if self.sig == Signal::GalileoE1c {
+        // Dataless pilots (E1-C, E5a-Q) carry no nav data — nothing to decode;
+        // they only improve tracking. The nav data is on the data components.
+        if matches!(self.sig, Signal::GalileoE1c | Signal::GalileoE5aQ) {
             return;
         }
         match self.sv.constellation {
+            // Galileo splits by band: E1-B carries I/NAV, E5a-I carries F/NAV.
+            Constellation::Galileo if self.sig == Signal::GalileoE5aI => self.nav_decode_fnav(),
             Constellation::Galileo => self.nav_decode_inav(),
             Constellation::SBAS => self.nav_decode_sbas(),
             _ => self.nav_decode_gps_lnav(), // GPS, QZSS
+        }
+    }
+
+    /// Galileo E5a-I F/NAV: each 1 ms primary-epoch prompt-I is tiered by the CS20
+    /// symboliser into a 20 ms symbol (50 sym/s); each CRC-valid page fills the
+    /// ephemeris — clock/iono/BGD/GST (page type 1), the Keplerian orbit 1/3..3/3
+    /// (types 2-4) and the GGTO (type 4). The F/NAV twin of [`nav_decode_inav`];
+    /// the TOW names the GST at the page start, decoded 10 s later
+    /// ([`FNAV_DECODE_LATENCY_SEC`]).
+    fn nav_decode_fnav(&mut self) {
+        let Some(&c_p) = self.hist.corr_p.back() else {
+            return;
+        };
+        let Some(sym) = self.nav.fnav_sym.push_prompt(c_p.re) else {
+            return;
+        };
+        let Some(word) = self.nav.fnav.push_symbol(sym) else {
+            return;
+        };
+        self.stats.subframes += 1;
+        if self.nav.eph.ts_sec == 0.0 {
+            self.nav.eph.ts_sec = self.ts_sec; // timestamp the first page in
+        }
+        let was_valid = self.nav.eph.is_valid();
+        let had_ggto = self.nav.eph.ggto_valid;
+        decode_fnav_ephemeris(&mut self.nav.eph, &word);
+        log::warn!("{}: F/NAV page type {} (CRC ok)", self.sv, word.page_type);
+        if !had_ggto && self.nav.eph.ggto_valid {
+            log::warn!(
+                "{}: GGTO (GST-GPST) decoded: A0G={:+.2} ns A1G={:+.2e} s/s t0G={} WN0G={}",
+                self.sv,
+                self.nav.eph.a0g * 1e9,
+                self.nav.eph.a1g,
+                self.nav.eph.t0g,
+                self.nav.eph.wn0g
+            );
+        }
+        // A page can be the one completing the ephemeris — anchor right away.
+        self.try_anchor_tx();
+        if !was_valid && self.nav.eph.is_valid() {
+            log::warn!(
+                "{}: Galileo E5a ephemeris complete (GST week {}, toe {} s)",
+                self.sv,
+                self.nav.eph.week,
+                self.nav.eph.toe
+            );
+        }
+        // Every F/NAV page carries a fresh GST WN/TOW; build the absolute epochs
+        // and pin the transmit anchor. The fixed page-decode offset (10 s) is the
+        // same for every Galileo SV, so it folds into the receiver clock bias.
+        if self.nav.eph.week != 0 {
+            let w = self.nav.eph.week;
+            let sow_ns = |sow: u32| (sow as u64) * 1_000_000_000;
+            self.nav.eph.tow_gpst =
+                Epoch::from_time_of_week(w, sow_ns(self.nav.eph.tow), TimeScale::GST);
+            self.nav.eph.toe_gpst =
+                Epoch::from_time_of_week(w, sow_ns(self.nav.eph.toe), TimeScale::GST);
+            self.nav.eph.toc_gpst =
+                Epoch::from_time_of_week(w, sow_ns(self.nav.eph.toc), TimeScale::GST);
+            self.nav_anchor_tx(FNAV_DECODE_LATENCY_SEC);
         }
     }
 

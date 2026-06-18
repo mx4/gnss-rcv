@@ -19,6 +19,7 @@ use crate::constants::{
 };
 use crate::ephemeris::Ephemeris;
 use crate::fec::{conv_encode, crc24q};
+use crate::galileo_e5_codes::{E5A_I_SECONDARY_LEN, e5a_i_secondary_code};
 use crate::galileo_inav::viterbi_decode;
 
 /// Galileo inverts the G2 output symbol of the shared K=7 convolutional code
@@ -339,6 +340,66 @@ pub fn encode_fnav_ephemeris(eph: &Ephemeris, page_type: u8) -> [u8; FNAV_DATA_B
     d
 }
 
+// ---- E5a-I F/NAV symbol demodulation (CS20 secondary tiering) ----
+
+/// Accumulates E5a-I 1 ms prompt-I samples into 20 ms F/NAV symbols. Each F/NAV
+/// symbol (50 sym/s) spans one CS20 secondary-code period — 20 primary epochs,
+/// each multiplied by one CS20 chip. The symboliser strips CS20 and coherently
+/// sums the 20 prompts; the symbol is the sum's sign. The CS20 boundary is found
+/// once, as the alignment maximising the coherent magnitude (independent of the
+/// data symbol). A carrier 180° flip is resolved downstream by [`FnavDecoder`].
+pub struct FnavSymbolizer {
+    cs20: Vec<i8>, // common CS20 secondary code (±1, length 20)
+    buf: Vec<f64>, // prompt-I samples awaiting symbol grouping
+    synced: bool,
+}
+
+impl Default for FnavSymbolizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FnavSymbolizer {
+    pub fn new() -> Self {
+        Self {
+            cs20: e5a_i_secondary_code(),
+            buf: Vec::new(),
+            synced: false,
+        }
+    }
+
+    /// Coherent CS20-stripped magnitude of the 20 prompts at buffer offset `d`.
+    fn mag(&self, d: usize) -> f64 {
+        (0..E5A_I_SECONDARY_LEN)
+            .map(|i| self.buf[d + i] * self.cs20[i] as f64)
+            .sum::<f64>()
+            .abs()
+    }
+
+    /// Feed one prompt-I (per 1 ms E5a-I primary epoch). Returns the next 20 ms
+    /// F/NAV symbol (0/1) once a CS20-aligned group completes.
+    pub fn push_prompt(&mut self, prompt_i: f64) -> Option<u8> {
+        self.buf.push(prompt_i);
+        let n = E5A_I_SECONDARY_LEN;
+        if !self.synced {
+            if self.buf.len() < 2 * n {
+                return None;
+            }
+            // Find the CS20 boundary: the alignment with the largest coherent sum.
+            let best = (0..n).max_by(|&a, &b| self.mag(a).total_cmp(&self.mag(b)))?;
+            self.buf.drain(..best);
+            self.synced = true;
+        }
+        if self.buf.len() >= n {
+            let sum: f64 = (0..n).map(|i| self.buf[i] * self.cs20[i] as f64).sum();
+            self.buf.drain(..n);
+            return Some((sum >= 0.0) as u8);
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +415,37 @@ mod tests {
                 ((x >> 33) & 1) as u8
             })
             .collect()
+    }
+
+    /// A representative quantised Galileo ephemeris (Keplerian + clock + iono +
+    /// BGD + GGTO); every value is within its F/NAV field's range.
+    fn sample_eph() -> Ephemeris {
+        use gnss_rs::constellation::Constellation;
+        use gnss_rs::sv::SV;
+        let mut eph = Ephemeris::new(SV::new(Constellation::Galileo, 11));
+        eph.iode = 42;
+        eph.toe = 36_000;
+        eph.toc = 36_000;
+        eph.week = 1300;
+        eph.tow = 35_990;
+        eph.m0 = 0.30;
+        eph.ecc = 2.0e-4;
+        eph.a = 29_600_000.0;
+        eph.omg0 = -1.20;
+        eph.i0 = 0.96;
+        eph.omg = 0.50;
+        eph.omg_dot = -5.0e-9;
+        eph.i_dot = 1.0e-10;
+        eph.deln = 3.0e-9;
+        (eph.cuc, eph.cus) = (1.0e-6, 2.0e-6);
+        (eph.crc, eph.crs) = (150.0, -80.0);
+        (eph.cic, eph.cis) = (1.0e-7, -2.0e-7);
+        (eph.f0, eph.f1, eph.f2) = (1.0e-4, 1.0e-12, 0.0);
+        (eph.sva, eph.svh) = (3, 0);
+        (eph.ai0, eph.ai1, eph.ai2) = (50.0, 0.1, 0.01);
+        eph.tgd = 1.5e-9;
+        (eph.a0g, eph.a1g, eph.t0g, eph.wn0g) = (2.0e-9, 1.0e-15, 36_000, 1300 % 64);
+        eph
     }
 
     #[test]
@@ -421,31 +513,7 @@ mod tests {
         use gnss_rs::constellation::Constellation;
         use gnss_rs::sv::SV;
 
-        // A representative quantised Galileo ephemeris (Keplerian + clock + iono
-        // + BGD + GGTO); every value is within its field's range.
-        let mut eph = Ephemeris::new(SV::new(Constellation::Galileo, 11));
-        eph.iode = 42;
-        eph.toe = 36_000;
-        eph.toc = 36_000;
-        eph.week = 1300;
-        eph.tow = 35_990;
-        eph.m0 = 0.30;
-        eph.ecc = 2.0e-4;
-        eph.a = 29_600_000.0;
-        eph.omg0 = -1.20;
-        eph.i0 = 0.96;
-        eph.omg = 0.50;
-        eph.omg_dot = -5.0e-9;
-        eph.i_dot = 1.0e-10;
-        eph.deln = 3.0e-9;
-        (eph.cuc, eph.cus) = (1.0e-6, 2.0e-6);
-        (eph.crc, eph.crs) = (150.0, -80.0);
-        (eph.cic, eph.cis) = (1.0e-7, -2.0e-7);
-        (eph.f0, eph.f1, eph.f2) = (1.0e-4, 1.0e-12, 0.0);
-        (eph.sva, eph.svh) = (3, 0);
-        (eph.ai0, eph.ai1, eph.ai2) = (50.0, 0.1, 0.01);
-        eph.tgd = 1.5e-9;
-        (eph.a0g, eph.a1g, eph.t0g, eph.wn0g) = (2.0e-9, 1.0e-15, 36_000, 1300 % 64);
+        let eph = sample_eph();
 
         // Encode pages 1-4, then decode them into a fresh ephemeris (same SV).
         let pages: Vec<[u8; FNAV_DATA_BITS]> =
@@ -492,5 +560,64 @@ mod tests {
                 "page {pt} re-encode"
             );
         }
+    }
+
+    // End-to-end demod→decode at the prompt level: an ephemeris is rendered to a
+    // full F/NAV symbol stream (pages 1-4), each symbol is spread across its CS20
+    // secondary period as the receiver sees it (one prompt-I per 1 ms primary
+    // epoch), and the FnavSymbolizer→FnavDecoder→decode_fnav_ephemeris chain must
+    // recover the ephemeris — exercising CS20 sync, 20 ms tiered accumulation, the
+    // page sync-finder and the field extraction. (The RF/tracking layer is covered
+    // separately; F/NAV's 10 s pages make a full-sample test impractically large.)
+    #[test]
+    fn fnav_chain_recovers_ephemeris_from_cs20_prompts() {
+        use gnss_rs::constellation::Constellation;
+        use gnss_rs::sv::SV;
+
+        let eph = sample_eph();
+        let cs20 = e5a_i_secondary_code();
+
+        // The transmitted F/NAV symbol stream: pages 1-4 (sync + FEC), each symbol
+        // 0/1 logic. Two laps so the decoder has whole pages after it finds sync.
+        let mut symbols: Vec<u8> = Vec::new();
+        for _ in 0..2 {
+            for pt in 1u8..=4 {
+                symbols.extend(encode_fnav_page(pt, &encode_fnav_ephemeris(&eph, pt)));
+            }
+        }
+
+        // Each symbol (sign = 1−2·bit) is spread by the 20-chip CS20 code, one
+        // chip per 1 ms primary epoch — the prompt-I sequence the receiver tracks.
+        // A few junk prompts up front force a real CS20 boundary search.
+        let mut prompts: Vec<f64> = vec![0.4, -0.3, 0.2, -0.5, 0.1];
+        for &b in &symbols {
+            let sign = 1.0 - 2.0 * b as f64;
+            for &c in &cs20 {
+                prompts.push(sign * c as f64);
+            }
+        }
+
+        let mut sym = FnavSymbolizer::new();
+        let mut dec = FnavDecoder::new();
+        let mut got = Ephemeris::new(SV::new(Constellation::Galileo, 11));
+        for p in prompts {
+            if let Some(s) = sym.push_prompt(p)
+                && let Some(word) = dec.push_symbol(s)
+            {
+                decode_fnav_ephemeris(&mut got, &word);
+            }
+        }
+        got.ts_sec = 1.0;
+
+        assert_eq!(got.eph_mask, 0b1_1110, "all 4 F/NAV pages decoded");
+        assert!(
+            got.is_valid(),
+            "ephemeris recovered through the F/NAV chain"
+        );
+        assert_eq!(got.week, eph.week);
+        assert_eq!(got.toe, eph.toe);
+        assert_eq!(got.iode, eph.iode);
+        assert!((got.a - eph.a).abs() < 1.0);
+        assert!(got.ggto_valid);
     }
 }
