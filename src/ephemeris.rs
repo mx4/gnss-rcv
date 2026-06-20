@@ -25,6 +25,10 @@ pub struct Measurement {
     /// so `carrier_cyc` must NOT be differenced across the boundary (it marks a
     /// cycle slip / re-acquisition).
     pub lock_id: u64,
+    /// This signal's nominal carrier frequency (Hz) — `Signal::carrier_hz`. Per
+    /// SV so the wavelength (λ = c/carrier) is correct across bands: L1 vs E5a
+    /// differ by ~1.34×, which would mis-scale a non-L1 TDCP velocity.
+    pub carrier_hz: f64,
     // Integer transmit-time in seconds since tracking start: num_trk_periods *
     // code_sec. Because num_trk_periods counts *transmitted* code periods
     // (carrier-aided), it advances at the SV clock rate, unlike the receiver

@@ -261,10 +261,12 @@ impl GnssRcvApp {
         self.fs = self.recordings[i].fs;
         self.fi = self.recordings[i].fi;
         self.sig = self.recordings[i].sig;
-        // Seed the family set: C/A always; Galileo when the recording is E1
-        // or the bandwidth admits it (the all-signals default).
+        // Seed the family set: C/A always; Galileo E1-B when the recording is E1
+        // or the bandwidth admits it. E1-B is an L1-band signal, so gate on the
+        // band — a non-L1 recording (e.g. E5a) must not add an L1 family.
         self.gps = true;
-        self.gal = self.sig.is_boc11() || self.fs >= 4_092_000.0;
+        let l1_band = self.sig.carrier_hz() == crate::constants::L1_HZ;
+        self.gal = l1_band && (self.sig.is_boc11() || self.fs >= 4_092_000.0);
     }
 
     fn stop_async(&mut self) {

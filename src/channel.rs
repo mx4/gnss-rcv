@@ -1818,6 +1818,7 @@ impl Channel {
         // differences are used. Sign convention is on Measurement::carrier_cyc.
         self.nav.meas.carrier_cyc = self.trk.accum_doppler_cyc;
         self.nav.meas.lock_id = self.stats.locks;
+        self.nav.meas.carrier_hz = self.sig.carrier_hz();
 
         // The pilot prompt: the separate E1-C correlation on a combined channel,
         // else the channel's own prompt (standalone E1-C, where prn_code already

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    constants::{EARTH_ROTATION_RATE, L1_HZ, SPEED_OF_LIGHT},
+    constants::{EARTH_ROTATION_RATE, SPEED_OF_LIGHT},
     ephemeris::{Ephemeris as RxEphemeris, Measurement},
     models::{
         compute_sv_position_ecef, elevation_azimuth, klobuchar_l1_delay_m, saastamoinen_tropo_m,
@@ -134,10 +134,12 @@ pub(crate) struct SvMeasurement {
     pub var_m2: f64,
     /// Accumulated carrier phase (cycles) and its lock generation, for the TDCP
     /// velocity solve; `ts_sec` is this SV's snapshot instant (its own epoch
-    /// interval in a multi-rate session). See [`PositionSolver::update_velocity`].
+    /// interval in a multi-rate session); `carrier_hz` is its nominal carrier
+    /// (so λ is per-band correct). See [`PositionSolver::update_velocity`].
     pub carrier_cyc: f64,
     pub lock_id: u64,
     pub ts_sec: f64,
+    pub carrier_hz: f64,
 }
 
 /// One SV's previous-epoch state cached for the TDCP velocity solve. Carrier
@@ -514,7 +516,6 @@ impl PositionSolver {
     /// cache. A no-op on the first epoch or with fewer than 4 slip-free carry-over
     /// SVs. Runs only on the live WLS path; GNSS_SOLVER=rtk skips it.
     fn update_velocity(&mut self, meas: &[SvMeasurement], x: [f64; 3]) {
-        let lambda = SPEED_OF_LIGHT / L1_HZ; // m/cycle; every signal here is L1
         // Bounds on the inter-epoch gap: below, the difference is dominated by
         // phase noise; above, a long idle gap (or a stale cache entry left by a
         // rejected fix) is not a trustworthy continuous arc. The fix cadence is
@@ -539,6 +540,8 @@ impl PositionSolver {
                 continue;
             }
             // Measured accumulated delta range (m): −λ·Δφ = Δ(ρ + c·dt_rx − c·clk).
+            // λ is per-SV (its band's carrier), so a non-L1 signal isn't mis-scaled.
+            let lambda = SPEED_OF_LIGHT / m.carrier_hz;
             let adr = -lambda * (m.carrier_cyc - p.carrier_cyc);
             // Predicted geometric range change for a static receiver at this fix,
             // and the SV-clock drift the pseudorange already removes (clk_m). What
@@ -821,6 +824,7 @@ impl PositionSolver {
             carrier_cyc: mm.carrier_cyc,
             lock_id: mm.lock_id,
             ts_sec: mm.ts_sec,
+            carrier_hz: mm.carrier_hz,
         };
 
         if let Some(truth) = ctx.truth_ecef {

@@ -203,7 +203,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let sig = families[0];
     log::warn!(
-        "gnss-rcv: signal families {:?} (L1 band, {:.1} MHz)",
+        "gnss-rcv: signal families {:?} ({:.2} MHz)",
         families.iter().map(|f| f.to_string()).collect::<Vec<_>>(),
         sig.carrier_hz() / 1_000_000.0
     );
