@@ -21,6 +21,7 @@ pub mod plots;
 pub mod receiver;
 pub mod recording;
 pub mod recordings;
+pub mod rinex_nav;
 pub mod sbas_corr;
 pub mod sbas_iono;
 pub mod sbas_l1;
