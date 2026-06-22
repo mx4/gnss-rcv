@@ -22,50 +22,51 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The GSSC daily station whose RINEX-3 mixed-nav we cache. Any IGS station's
-/// `brdc` carries the same broadcast ephemeris; ESA's ESOC is on GSSC and
-/// auth-free. (Change here to use a different station.)
-const BRDC_STATION: &str = "ESOC00DEU";
+/// GSSC daily stations to try, in order. Any IGS station's `brdc` carries the
+/// same broadcast ephemeris, but no single station is archived *every* day
+/// (ESOC, e.g., is on GSSC for 2025 but absent for 2022-03-27), so we fall
+/// through the list. All are ESA/IGS core sites with long, well-archived records.
+const BRDC_STATIONS: [&str; 5] = [
+    "ESOC00DEU", // ESA operations centre, Germany
+    "KIRU00SWE", // ESA Kiruna, Sweden
+    "CEBR00ESP", // ESA Cebreros, Spain
+    "KOUR00GUF", // ESA Kourou, French Guiana
+    "MGUE00ARG", // ESA Malargüe, Argentina
+];
 
-/// RINEX-3 mixed-navigation filename (GPS + Galileo + …) for `year` / `doy`
-/// (day-of-year). The downloaded `.gz` decompresses to this name.
-pub fn brdc_mn_name(year: u32, doy: u32) -> String {
-    format!("{BRDC_STATION}_R_{year}{doy:03}0000_01D_MN.rnx")
+/// RINEX-3 mixed-navigation filename (GPS + Galileo + …) for `station` and
+/// `year` / `doy` (day-of-year). The downloaded `.gz` decompresses to this name.
+fn mn_name(station: &str, year: u32, doy: u32) -> String {
+    format!("{station}_R_{year}{doy:03}0000_01D_MN.rnx")
 }
 
-/// ESA GSSC (no-auth) URL of the compressed daily mixed-nav for `year` / `doy`.
-fn brdc_mn_url(year: u32, doy: u32) -> String {
+/// The default station's mixed-nav filename — public for callers / tests.
+pub fn brdc_mn_name(year: u32, doy: u32) -> String {
+    mn_name(BRDC_STATIONS[0], year, doy)
+}
+
+/// ESA GSSC (no-auth) URL of `station`'s compressed daily mixed-nav.
+fn mn_url(station: &str, year: u32, doy: u32) -> String {
     format!(
         "ftp://gssc.esa.int/gnss/data/daily/{year}/{doy:03}/{}.gz",
-        brdc_mn_name(year, doy)
+        mn_name(station, year, doy)
     )
 }
 
-/// Trivial read-only ephemeris cache: if the day's `brdc` is already in `dir`,
-/// use it; otherwise download it from ESA GSSC (no auth) and decompress.
-/// Returns the local RINEX path. Shells out to `curl` + `gunzip` — the same
-/// tools `fetch.py` / `gen_gpssim.py` use — so there is no runtime crate
-/// dependency. The cached file is never modified (read-only).
-pub fn ensure_brdc(dir: &Path, year: u32, doy: u32) -> std::io::Result<PathBuf> {
-    let local = dir.join(brdc_mn_name(year, doy));
-    if local.exists() {
-        return Ok(local); // cache hit — use it
-    }
-    let url = brdc_mn_url(year, doy);
-    let gz = dir.join(format!("{}.gz", brdc_mn_name(year, doy)));
-    log::warn!("A-GNSS: ephemeris not cached, downloading {url}");
+/// Download + decompress one station's brdc into `dir`; `Ok(path)` on success.
+fn fetch_one(dir: &Path, station: &str, year: u32, doy: u32) -> std::io::Result<PathBuf> {
+    let local = dir.join(mn_name(station, year, doy));
+    let gz = dir.join(format!("{}.gz", mn_name(station, year, doy)));
     let downloaded = Command::new("curl")
-        .args(["-sS", "--fail", "-m", "120", "-o"])
+        .args(["-sS", "--fail", "--connect-timeout", "10", "-m", "60", "-o"])
         .arg(&gz)
-        .arg(&url)
+        .arg(mn_url(station, year, doy))
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !downloaded {
         let _ = std::fs::remove_file(&gz);
-        return Err(std::io::Error::other(
-            "brdc download failed (offline, or no file for that day yet)",
-        ));
+        return Err(std::io::Error::other("download failed"));
     }
     let unzipped = Command::new("gunzip")
         .arg("-f")
@@ -74,9 +75,36 @@ pub fn ensure_brdc(dir: &Path, year: u32, doy: u32) -> std::io::Result<PathBuf> 
         .map(|s| s.success())
         .unwrap_or(false);
     if !unzipped || !local.exists() {
-        return Err(std::io::Error::other("brdc gunzip failed"));
+        return Err(std::io::Error::other("gunzip failed"));
     }
     Ok(local)
+}
+
+/// Trivial read-only ephemeris cache: if any candidate station's `brdc` for the
+/// day is already in `dir`, use it; otherwise download the first one GSSC has
+/// (no single station is present every day) and decompress. Returns the local
+/// RINEX path. Shells out to `curl` + `gunzip` — the same tools `fetch.py` /
+/// `gen_gpssim.py` use — so no runtime crate dependency; the cached file is
+/// never modified (read-only).
+pub fn ensure_brdc(dir: &Path, year: u32, doy: u32) -> std::io::Result<PathBuf> {
+    for station in BRDC_STATIONS {
+        let local = dir.join(mn_name(station, year, doy));
+        if local.exists() {
+            return Ok(local); // cache hit — use it
+        }
+    }
+    for station in BRDC_STATIONS {
+        log::warn!(
+            "A-GNSS: ephemeris not cached, trying {}",
+            mn_url(station, year, doy)
+        );
+        if let Ok(p) = fetch_one(dir, station, year, doy) {
+            return Ok(p);
+        }
+    }
+    Err(std::io::Error::other(
+        "brdc download failed for all stations (offline, or no file for that day yet)",
+    ))
 }
 
 /// Parse the 19-char fixed-width float fields of a nav line, starting at byte
@@ -357,7 +385,7 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         );
         // day-of-year is zero-padded to 3 digits.
         assert_eq!(brdc_mn_name(2025, 9), "ESOC00DEU_R_20250090000_01D_MN.rnx");
-        let url = brdc_mn_url(2025, 166);
+        let url = mn_url(BRDC_STATIONS[0], 2025, 166);
         assert!(url.starts_with("ftp://gssc.esa.int/"));
         assert!(url.ends_with("ESOC00DEU_R_20251660000_01D_MN.rnx.gz"));
     }
