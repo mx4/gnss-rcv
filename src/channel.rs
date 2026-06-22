@@ -434,6 +434,10 @@ pub struct ChannelConfig {
     /// and integrate coherently past the 4 ms primary period. Only meaningful for
     /// [`Signal::GalileoE1c`]; ignored otherwise.
     pub e1c_pilot: bool,
+    /// Rollover anchor (full GPS week) for reconstructing LNAV subframe-1's
+    /// 10-bit week — the receiver's known time (system clock, or `--eph-date`).
+    /// See [`crate::gps_lnav::resolve_gps_week`].
+    pub week_anchor: u32,
 }
 
 pub struct Channel {
@@ -500,6 +504,8 @@ pub struct Channel {
     // stats.subframes at tracking start — the baseline for the SBAS
     // no-message false-lock timeout.
     subfr_at_lock: u64,
+    /// GPS-week rollover anchor for LNAV subframe-1 decode (see ChannelConfig).
+    pub(crate) week_anchor: u32,
 
     pub hist: History,
     pub nav: Navigation,
@@ -662,6 +668,7 @@ impl Channel {
             plots,
             diagnostics,
             e1c_pilot,
+            week_anchor,
         } = config;
         // The pilot path applies to E1-C (standalone pilot, Tier-1) and E1-B
         // (combined: the pilot folds into the data channel, Tier-2); ignore the
@@ -754,6 +761,7 @@ impl Channel {
             // memory spike). See receiver's admission pass.
             state: State::Idle,
             wants_acq: true,
+            week_anchor,
             nav: Navigation::new(sv),
             hist: History::default(),
             scratch: Vec::new(),

@@ -530,6 +530,16 @@ impl Receiver {
         // channels of the constellations that family carries.
         let mut channels = HashMap::<SV, Channel>::new();
         let mut fam_carriers = Vec::new();
+        // GPS-week rollover anchor — the receiver's known time. `--eph-date` if
+        // given (precise/deterministic), else the system clock; resolves LNAV
+        // subframe-1's 10-bit week to the right 1024-week era (a recording is
+        // never from the future). See gps_lnav::resolve_gps_week.
+        let week_anchor = cfg
+            .eph_date
+            .as_deref()
+            .and_then(crate::rinex_nav::parse_ref_epoch)
+            .map(|e| e.to_time_of_week().0)
+            .unwrap_or_else(crate::gps_lnav::current_gps_week);
         for &fam_sig in &families {
             let fam_sp = (fam_sig.code_period_sec() * fs) as usize;
             let carriers = Channel::build_carriers(fs, cfg.fi, fam_sp);
@@ -560,6 +570,7 @@ impl Receiver {
                             plots: cfg.plots,
                             diagnostics: cfg.diagnostics,
                             e1c_pilot: cfg.e1c_pilot,
+                            week_anchor,
                         },
                         state.clone(),
                         carriers.clone(),

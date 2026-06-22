@@ -19,7 +19,7 @@ use crate::{
 };
 use colored::Colorize;
 use gnss_rs::sv::SV;
-use gnss_rtk::prelude::Epoch;
+use gnss_rtk::prelude::{Epoch, TimeScale};
 use std::collections::VecDeque;
 
 use crate::constants::SECONDS_PER_WEEK;
@@ -540,7 +540,7 @@ impl Channel {
         assert_eq!(zero, 0);
 
         match subframe_id {
-            1 => decode_lnav_subframe1(&mut self.nav.eph, buf, self.sv),
+            1 => decode_lnav_subframe1(&mut self.nav.eph, buf, self.sv, self.week_anchor),
             2 => decode_lnav_subframe2(&mut self.nav.eph, buf, self.sv),
             3 => decode_lnav_subframe3(&mut self.nav.eph, buf, self.sv),
             4 => self.nav_decode_lnav_subframe4(buf),
@@ -588,16 +588,39 @@ pub(crate) fn test_lnav_parity(bits: &[u8], nav_data: &mut [u8]) -> bool {
 // the GPS LNAV subframe bit fields (IS-GPS-200). Galileo's I/NAV parser fills the
 // same struct from its own word layout.
 
-/// Subframe 1: GPS week + clock (af0/af1/af2, tgd, toc).
-pub(crate) fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV) {
+/// Reconstruct the full GPS week from the broadcast 10-bit field (mod 1024,
+/// IS-GPS-200 20.3.3.3.1.1). That field alone is ambiguous every 1024 weeks
+/// (~19.6 yr), so we anchor to `anchor_week` (the receiver's known time — the
+/// system clock, or `--eph-date`) and pick the most recent 1024-week era that is
+/// *not in the future*, since a recording can never be from the future. Correct
+/// for any capture within ~19.6 yr before the anchor (older than that is
+/// genuinely ambiguous). The +1 week guards against minor clock skew. Pass
+/// `u32::MAX` to disable the resolver (raw + 2048 = the latest era).
+pub(crate) fn resolve_gps_week(raw10: u32, anchor_week: u32) -> u32 {
+    let mut week = raw10 + 2048; // newest era: weeks 2048.. = 2019-04-07 onward
+    while week > anchor_week.saturating_add(1) {
+        week -= 1024;
+    }
+    week
+}
+
+/// The current GPS week from the system clock — the default rollover anchor.
+/// Falls back to the newest era's first week if the clock is unavailable.
+pub fn current_gps_week() -> u32 {
+    // to_time_of_week() counts weeks from the epoch's *time-scale* reference, so
+    // rebase to GPST (1980-01-06) first — otherwise Epoch::now() (UTC/TAI) yields
+    // weeks since ~1900 and the rollover anchor is uselessly far in the future.
+    Epoch::now()
+        .map(|e| e.to_time_scale(TimeScale::GPST).to_time_of_week().0)
+        .unwrap_or(2048)
+}
+
+/// Subframe 1: GPS week + clock (af0/af1/af2, tgd, toc). `anchor_week` resolves
+/// the 10-bit week's rollover (see [`resolve_gps_week`]).
+pub(crate) fn decode_lnav_subframe1(eph: &mut Ephemeris, buf: &[u8], sv: SV, anchor_week: u32) {
     eph.eph_mask |= 1 << 1; // decode progress: subframe 1 of 3 (clock)
     eph.tow = getbitu(buf, 30, 17) * 6;
-    // The broadcast week is mod-1024 (10 bits, IS-GPS-200 20.3.3.3.1.1); +2048
-    // pins it to the third GPS-week epoch, i.e. weeks 2048..3071 = 2019-04-07
-    // through 2038-11-20. Recordings outside that window decode the wrong week;
-    // a date-anchored resolver is an open roadmap item (AGENTS.md, "GPS week
-    // rollover").
-    eph.week = getbitu(buf, 60, 10) + 2048;
+    eph.week = resolve_gps_week(getbitu(buf, 60, 10), anchor_week);
     eph.code = getbitu(buf, 70, 2);
     eph.sva = getbitu(buf, 72, 4);
     eph.svh = getbitu(buf, 76, 6);
@@ -812,7 +835,12 @@ pub fn encode_lnav_subframe_source(eph: &Ephemeris, subframe_id: u8, how_field: 
 /// generator and solver use bit-identical ephemerides.
 pub fn quantize_via_lnav(eph: &Ephemeris) -> Ephemeris {
     let mut q = Ephemeris::new(eph.sv);
-    decode_lnav_subframe1(&mut q, &encode_lnav_subframe_source(eph, 1, 1), eph.sv);
+    decode_lnav_subframe1(
+        &mut q,
+        &encode_lnav_subframe_source(eph, 1, 1),
+        eph.sv,
+        u32::MAX,
+    );
     decode_lnav_subframe2(&mut q, &encode_lnav_subframe_source(eph, 2, 1), eph.sv);
     decode_lnav_subframe3(&mut q, &encode_lnav_subframe_source(eph, 3, 1), eph.sv);
     q.ts_sec = 1.0;
@@ -890,6 +918,23 @@ pub fn ephemeris_nav_bits(repeats: usize) -> Vec<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gps_week_rollover_resolves_to_latest_past_era() {
+        let now = 2424; // ~mid-2026
+        // a recent (2025, week ~2360) capture: no rollover, raw + 2048.
+        assert_eq!(resolve_gps_week(312, now), 2360);
+        // a 2017 capture (true week 1960, raw = 1960 mod 1024 = 936): the naive
+        // +2048 gives 2984 (year 2037, in the future) → subtract one 1024-week
+        // era back to 1960, the correct past era.
+        assert_eq!(resolve_gps_week(936, now), 1960);
+        // a 2013 capture (true week 1740, raw 716): 2764 → 1740.
+        assert_eq!(resolve_gps_week(716, now), 1740);
+        // a capture exactly at the anchor is kept (no spurious subtraction).
+        assert_eq!(resolve_gps_week(376, now), 2424);
+        // u32::MAX disables the resolver (latest era), as the tests rely on.
+        assert_eq!(resolve_gps_week(936, u32::MAX), 2984);
+    }
     use gnss_rs::constellation::Constellation;
 
     // Hermetic decode-pipeline test: the canned subframes must pass the receiver's
@@ -917,7 +962,7 @@ mod tests {
                 k + 1
             );
             match k {
-                0 => decode_lnav_subframe1(&mut eph, &nav_data, sv),
+                0 => decode_lnav_subframe1(&mut eph, &nav_data, sv, u32::MAX),
                 1 => decode_lnav_subframe2(&mut eph, &nav_data, sv),
                 2 => decode_lnav_subframe3(&mut eph, &nav_data, sv),
                 _ => unreachable!(),
@@ -1014,7 +1059,7 @@ mod tests {
             assert!(test_lnav_parity(&tx, &mut nav), "subframe {id} parity");
             assert_eq!(&nav[..], &src[..], "subframe {id} source bits round-trip");
             match id {
-                1 => decode_lnav_subframe1(&mut q, &nav, sv),
+                1 => decode_lnav_subframe1(&mut q, &nav, sv, u32::MAX),
                 2 => decode_lnav_subframe2(&mut q, &nav, sv),
                 _ => decode_lnav_subframe3(&mut q, &nav, sv),
             }
@@ -1091,7 +1136,7 @@ mod tests {
         // The receiver sets ts_sec when it timestamps the first subframe; mimic.
         e.ts_sec = 1.0;
 
-        decode_lnav_subframe1(&mut e, &hex_to_bytes(G01_SF1), sv);
+        decode_lnav_subframe1(&mut e, &hex_to_bytes(G01_SF1), sv, u32::MAX);
         decode_lnav_subframe2(&mut e, &hex_to_bytes(G01_SF2), sv);
         decode_lnav_subframe3(&mut e, &hex_to_bytes(G01_SF3), sv);
 
