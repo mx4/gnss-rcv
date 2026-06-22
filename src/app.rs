@@ -760,9 +760,18 @@ impl GnssRcvApp {
                                                 }
                                                 let (n_igp, n_fast, n_long, sbas_sys) = sbas;
                                                 if n_igp + n_fast + n_long > 0 {
-                                                    ui.colored_label(
-                                                        constellation_color(Constellation::SBAS),
-                                                        sbas_sys,
+                                                    // Don't wrap the system name (EGNOS / BDSBAS /
+                                                    // SouthPAN …) onto two lines in this narrow
+                                                    // flag column — extend it to its natural width.
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            egui::RichText::new(sbas_sys).color(
+                                                                constellation_color(
+                                                                    Constellation::SBAS,
+                                                                ),
+                                                            ),
+                                                        )
+                                                        .wrap_mode(egui::TextWrapMode::Extend),
                                                     )
                                                     .on_hover_text(format!(
                                                         "SBAS corrections applied to the fix: iono \
