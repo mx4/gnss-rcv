@@ -937,11 +937,16 @@ impl Receiver {
                 continue; // already usable — leave it
             }
             if let Some(issues) = by_sv.get(sv) {
-                let initial = issues[issues.len() / 2];
-                ch.nav.eph = initial;
-                ch.nav.assist_eph = Some(initial);
-                ch.nav.assist_set = issues.clone();
-                injected.push(*sv);
+                // Skip SVs whose nearest issue is stale (a brdc gap near the
+                // recording time, e.g. eccentric E14/E18) — a 5 h-old orbit hurts
+                // more than it helps; let them decode on-air. refine_assist_eph
+                // re-checks per channel against its own decoded TOW.
+                if let Some(initial) = crate::rinex_nav::fresh_eph(issues, epoch) {
+                    ch.nav.eph = initial;
+                    ch.nav.assist_eph = Some(initial);
+                    ch.nav.assist_set = issues.clone();
+                    injected.push(*sv);
+                }
             }
         }
         {

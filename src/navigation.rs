@@ -19,7 +19,7 @@ use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris
 use crate::gps_lnav::LnavState;
 use crate::models::compute_sv_position_ecef;
 use crate::osnma::OsnmaPage;
-use crate::rinex_nav::nearest_eph;
+use crate::rinex_nav::fresh_eph;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
@@ -397,14 +397,27 @@ impl Channel {
     /// needed. Keeps the decoded TOW fields; resets decode progress so the
     /// cross-check re-confirms against the freshly adopted issue.
     fn refine_assist_eph(&mut self) {
-        if self.nav.assist_set.len() < 2 {
-            return; // a single issue (or none) — nothing to choose between
+        if self.nav.assist_set.is_empty() {
+            return; // not assisted
         }
-        let Some(best) = nearest_eph(&self.nav.assist_set, self.nav.eph.tow_gpst) else {
+        let Some(best) = fresh_eph(&self.nav.assist_set, self.nav.eph.tow_gpst) else {
+            // Even the nearest issue is stale — a brdc gap for this SV (the
+            // eccentric E14/E18 are the usual culprits). Don't anchor on a stale
+            // orbit; drop the assist and let the SV decode its own ephemeris.
+            self.nav.eph = Ephemeris::new(self.sv);
+            self.nav.assist_eph = None;
+            self.nav.assist_set.clear();
+            if let Some(cs) = self.pub_state.lock().unwrap().channels.get_mut(&self.sv) {
+                cs.assist = false;
+            }
+            log::warn!(
+                "{}: A-GNSS orbit too stale (brdc gap) — decoding on-air instead",
+                self.sv
+            );
             return;
         };
         if self.nav.assist_eph.map(|a| a.toe) == Some(best.toe) {
-            return; // already on the nearest issue
+            return; // already on the nearest (fresh) issue
         }
         let (tow, tow_gpst) = (self.nav.eph.tow, self.nav.eph.tow_gpst);
         self.nav.eph = best; // complete brdc issue (eph_mask resets to 0)

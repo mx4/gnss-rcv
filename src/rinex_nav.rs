@@ -471,6 +471,18 @@ pub fn nearest_eph(set: &[Ephemeris], t: Epoch) -> Option<Ephemeris> {
         .copied()
 }
 
+/// Max age (seconds) of an injected issue's `toe` vs the channel's time. Beyond
+/// this the brdc has a gap for that SV (e.g. the eccentric-orbit Galileo E14/E18,
+/// sparsely archived) and the orbit is too stale to help the fix — skip it and
+/// let the SV decode its own ephemeris.
+const MAX_ASSIST_TOE_AGE_SEC: f64 = 7200.0; // 2 h
+
+/// The freshest issue in `set` for time `t`, or `None` if even the nearest is
+/// staler than [`MAX_ASSIST_TOE_AGE_SEC`] — a brdc gap for that SV.
+pub fn fresh_eph(set: &[Ephemeris], t: Epoch) -> Option<Ephemeris> {
+    nearest_eph(set, t).filter(|e| (e.toe_gpst - t).to_seconds().abs() <= MAX_ASSIST_TOE_AGE_SEC)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
