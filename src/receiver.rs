@@ -893,6 +893,7 @@ impl Receiver {
         let mut st = self.pub_state.lock().unwrap();
         st.run_progress = Some((data_sec / total).clamp(0.0, 1.0) as f32);
         st.realtime_x = realtime as f32;
+        st.run_elapsed_sec = data_sec;
     }
 
     pub fn run_loop(&mut self, num_msec: usize) {

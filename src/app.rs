@@ -629,7 +629,7 @@ impl GnssRcvApp {
                     st.sbas_corr.long_len(),
                     st.sbas_source.map(sbas_system_short).unwrap_or("SBAS"),
                 ),
-                (st.run_progress, st.realtime_x),
+                (st.run_progress, st.realtime_x, st.run_elapsed_sec),
                 st.agnss
                     .as_ref()
                     .map(|a| (a.source.clone(), a.injected, a.max_delta_m)),
@@ -774,7 +774,11 @@ impl GnssRcvApp {
                                 });
                                 // Run progress — fraction of the recording processed,
                                 // plus the real-time factor; only while a run is active.
-                                let (progress, realtime_x) = run;
+                                let (progress, realtime_x, elapsed_sec) = run;
+                                let elapsed = {
+                                    let m = (elapsed_sec / 60.0) as u64;
+                                    format!("{:02}:{:06.3}", m, elapsed_sec % 60.0)
+                                };
                                 if self.active.load(Ordering::SeqCst) {
                                     // `animate` keeps the bar visibly shimmering even when
                                     // the fraction barely moves (a long capture at sub-real-
@@ -784,7 +788,7 @@ impl GnssRcvApp {
                                     // seconds of setup + cold-start acquisition.
                                     let bar = match progress {
                                         Some(p) => egui::ProgressBar::new(p).text(format!(
-                                            "{:.0}%  ·  {:.1}× real-time",
+                                            "{:.0}%  ·  {:.1}×  ·  {elapsed}",
                                             p * 100.0,
                                             realtime_x
                                         )),

@@ -149,6 +149,9 @@ pub struct GnssState {
     /// (idle, or a live device); drives the UI progress bar.
     pub run_progress: Option<f32>,
     pub realtime_x: f32,
+    /// Elapsed *recording* time at the current step (data seconds processed) —
+    /// shown alongside the progress bar so you can see where in the capture you are.
+    pub run_elapsed_sec: f64,
 
     pub channels: HashMap<SV, ChannelState>,
     pub histories: HashMap<SV, History>,
@@ -188,6 +191,7 @@ impl GnssState {
             fix_svs: Vec::new(),
             run_progress: None,
             realtime_x: 0.0,
+            run_elapsed_sec: 0.0,
             channels: HashMap::<SV, ChannelState>::new(),
             histories: HashMap::new(),
             update_func: UpdateFunc {
