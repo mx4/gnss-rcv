@@ -296,8 +296,13 @@ pub fn parse_rinex_nav(text: &str) -> Vec<Ephemeris> {
     }
 }
 
-/// Walk a RINEX-3 nav file: each record begins with a 1-letter system + 2-digit
-/// PRN (G01, E04, …); `> EPH …` markers and anything else are skipped.
+/// Walk a RINEX-3/4 nav file. Each record begins with a 1-letter system + 2-digit
+/// PRN (G01, E04, …). We model only the legacy Keplerian broadcast nav — GPS
+/// **LNAV**, Galileo **I/F-NAV** — so the `> EPH <SV> <TYPE>` marker (RINEX
+/// 3.05/4.x) is used to skip **CNAV/CNV2**: those have a different field layout
+/// *and* line count (10 vs 8), so reading them as LNAV yields garbage orbits
+/// (and would desync the record stride). A file without markers (3.04) is
+/// LNAV/I-NAV only — accept by default.
 fn parse_rinex3_nav(text: &str) -> Vec<Ephemeris> {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines
@@ -306,20 +311,30 @@ fn parse_rinex3_nav(text: &str) -> Vec<Ephemeris> {
         .map_or(0, |i| i + 1);
     let mut out = Vec::new();
     let mut i = start;
-    while i + 8 <= lines.len() {
-        let l = lines[i].as_bytes();
-        let is_rec = l.len() >= 3
-            && matches!(l[0], b'G' | b'E' | b'R' | b'C' | b'J')
-            && l[1].is_ascii_digit()
-            && l[2].is_ascii_digit();
-        if !is_rec {
+    let mut accept = true; // no marker (3.04) ⇒ accept; a marker sets it per record
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix("> EPH ") {
+            let typ = rest.split_whitespace().nth(1).unwrap_or("");
+            accept = matches!(typ, "LNAV" | "INAV" | "FNAV");
             i += 1;
             continue;
         }
-        if let Some(e) = parse_record(&lines[i..i + 8]) {
-            out.push(e);
+        let b = lines[i].as_bytes();
+        let is_rec = b.len() >= 3
+            && matches!(b[0], b'G' | b'E' | b'R' | b'C' | b'J')
+            && b[1].is_ascii_digit()
+            && b[2].is_ascii_digit();
+        if is_rec && accept {
+            if let Some(e) = lines.get(i..i + 8).and_then(parse_record) {
+                out.push(e);
+            }
+            i += 8;
+            accept = true; // 3.04 default; a 3.05/4 marker overrides before the next record
+        } else {
+            // A `> EPH` marker, a skipped CNAV record's orbit lines, or junk: the
+            // wider-than-8-line CNAV records are stepped over one line at a time.
+            i += 1;
         }
-        i += 8;
     }
     out
 }
@@ -393,10 +408,11 @@ pub fn load_assist_ephemerides(
     eph: &str,
     date: Option<&str>,
     cache_dir: &Path,
-) -> std::io::Result<HashMap<SV, Ephemeris>> {
-    let ref_epoch = date.and_then(parse_ref_epoch);
+) -> std::io::Result<HashMap<SV, Vec<Ephemeris>>> {
     let path = if eph == "auto" {
-        let r = ref_epoch.ok_or_else(|| {
+        // `date` here is only the *day* to fetch — the per-SV issue is picked
+        // later against each channel's decoded TOW, so no time-of-day is needed.
+        let r = date.and_then(parse_ref_epoch).ok_or_else(|| {
             std::io::Error::other("--eph auto needs --eph-date YYYY-MM-DD[Thh:mm:ss]")
         })?;
         let (y, doy) = year_doy(r);
@@ -404,32 +420,30 @@ pub fn load_assist_ephemerides(
     } else {
         PathBuf::from(eph)
     };
-    let all = parse_rinex_nav(&std::fs::read_to_string(&path)?);
-    if all.is_empty() {
+    let mut by_sv: HashMap<SV, Vec<Ephemeris>> = HashMap::new();
+    for e in parse_rinex_nav(&std::fs::read_to_string(&path)?) {
+        if e.is_valid() {
+            by_sv.entry(e.sv).or_default().push(e);
+        }
+    }
+    for issues in by_sv.values_mut() {
+        issues.sort_by_key(|e| e.toe_gpst);
+    }
+    if by_sv.is_empty() {
         return Err(std::io::Error::other(format!(
             "no GPS/Galileo ephemerides parsed from {}",
             path.display()
         )));
     }
-    // Reference for the per-SV pick: the given epoch, else the file's median toe.
-    let reference = ref_epoch.unwrap_or_else(|| {
-        let mut toes: Vec<Epoch> = all.iter().map(|e| e.toe_gpst).collect();
-        toes.sort();
-        toes[toes.len() / 2]
-    });
-    let mut by_sv: HashMap<SV, Ephemeris> = HashMap::new();
-    for e in all {
-        if !e.is_valid() {
-            continue;
-        }
-        let closer = by_sv
-            .get(&e.sv)
-            .is_none_or(|cur| (e.toe_gpst - reference).abs() < (cur.toe_gpst - reference).abs());
-        if closer {
-            by_sv.insert(e.sv, e);
-        }
-    }
     Ok(by_sv)
+}
+
+/// The ephemeris in `set` whose `toe` is nearest `t` — used to pick (and later
+/// refine) the per-SV issue against the channel's decoded TOW.
+pub fn nearest_eph(set: &[Ephemeris], t: Epoch) -> Option<Ephemeris> {
+    set.iter()
+        .min_by_key(|e| (e.toe_gpst - t).abs().total_nanoseconds())
+        .copied()
 }
 
 #[cfg(test)]
@@ -459,6 +473,42 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
      3.120000000000E+00 0.000000000000E+00-4.423782229424E-09-4.656612873077E-09
      6.030650000000E+05
 ";
+
+    // A RINEX-4 GPS CNAV record (10 lines, first orbit field = ADOT, fractional)
+    // followed by an LNAV record — the parser must skip the CNAV via its marker.
+    const FIXTURE_CNAV: &str = "\
+     4.01           N: GNSS NAV DATA    M: MIXED            RINEX VERSION / TYPE
+                                                            END OF HEADER
+> EPH G26 CNAV
+G26 2025 06 05 05 25 00-2.691379049793E-04-1.442401753593E-11 2.602085213965E-18
+    -2.615928649902E-03 6.145312500000E+01 5.342901124706E-09 4.852202962187E-01
+     3.353692591190E-06 1.001644512871E-02 8.588656783104E-06 5.153582700072E+03
+     3.555000000000E+05-1.955777406693E-08-5.214518872384E-01 1.536682248116E-07
+     9.293183390047E-01 1.969726562500E+02 6.312548799910E-01-8.530477420675E-09
+    -1.183977888860E-10 3.463889402085E-14-5.000000000000E+00 1.000000000000E+00
+    -4.000000000000E+00 1.000000000000E+00 6.519258022308E-09 7.000000000000E+00
+    -8.440110832453E-10-4.190951585770E-09 5.820766091347E-09 5.878973752260E-09
+     3.602520000000E+05 2.369000000000E+03
+> EPH G01 LNAV
+G01 2025 06 15 02 00 00 2.915360964835E-04 1.034550223267E-11 0.000000000000E+00
+     5.000000000000E+01 9.159375000000E+01 4.410898017322E-09 2.172069051852E+00
+     4.749745130539E-06 5.672341212630E-04 4.006549715996E-06 5.153723411560E+03
+     7.200000000000E+03-3.725290298462E-09 1.493825366040E+00 9.313225746155E-09
+     9.592069088751E-01 2.984687500000E+02 2.336450295333E-01-8.210341993700E-09
+     2.364384200378E-10 1.000000000000E+00 2.371000000000E+03 0.000000000000E+00
+     2.000000000000E+00 0.000000000000E+00-8.847564458847E-09 3.060000000000E+02
+     1.800000000000E+01 4.000000000000E+00
+";
+
+    #[test]
+    fn skips_cnav_records_via_marker() {
+        let ephs = parse_rinex_nav(FIXTURE_CNAV);
+        // The 10-line CNAV record is skipped; only the LNAV G01 is parsed.
+        assert_eq!(ephs.len(), 1, "CNAV must be skipped, not mis-parsed");
+        assert_eq!(ephs[0].sv.prn, 1);
+        assert_eq!(ephs[0].iode, 50); // a real integer IODE, not a CNAV ADOT → 0
+        assert!(ephs[0].is_valid());
+    }
 
     #[test]
     fn parses_gps_and_galileo_records() {
@@ -606,7 +656,7 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         let p = dir.join("gnss_assist_fixture.rnx");
         std::fs::write(&p, FIXTURE).unwrap();
         let by_sv = load_assist_ephemerides(p.to_str().unwrap(), Some("2025-06-15"), &dir).unwrap();
-        // FIXTURE carries G01 (GPS) and E04 (Galileo), one record each.
+        // FIXTURE carries G01 (GPS) and E04 (Galileo), one issue each.
         assert_eq!(by_sv.len(), 2);
         assert!(
             by_sv
@@ -618,7 +668,10 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
                 .keys()
                 .any(|sv| sv.constellation == Constellation::Galileo)
         );
-        assert!(by_sv.values().all(|e| e.is_valid()));
+        assert!(by_sv.values().all(|v| v.iter().all(|e| e.is_valid())));
+        // nearest_eph picks an issue from the set.
+        let any = by_sv.values().next().unwrap();
+        assert!(nearest_eph(any, any[0].toe_gpst).is_some());
         std::fs::remove_file(&p).ok();
     }
 

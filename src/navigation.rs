@@ -19,6 +19,7 @@ use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris
 use crate::gps_lnav::LnavState;
 use crate::models::compute_sv_position_ecef;
 use crate::osnma::OsnmaPage;
+use crate::rinex_nav::nearest_eph;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
@@ -55,6 +56,11 @@ pub struct Navigation {
     /// on-air ephemeris (~30 s LNAV, ~120 s F/NAV). Kept here as the baseline for
     /// the injected-vs-decoded orbit cross-check. `None` without `--eph`.
     pub(crate) assist_eph: Option<Ephemeris>,
+    /// All injected brdc issues for this SV (sorted by `toe`). The initial
+    /// `assist_eph` is a coarse pick; once the channel decodes its first TOW it
+    /// re-selects the issue nearest that GPST time — so the injected orbit is the
+    /// right one without needing the recording's time-of-day. Empty without `--eph`.
+    pub(crate) assist_set: Vec<Ephemeris>,
     /// True once the injected orbit has been cross-checked against the fully
     /// signal-decoded one (fires once, when the on-air ephemeris completes).
     pub(crate) assist_crosschecked: bool,
@@ -74,6 +80,7 @@ impl Navigation {
             osnma_pages: Vec::new(),
             tow_pair: None,
             assist_eph: None,
+            assist_set: Vec::new(),
             assist_crosschecked: false,
         }
     }
@@ -365,6 +372,12 @@ impl Channel {
     /// ION LimeSDR capture). Both constants are verified directly against
     /// synthetic ground truth by `tx_anchor_latency_measured_against_synthetic_truth`.
     pub(crate) fn nav_anchor_tx(&mut self, decode_latency_sec: f64) {
+        // First TOW: now that the exact GPST time is known, swap the coarsely
+        // injected assist orbit for the brdc issue nearest it (no recording
+        // time-of-day needed). Once anchored the issue is settled, so do it once.
+        if !self.nav.meas.tx_anchored {
+            self.refine_assist_eph();
+        }
         self.nav.eph.ts_sec = self.ts_sec;
         // Remember this TOW edge's (epoch, phase) pair; the anchor can then pin
         // from it at any later moment of the same continuous track.
@@ -375,6 +388,34 @@ impl Channel {
         self.try_anchor_tx();
         self.assist_crosscheck();
         self.update_gpst_time(self.nav.eph.tow_gpst);
+    }
+
+    /// Re-select the injected orbit to the brdc issue nearest the just-decoded
+    /// TOW. The initial injection (at channel creation) is a coarse pick from the
+    /// day's set; the signal's own time is the exact reference, so this lands on
+    /// the issue the SV is actually broadcasting — no recording time-of-day
+    /// needed. Keeps the decoded TOW fields; resets decode progress so the
+    /// cross-check re-confirms against the freshly adopted issue.
+    fn refine_assist_eph(&mut self) {
+        if self.nav.assist_set.len() < 2 {
+            return; // a single issue (or none) — nothing to choose between
+        }
+        let Some(best) = nearest_eph(&self.nav.assist_set, self.nav.eph.tow_gpst) else {
+            return;
+        };
+        if self.nav.assist_eph.map(|a| a.toe) == Some(best.toe) {
+            return; // already on the nearest issue
+        }
+        let (tow, tow_gpst) = (self.nav.eph.tow, self.nav.eph.tow_gpst);
+        self.nav.eph = best; // complete brdc issue (eph_mask resets to 0)
+        self.nav.eph.tow = tow;
+        self.nav.eph.tow_gpst = tow_gpst;
+        self.nav.assist_eph = Some(best);
+        log::warn!(
+            "{}: A-GNSS injected orbit refined to toe {} (nearest the decoded TOW)",
+            self.sv,
+            best.toe
+        );
     }
 
     /// Assisted-GNSS correctness validator: once the on-air ephemeris has fully

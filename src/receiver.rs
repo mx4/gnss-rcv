@@ -160,9 +160,14 @@ fn inject_assist_ephemerides(
     };
     let mut n = 0;
     for (sv, ch) in channels.iter_mut() {
-        if let Some(e) = by_sv.get(sv) {
-            ch.nav.eph = *e; // orbit/clock/week → is_valid() now true (eph_mask still 0)
-            ch.nav.assist_eph = Some(*e);
+        if let Some(issues) = by_sv.get(sv) {
+            // A coarse initial pick (mid-day issue) just so is_valid()/week hold
+            // from t=0; refine_assist_eph swaps to the right issue on the first
+            // decoded TOW. Keep the full set on the channel for that.
+            let initial = issues[issues.len() / 2];
+            ch.nav.eph = initial; // orbit/clock/week → is_valid() true (eph_mask still 0)
+            ch.nav.assist_eph = Some(initial);
+            ch.nav.assist_set = issues.clone();
             n += 1;
         }
     }
