@@ -108,6 +108,15 @@ RECORDINGS: List[Rec] = [
         "L1_20211226_082212_12MHz_I.bin", 364904448, "zip",
         "-t i8 --fs 12000000 --fi 3000000 --qzss",
         "PocketSDR Tokyo L1, ~30s; tracks GPS + QZSS J194/195/199", ("gps", "qzss", "galileo")),
+    Rec("pocketsdr-l6",
+        "http://gpspp.sakura.ne.jp/pocketsdr/L1L6_20211226_082212_12MHz.zip",
+        "L6_20211226_082212_12MHz_IQ.bin", 729808896, "zip",
+        "-t 2xi8 --fs 12000000 --fi 0",
+        "PocketSDR Tokyo L6/E6 band (F_LO 1278.75 MHz zero-IF, IQ 2-bit int8, 12 MHz, ~30s) -- "
+        "the CH2 of the same L1L6 capture (2021-12-26) as 'pocketsdr'. Carries Galileo E6 (the "
+        "High Accuracy Service, HAS, on E6-B) + QZSS L6 (LEX/CLAS). Asset for future E6 work -- "
+        "needs E6-B/C BPSK(5) codes + a HAS Reed-Solomon decoder, so NOT yet acquirable. F_LO "
+        "from pocket_L1L6_12MHz.conf CH2 (NDIV/RDIV).", ("galileo", "qzss")),
     Rec("zenodo-sigmf",
         "https://zenodo.org/records/6394603/files/GPS-L1-2022-03-27.sigmf-data?download=1",
         "GPS-L1-2022-03-27.sigmf-data", 240000000, "raw",
