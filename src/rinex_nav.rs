@@ -391,37 +391,19 @@ pub fn parse_ref_epoch(s: &str) -> Option<Epoch> {
 }
 
 /// Year + day-of-year (1-based) for `e`, the address of the GSSC daily brdc.
-fn year_doy(e: Epoch) -> (u32, u32) {
+/// Public so the deferred path can derive the day straight from a channel's
+/// decoded transmit epoch (no `--eph-date` needed).
+pub fn year_doy(e: Epoch) -> (u32, u32) {
     let (y, ..) = e.to_gregorian_utc();
     let jan1 = Epoch::from_gregorian(y, 1, 1, 0, 0, 0, 0, TimeScale::GPST);
     let doy = ((e - jan1).to_seconds() / 86_400.0).floor() as u32 + 1;
     (y as u32, doy)
 }
 
-/// Resolve, parse, and select the broadcast ephemeris to inject for Assisted-GNSS.
-/// `eph` is a RINEX-3 nav file path, or `"auto"` to download the day's brdc from
-/// ESA GSSC (caching in `cache_dir`; needs `date`). `date` (optional) is the
-/// reference epoch used to pick, per SV, the record whose `toe` is nearest — and,
-/// for `"auto"`, the day to fetch. Without `date`, the file's median `toe` is the
-/// reference. Returns SV → chosen ephemeris.
-pub fn load_assist_ephemerides(
-    eph: &str,
-    date: Option<&str>,
-    cache_dir: &Path,
-) -> std::io::Result<HashMap<SV, Vec<Ephemeris>>> {
-    let path = if eph == "auto" {
-        // `date` here is only the *day* to fetch — the per-SV issue is picked
-        // later against each channel's decoded TOW, so no time-of-day is needed.
-        let r = date.and_then(parse_ref_epoch).ok_or_else(|| {
-            std::io::Error::other("--eph auto needs --eph-date YYYY-MM-DD[Thh:mm:ss]")
-        })?;
-        let (y, doy) = year_doy(r);
-        ensure_brdc(cache_dir, y, doy)?
-    } else {
-        PathBuf::from(eph)
-    };
+/// Parse a RINEX nav file into SV → all valid issues (sorted by `toe`).
+fn group_by_sv(path: &Path) -> std::io::Result<HashMap<SV, Vec<Ephemeris>>> {
     let mut by_sv: HashMap<SV, Vec<Ephemeris>> = HashMap::new();
-    for e in parse_rinex_nav(&std::fs::read_to_string(&path)?) {
+    for e in parse_rinex_nav(&std::fs::read_to_string(path)?) {
         if e.is_valid() {
             by_sv.entry(e.sv).or_default().push(e);
         }
@@ -436,6 +418,38 @@ pub fn load_assist_ephemerides(
         )));
     }
     Ok(by_sv)
+}
+
+/// Ensure + parse the brdc for `year`/`doy` (day-of-year) into SV → issues. The
+/// deferred A-GNSS path: the day comes from a channel's decoded TOW+week, so no
+/// `--eph-date` is needed.
+pub fn load_assist_for_day(
+    cache_dir: &Path,
+    year: u32,
+    doy: u32,
+) -> std::io::Result<HashMap<SV, Vec<Ephemeris>>> {
+    group_by_sv(&ensure_brdc(cache_dir, year, doy)?)
+}
+
+/// Resolve, parse, and group the broadcast ephemerides to inject for Assisted-GNSS.
+/// `eph` is a RINEX nav file path, or `"auto"` to download the day's brdc from ESA
+/// GSSC (caching in `cache_dir`; `"auto"` then needs `date` for the day). Returns
+/// SV → all valid issues; the channel picks the one nearest its decoded TOW.
+pub fn load_assist_ephemerides(
+    eph: &str,
+    date: Option<&str>,
+    cache_dir: &Path,
+) -> std::io::Result<HashMap<SV, Vec<Ephemeris>>> {
+    let path = if eph == "auto" {
+        let r = date.and_then(parse_ref_epoch).ok_or_else(|| {
+            std::io::Error::other("--eph auto needs --eph-date YYYY-MM-DD[Thh:mm:ss]")
+        })?;
+        let (y, doy) = year_doy(r);
+        ensure_brdc(cache_dir, y, doy)?
+    } else {
+        PathBuf::from(eph)
+    };
+    group_by_sv(&path)
 }
 
 /// The ephemeris in `set` whose `toe` is nearest `t` — used to pick (and later

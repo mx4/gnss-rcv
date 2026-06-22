@@ -234,6 +234,12 @@ pub struct Receiver {
     osnma_enabled: bool,
     osnma: Option<OsnmaVerifier>,
     osnma_authenticated: HashSet<u8>,
+    /// Deferred Assisted-GNSS (`--eph auto` with no `--eph-date`, and the UI
+    /// default): inject only once a channel decodes the absolute time (week+TOW),
+    /// then fetch the brdc for *that* day — no date input needed. `Some(cache_dir)`
+    /// while pending; cleared to `None` once injected (or on a failed/again-skipped
+    /// fetch). `None` for the immediate `--eph` path and when A-GNSS is off.
+    agnss_deferred: Option<PathBuf>,
 }
 
 /// Run-level work/perf counters, printed as a summary at end of `run_loop`.
@@ -609,18 +615,32 @@ impl Receiver {
             }
         }
 
+        // A-GNSS: `--eph auto` with no `--eph-date` (and the UI default) defers —
+        // inject once the signal reveals the day; an explicit date or a file path
+        // injects now (at t=0, for the earliest possible fix).
+        let mut agnss_deferred = None;
         if let Some(eph) = cfg.eph.as_deref() {
-            inject_assist_ephemerides(
-                &mut channels,
-                eph,
-                cfg.eph_date.as_deref(),
-                &cfg.file,
-                &state,
-            );
+            let cache_dir = cfg
+                .file
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            if eph == "auto" && cfg.eph_date.is_none() {
+                agnss_deferred = Some(cache_dir);
+            } else {
+                inject_assist_ephemerides(
+                    &mut channels,
+                    eph,
+                    cfg.eph_date.as_deref(),
+                    &cfg.file,
+                    &state,
+                );
+            }
         }
 
         Self {
             iq_feed,
+            agnss_deferred,
             code_period_sec,
             // The post-decimation rate the receiver actually runs at (off_samples
             // counts decimated samples), so off_samples/fs is the true data time.
@@ -896,6 +916,66 @@ impl Receiver {
         st.run_elapsed_sec = data_sec;
     }
 
+    /// Deferred A-GNSS: once a channel has decoded the absolute time (week set),
+    /// derive the day from its transmit epoch, fetch *that* day's brdc, and inject
+    /// the orbits into the not-yet-anchored channels (which then refine on their
+    /// next TOW). Runs at most once; a failed fetch (offline / no file for the day)
+    /// gives up and the receiver falls back to normal on-air decoding.
+    fn try_deferred_agnss(&mut self) {
+        let Some(cache_dir) = self.agnss_deferred.clone() else {
+            return;
+        };
+        // Wait for a channel that knows the absolute time (decoded the week).
+        let Some(epoch) = self
+            .channels
+            .values()
+            .find(|c| c.nav.eph.week != 0)
+            .map(|c| c.nav.eph.tow_gpst)
+        else {
+            return;
+        };
+        let (year, doy) = crate::rinex_nav::year_doy(epoch);
+        let by_sv = match crate::rinex_nav::load_assist_for_day(&cache_dir, year, doy) {
+            Ok(m) => m,
+            Err(e) => {
+                log::error!("A-GNSS (deferred): {e}; continuing with on-air decode");
+                self.agnss_deferred = None; // give up — don't refetch every step
+                return;
+            }
+        };
+        let mut injected = Vec::new();
+        for (sv, ch) in self.channels.iter_mut() {
+            if ch.nav.meas.tx_anchored {
+                continue; // already usable — leave it
+            }
+            if let Some(issues) = by_sv.get(sv) {
+                let initial = issues[issues.len() / 2];
+                ch.nav.eph = initial;
+                ch.nav.assist_eph = Some(initial);
+                ch.nav.assist_set = issues.clone();
+                injected.push(*sv);
+            }
+        }
+        {
+            let mut st = self.pub_state.lock().unwrap();
+            st.agnss = Some(crate::state::AgnssStatus {
+                source: format!("{year}/{doy:03} (auto)"),
+                injected: injected.len(),
+                max_delta_m: None,
+            });
+            for sv in &injected {
+                if let Some(cs) = st.channels.get_mut(sv) {
+                    cs.assist = true;
+                }
+            }
+        }
+        log::warn!(
+            "A-GNSS (deferred): day {year}/{doy:03} from the signal; injected {} orbits",
+            injected.len()
+        );
+        self.agnss_deferred = None; // done
+    }
+
     pub fn run_loop(&mut self, num_msec: usize) {
         let mut n = 0;
         loop {
@@ -920,6 +1000,9 @@ impl Receiver {
             }
             if !stepped {
                 continue;
+            }
+            if self.agnss_deferred.is_some() {
+                self.try_deferred_agnss();
             }
             n += 1;
             if n % 32 == 0 {

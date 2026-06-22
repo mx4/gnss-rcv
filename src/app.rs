@@ -327,6 +327,10 @@ impl GnssRcvApp {
             diagnostics: true,
             sbas: self.sbas,
             qzss: self.qzss,
+            // A-GNSS on by default in the UI: deferred auto (no date) — the day is
+            // derived from the signal once the week decodes, then the brdc is
+            // fetched and injected. Falls back to plain decode if offline.
+            eph: Some("auto".to_string()),
             ..Default::default()
         };
 
