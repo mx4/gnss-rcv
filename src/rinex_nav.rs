@@ -53,57 +53,84 @@ fn mn_url(station: &str, year: u32, doy: u32) -> String {
     )
 }
 
-/// Download + decompress one station's brdc into `dir`; `Ok(path)` on success.
-fn fetch_one(dir: &Path, station: &str, year: u32, doy: u32) -> std::io::Result<PathBuf> {
-    let local = dir.join(mn_name(station, year, doy));
-    let gz = dir.join(format!("{}.gz", mn_name(station, year, doy)));
-    let downloaded = Command::new("curl")
-        .args(["-sS", "--fail", "--connect-timeout", "10", "-m", "60", "-o"])
-        .arg(&gz)
-        .arg(mn_url(station, year, doy))
+/// RINEX-2 combined GPS broadcast-nav filename (the IGS `brdc….n`, archived on
+/// GSSC back to the 1990s — pre-dates RINEX-3 mixed-nav). GPS-only.
+fn brdc2_name(year: u32, doy: u32) -> String {
+    format!("brdc{doy:03}0.{:02}n", year % 100)
+}
+
+/// Download `url` to `path` with curl (FTP, no auth); true on success.
+fn curl_to(path: &Path, url: &str) -> bool {
+    Command::new("curl")
+        .args(["-sS", "--fail", "--connect-timeout", "8", "-m", "30", "-o"])
+        .arg(path)
+        .arg(url)
         .status()
         .map(|s| s.success())
-        .unwrap_or(false);
-    if !downloaded {
-        let _ = std::fs::remove_file(&gz);
+        .unwrap_or(false)
+}
+
+/// `curl` `url` then `gunzip` (handles both `.gz` and `.Z`) into `local`.
+fn fetch_compressed(local: &Path, archive: &Path, url: &str) -> std::io::Result<PathBuf> {
+    if !curl_to(archive, url) {
+        let _ = std::fs::remove_file(archive);
         return Err(std::io::Error::other("download failed"));
     }
     let unzipped = Command::new("gunzip")
         .arg("-f")
-        .arg(&gz)
+        .arg(archive)
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
     if !unzipped || !local.exists() {
         return Err(std::io::Error::other("gunzip failed"));
     }
-    Ok(local)
+    Ok(local.to_path_buf())
 }
 
-/// Trivial read-only ephemeris cache: if any candidate station's `brdc` for the
-/// day is already in `dir`, use it; otherwise download the first one GSSC has
-/// (no single station is present every day) and decompress. Returns the local
-/// RINEX path. Shells out to `curl` + `gunzip` — the same tools `fetch.py` /
-/// `gen_gpssim.py` use — so no runtime crate dependency; the cached file is
-/// never modified (read-only).
+/// Trivial read-only ephemeris cache: if a `brdc` for the day is already in
+/// `dir`, use it; otherwise download one from ESA GSSC (no auth) and decompress.
+/// Tries RINEX-3 mixed-nav (GPS+Galileo) across a list of stations first, then
+/// falls back to the older RINEX-2 combined GPS brdc (GPS-only) for dates the
+/// RINEX-3 archive doesn't reach. Returns the local RINEX path. Shells out to
+/// `curl` + `gunzip` — the tools `fetch.py` / `gen_gpssim.py` use — so no runtime
+/// crate dependency; the cached file is never modified (read-only).
 pub fn ensure_brdc(dir: &Path, year: u32, doy: u32) -> std::io::Result<PathBuf> {
+    // Cache hit: any candidate RINEX-3 station file, or the RINEX-2 brdc.
     for station in BRDC_STATIONS {
         let local = dir.join(mn_name(station, year, doy));
         if local.exists() {
-            return Ok(local); // cache hit — use it
+            return Ok(local);
         }
     }
+    let r2 = dir.join(brdc2_name(year, doy));
+    if r2.exists() {
+        return Ok(r2);
+    }
+    // Download: RINEX-3 mixed-nav (GPS+Galileo) first…
     for station in BRDC_STATIONS {
         log::warn!(
             "A-GNSS: ephemeris not cached, trying {}",
             mn_url(station, year, doy)
         );
-        if let Ok(p) = fetch_one(dir, station, year, doy) {
+        let local = dir.join(mn_name(station, year, doy));
+        let gz = dir.join(format!("{}.gz", mn_name(station, year, doy)));
+        if let Ok(p) = fetch_compressed(&local, &gz, &mn_url(station, year, doy)) {
             return Ok(p);
         }
     }
+    // …else the older RINEX-2 combined GPS brdc (GPS-only).
+    let url2 = format!(
+        "ftp://gssc.esa.int/gnss/data/daily/{year}/{doy:03}/{}.Z",
+        brdc2_name(year, doy)
+    );
+    log::warn!("A-GNSS: no RINEX-3 mixed-nav for {year}/{doy:03}; trying RINEX-2 GPS brdc {url2}");
+    let z = dir.join(format!("{}.Z", brdc2_name(year, doy)));
+    if let Ok(p) = fetch_compressed(&r2, &z, &url2) {
+        return Ok(p);
+    }
     Err(std::io::Error::other(
-        "brdc download failed for all stations (offline, or no file for that day yet)",
+        "brdc download failed (offline, or no file for that day yet)",
     ))
 }
 
@@ -123,52 +150,24 @@ fn fields(line: &str, start: usize) -> Vec<f64> {
     out
 }
 
-/// Parse one 8-line GPS/Galileo nav record into an [`Ephemeris`], or `None` if
-/// it isn't a GPS/Galileo record or is malformed.
-fn parse_record(lines: &[&str]) -> Option<Ephemeris> {
-    let sv0 = lines[0];
-    let cons = match sv0.as_bytes().first()? {
-        b'G' => Constellation::GPS,
-        b'E' => Constellation::Galileo,
-        _ => return None,
-    };
-    let prn: u8 = sv0.get(1..3)?.trim().parse().ok()?;
-    let ts = if cons == Constellation::Galileo {
-        TimeScale::GST
-    } else {
-        TimeScale::GPST
-    };
-
-    // SV line: "G01 YYYY MM DD HH MM SS af0 af1 af2" (the epoch is the toc).
-    let cal: Vec<i64> = sv0
-        .get(3..23)?
-        .split_whitespace()
-        .filter_map(|x| x.parse().ok())
-        .collect();
-    if cal.len() < 6 {
-        return None;
-    }
-    let toc_gpst = Epoch::from_gregorian(
-        cal[0] as i32,
-        cal[1] as u8,
-        cal[2] as u8,
-        cal[3] as u8,
-        cal[4] as u8,
-        cal[5] as u8,
-        0,
-        ts,
-    );
-    let clk = fields(sv0, 23); // af0, af1, af2
-    // Broadcast-orbit lines 1-7 (4-char indent), each a row of physical values.
-    let o: Vec<Vec<f64>> = (1..8).map(|k| fields(lines[k], 4)).collect();
+/// Map a broadcast-orbit field table — the clock triple plus orbit lines 1-7,
+/// whose layout is identical across RINEX-2/3 and GPS/Galileo — into an
+/// [`Ephemeris`]. `toc_gpst` is the record's clock-reference epoch, `ts` its
+/// time scale. Shared by the RINEX-3 and RINEX-2 record parsers.
+fn eph_from_fields(
+    sv: SV,
+    ts: TimeScale,
+    toc_gpst: Epoch,
+    clk: &[f64],
+    o: &[Vec<f64>],
+) -> Option<Ephemeris> {
     let g = |row: usize, col: usize| -> Option<f64> { o.get(row)?.get(col).copied() };
-
     // The toc's week + seconds-of-week (in this SV's time scale); toe shares it.
     let (week, _) = toc_gpst.to_time_of_week();
     let toe_sow = g(2, 0)?;
     let toe_gpst = Epoch::from_time_of_week(week, (toe_sow * 1e9).round() as u64, ts);
 
-    let mut e = Ephemeris::new(SV::new(cons, prn));
+    let mut e = Ephemeris::new(sv);
     e.f0 = *clk.first()?;
     e.f1 = clk.get(1).copied().unwrap_or(0.0);
     e.f2 = clk.get(2).copied().unwrap_or(0.0);
@@ -202,9 +201,104 @@ fn parse_record(lines: &[&str]) -> Option<Ephemeris> {
     Some(e)
 }
 
-/// Parse a whole RINEX-3 nav file's text into per-SV broadcast ephemerides
-/// (GPS + Galileo; others skipped). One [`Ephemeris`] per record.
+/// Parse one 8-line RINEX-3 GPS/Galileo nav record, or `None` if it isn't a
+/// GPS/Galileo record or is malformed.
+fn parse_record(lines: &[&str]) -> Option<Ephemeris> {
+    let sv0 = lines[0];
+    let cons = match sv0.as_bytes().first()? {
+        b'G' => Constellation::GPS,
+        b'E' => Constellation::Galileo,
+        _ => return None,
+    };
+    let prn: u8 = sv0.get(1..3)?.trim().parse().ok()?;
+    let ts = if cons == Constellation::Galileo {
+        TimeScale::GST
+    } else {
+        TimeScale::GPST
+    };
+    // SV line: "G01 YYYY MM DD HH MM SS af0 af1 af2" (the epoch is the toc).
+    let cal: Vec<i64> = sv0
+        .get(3..23)?
+        .split_whitespace()
+        .filter_map(|x| x.parse().ok())
+        .collect();
+    if cal.len() < 6 {
+        return None;
+    }
+    let toc_gpst = Epoch::from_gregorian(
+        cal[0] as i32,
+        cal[1] as u8,
+        cal[2] as u8,
+        cal[3] as u8,
+        cal[4] as u8,
+        cal[5] as u8,
+        0,
+        ts,
+    );
+    let clk = fields(sv0, 23); // af0, af1, af2
+    // Broadcast-orbit lines 1-7 at the RINEX-3 4-char indent.
+    let o: Vec<Vec<f64>> = (1..8).map(|k| fields(lines[k], 4)).collect();
+    eph_from_fields(SV::new(cons, prn), ts, toc_gpst, &clk, &o)
+}
+
+/// Parse one 8-line RINEX-2 GPS nav record: no system letter (PRN in cols 1-2),
+/// 2-digit year (pivot at 80), and a 3-char orbit indent vs RINEX-3's 4. The
+/// older `.n` files are GPS-only.
+fn parse_rinex2_record(lines: &[&str]) -> Option<Ephemeris> {
+    let sv0 = lines[0];
+    let prn: u8 = sv0.get(0..2)?.trim().parse().ok()?;
+    // Epoch "YY MM DD HH MM SS.S"; take the integer part of each field.
+    let t: Vec<i64> = sv0
+        .get(2..22)?
+        .split_whitespace()
+        .filter_map(|x| x.split('.').next()?.parse().ok())
+        .collect();
+    if t.len() < 6 {
+        return None;
+    }
+    let year = if t[0] >= 80 { 1900 + t[0] } else { 2000 + t[0] };
+    let toc_gpst = Epoch::from_gregorian(
+        year as i32,
+        t[1] as u8,
+        t[2] as u8,
+        t[3] as u8,
+        t[4] as u8,
+        t[5] as u8,
+        0,
+        TimeScale::GPST,
+    );
+    let clk = fields(sv0, 22); // af0, af1, af2
+    // Broadcast-orbit lines 1-7 at the RINEX-2 3-char indent.
+    let o: Vec<Vec<f64>> = (1..8).map(|k| fields(lines[k], 3)).collect();
+    eph_from_fields(
+        SV::new(Constellation::GPS, prn),
+        TimeScale::GPST,
+        toc_gpst,
+        &clk,
+        &o,
+    )
+}
+
+/// Parse a RINEX nav file into per-SV broadcast ephemerides, auto-detecting the
+/// version from the header: RINEX-3 carries GPS + Galileo (others skipped); the
+/// older RINEX-2 `.n` is GPS-only. One [`Ephemeris`] per record.
 pub fn parse_rinex_nav(text: &str) -> Vec<Ephemeris> {
+    let version: f64 = text
+        .lines()
+        .next()
+        .and_then(|l| l.get(0..9))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(3.0);
+    if version < 3.0 {
+        parse_rinex2_nav(text)
+    } else {
+        parse_rinex3_nav(text)
+    }
+}
+
+/// Walk a RINEX-3 nav file: each record begins with a 1-letter system + 2-digit
+/// PRN (G01, E04, …); `> EPH …` markers and anything else are skipped.
+fn parse_rinex3_nav(text: &str) -> Vec<Ephemeris> {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines
         .iter()
@@ -213,8 +307,6 @@ pub fn parse_rinex_nav(text: &str) -> Vec<Ephemeris> {
     let mut out = Vec::new();
     let mut i = start;
     while i + 8 <= lines.len() {
-        // A record begins with a 1-letter system + 2-digit PRN (G01, E04, …);
-        // skip `> EPH …` markers and anything else.
         let l = lines[i].as_bytes();
         let is_rec = l.len() >= 3
             && matches!(l[0], b'G' | b'E' | b'R' | b'C' | b'J')
@@ -225,6 +317,32 @@ pub fn parse_rinex_nav(text: &str) -> Vec<Ephemeris> {
             continue;
         }
         if let Some(e) = parse_record(&lines[i..i + 8]) {
+            out.push(e);
+        }
+        i += 8;
+    }
+    out
+}
+
+/// Walk a RINEX-2 GPS nav file: each record line begins with a (space-padded)
+/// PRN in cols 1-2.
+fn parse_rinex2_nav(text: &str) -> Vec<Ephemeris> {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.contains("END OF HEADER"))
+        .map_or(0, |i| i + 1);
+    let mut out = Vec::new();
+    let mut i = start;
+    while i + 8 <= lines.len() {
+        let is_rec = lines[i]
+            .get(0..2)
+            .is_some_and(|s| s.trim().parse::<u8>().is_ok());
+        if !is_rec {
+            i += 1;
+            continue;
+        }
+        if let Some(e) = parse_rinex2_record(&lines[i..i + 8]) {
             out.push(e);
         }
         i += 8;
@@ -377,6 +495,42 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         assert_eq!((y, mo, d), (2025, 6, 15));
     }
 
+    // A real RINEX-2 GPS record from GSSC's brdc0940.13n (2013 DOY 094), PRN 1.
+    // Note the format vs RINEX-3: no system letter, 2-digit year, 3-char indent.
+    const FIXTURE_R2: &str = "\
+     2              NAVIGATION DATA                         RINEX VERSION / TYPE
+                                                            END OF HEADER
+ 1 13  4  4  0  0  0.0 0.130245462060D-04 0.329691829393D-11 0.000000000000D+00
+    0.660000000000D+02 0.110312500000D+02 0.445589989183D-08-0.129411133012D+01
+    0.603497028351D-06 0.170189398341D-02 0.977143645287D-05 0.515370147133D+04
+    0.345600000000D+06-0.931322574616D-08-0.462984461481D+00-0.931322574615D-07
+    0.960438103656D+00 0.193500000000D+03 0.315473100675D+00-0.795818863336D-08
+    0.174292974288D-09 0.100000000000D+01 0.173400000000D+04 0.000000000000D+00
+    0.200000000000D+01 0.000000000000D+00 0.838190317154D-08 0.660000000000D+02
+    0.338418000000D+06 0.400000000000D+01 0.000000000000D+00 0.000000000000D+00";
+
+    #[test]
+    fn parses_rinex2_gps_record() {
+        let ephs = parse_rinex_nav(FIXTURE_R2); // version auto-detected as 2
+        assert_eq!(ephs.len(), 1);
+        let g = &ephs[0];
+        assert_eq!(g.sv.constellation, Constellation::GPS);
+        assert_eq!(g.sv.prn, 1);
+        assert!(g.is_valid());
+        assert_eq!(g.week, 1734);
+        assert_eq!(g.toe, 345_600);
+        assert_eq!(g.iode, 66);
+        assert!((g.a - 5153.70147133_f64.powi(2)).abs() < 1.0, "a = {}", g.a);
+        assert!((g.ecc - 0.001_701_893_983_41).abs() < 1e-12);
+        assert!((g.i0 - 0.960_438_103_656).abs() < 1e-12);
+        assert!((g.tgd - 0.838_190_317_154e-8).abs() < 1e-18);
+        // 2-digit "13" → 2013; epoch is GPST (00:00 GPST is 2013-04-03 in UTC).
+        assert_eq!(
+            g.toc_gpst,
+            Epoch::from_gregorian(2013, 4, 4, 0, 0, 0, 0, TimeScale::GPST)
+        );
+    }
+
     #[test]
     fn brdc_filename_and_url() {
         assert_eq!(
@@ -511,6 +665,34 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         );
         // Second call is a cache hit (same path, no re-download).
         assert_eq!(ensure_brdc(&dir, 2025, 166).unwrap(), path);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The RINEX-2 fallback end-to-end: 2013 predates GSSC's RINEX-3 mixed-nav, so
+    // ensure_brdc must fall through to the combined GPS brdc….n.Z (the cttc case).
+    #[test]
+    #[ignore = "network: downloads a real RINEX-2 brdc from ESA GSSC"]
+    fn downloads_and_parses_rinex2_brdc_2013() {
+        let dir = std::env::temp_dir().join("gnss_agnss_r2");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = match ensure_brdc(&dir, 2013, 94) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                return;
+            }
+        };
+        assert!(path.to_string_lossy().ends_with(".13n")); // RINEX-2 GPS brdc
+        let ephs = parse_rinex_nav(&std::fs::read_to_string(&path).unwrap());
+        let gps = ephs
+            .iter()
+            .filter(|e| e.sv.constellation == Constellation::GPS && e.is_valid())
+            .count();
+        eprintln!(
+            "RINEX-2 2013/094: {gps} valid GPS eph from {}",
+            path.display()
+        );
+        assert!(gps > 20, "expected many GPS ephemerides, got {gps}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
