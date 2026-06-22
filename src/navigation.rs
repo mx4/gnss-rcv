@@ -17,6 +17,7 @@ use crate::galileo_fnav::{
 };
 use crate::galileo_inav::{INAV_DECODE_LATENCY_SEC, InavDecoder, decode_ephemeris_word};
 use crate::gps_lnav::LnavState;
+use crate::models::compute_sv_position_ecef;
 use crate::osnma::OsnmaPage;
 use crate::sbas_l1::SbasL1Channel;
 use gnss_rs::constellation::Constellation;
@@ -48,6 +49,15 @@ pub struct Navigation {
     /// *retroactively* the moment the ephemeris completes instead of waiting
     /// for the next TOW message (up to a 30 s word-5 cycle on Galileo).
     pub(crate) tow_pair: Option<(Epoch, f64)>,
+    /// Assisted-GNSS (Tier-1): the downloaded broadcast orbit injected for this
+    /// SV. Copied into `eph` at channel creation so the channel can anchor the
+    /// transmit time on the *first* decoded TOW instead of waiting out the full
+    /// on-air ephemeris (~30 s LNAV, ~120 s F/NAV). Kept here as the baseline for
+    /// the injected-vs-decoded orbit cross-check. `None` without `--eph`.
+    pub(crate) assist_eph: Option<Ephemeris>,
+    /// True once the injected orbit has been cross-checked against the fully
+    /// signal-decoded one (fires once, when the on-air ephemeris completes).
+    pub(crate) assist_crosschecked: bool,
 }
 
 impl Navigation {
@@ -63,6 +73,8 @@ impl Navigation {
             osnma_anchor: None,
             osnma_pages: Vec::new(),
             tow_pair: None,
+            assist_eph: None,
+            assist_crosschecked: false,
         }
     }
 
@@ -361,7 +373,47 @@ impl Channel {
             self.nav.meas.trk_phase,
         ));
         self.try_anchor_tx();
+        self.assist_crosscheck();
         self.update_gpst_time(self.nav.eph.tow_gpst);
+    }
+
+    /// Assisted-GNSS correctness validator: once the on-air ephemeris has fully
+    /// decoded (every message part), compare the signal-decoded orbit against the
+    /// injected (downloaded) one at the decoded `toe` and log the 3-D difference.
+    /// Same broadcast issue (IODE/toe) ⇒ they agree within quantisation; a stale
+    /// injected `toe` shows up as the larger, bounded extrapolation gap. A free
+    /// check that the right brdc was downloaded/parsed/injected. Fires once.
+    fn assist_crosscheck(&mut self) {
+        if self.nav.assist_crosschecked {
+            return;
+        }
+        let Some(assist) = self.nav.assist_eph else {
+            return;
+        };
+        // Per-signal "all ephemeris parts decoded" mask (eph_mask bit n = message
+        // part n): GPS LNAV SF1-3, Galileo I/NAV words 1-5, F/NAV pages 1-4.
+        let complete: u8 = match self.sig {
+            Signal::GalileoE1b | Signal::GalileoE1c => 0b0011_1110,
+            Signal::GalileoE5aI | Signal::GalileoE5aQ => 0b0001_1110,
+            _ => 0b0000_1110, // GPS / QZSS LNAV
+        };
+        if self.nav.eph.eph_mask & complete != complete {
+            return; // on-air ephemeris not fully decoded yet
+        }
+        let t = self.nav.eph.toe_gpst;
+        let (dx, dy, dz) = compute_sv_position_ecef(&self.nav.eph, t);
+        let (ax, ay, az) = compute_sv_position_ecef(&assist, t);
+        let d = ((dx - ax).powi(2) + (dy - ay).powi(2) + (dz - az).powi(2)).sqrt();
+        log::warn!(
+            "{}: A-GNSS orbit cross-check: injected vs decoded |Δ|={:.1} m (toe {} vs {}, iode {} vs {})",
+            self.sv,
+            d,
+            assist.toe,
+            self.nav.eph.toe,
+            assist.iode,
+            self.nav.eph.iode,
+        );
+        self.nav.assist_crosschecked = true;
     }
 
     /// Pin the transmit anchor from the remembered TOW pair once the ephemeris

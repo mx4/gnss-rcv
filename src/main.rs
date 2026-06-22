@@ -102,6 +102,16 @@ struct Options {
         help = "write an end-of-run JSON summary to <path> ('-' = stdout)"
     )]
     json: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Assisted-GNSS: a RINEX-3 nav file (brdc) to inject, or 'auto' to download the day's brdc from ESA GSSC (needs --eph-date). Anchors on the first decoded TOW instead of waiting out the full ephemeris (~30 s LNAV, ~120 s F/NAV)"
+    )]
+    eph: Option<String>,
+    #[arg(
+        long,
+        help = "A-GNSS reference epoch 'YYYY-MM-DD[Thh:mm:ss]' (GPST): picks the per-SV ephemeris nearest in toe, and the day to fetch for --eph auto"
+    )]
+    eph_date: Option<String>,
 }
 
 fn init_logging(log_file: Option<&PathBuf>) {
@@ -238,6 +248,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         exit_on_fix: opt.exit_on_fix,
         json: opt.json.clone(),
         e1c_pilot: opt.e1c,
+        eph: opt.eph.clone(),
+        eph_date: opt.eph_date.clone(),
     };
     let mut receiver = Receiver::new(
         &config,

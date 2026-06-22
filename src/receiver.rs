@@ -100,6 +100,15 @@ pub struct ReceiverConfig {
     /// for assessing the pilot's tracking-quality benefit vs E1-B. No effect on
     /// non-E1-C signals.
     pub e1c_pilot: bool,
+    /// Assisted-GNSS (`--eph`): a RINEX-3 nav file (brdc) to inject, or `"auto"`
+    /// to download the day's brdc from ESA GSSC. Injecting the orbit lets a
+    /// channel anchor on the first decoded TOW instead of waiting out the full
+    /// on-air ephemeris. None = off.
+    pub eph: Option<String>,
+    /// A-GNSS reference epoch `YYYY-MM-DD[Thh:mm:ss]` (`--eph-date`): the per-SV
+    /// ephemeris nearest this `toe` is injected, and (for `--eph auto`) the day
+    /// fetched. None = use the file's median toe.
+    pub eph_date: Option<String>,
 }
 
 impl Default for ReceiverConfig {
@@ -123,8 +132,44 @@ impl Default for ReceiverConfig {
             exit_on_fix: false,
             json: None,
             e1c_pilot: false,
+            eph: None,
+            eph_date: None,
         }
     }
+}
+
+/// Assisted-GNSS: load the brdc named by `eph` (a RINEX-3 path, or `"auto"` to
+/// download the day's file from ESA GSSC — `date` then required), pick per SV the
+/// ephemeris nearest `date`'s `toe` (or the file median), and inject it into the
+/// matching channel — the orbit into `nav.eph` (so `is_valid()` holds and the
+/// channel anchors on the first decoded TOW), with a copy in `nav.assist_eph` for
+/// the injected-vs-decoded cross-check. The day's brdc caches next to `recording`.
+fn inject_assist_ephemerides(
+    channels: &mut HashMap<SV, Channel>,
+    eph: &str,
+    date: Option<&str>,
+    recording: &Path,
+) {
+    let cache_dir = recording.parent().unwrap_or_else(|| Path::new("."));
+    let by_sv = match crate::rinex_nav::load_assist_ephemerides(eph, date, cache_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            log::error!("A-GNSS: --eph '{eph}' failed: {e}");
+            return;
+        }
+    };
+    let mut n = 0;
+    for (sv, ch) in channels.iter_mut() {
+        if let Some(e) = by_sv.get(sv) {
+            ch.nav.eph = *e; // orbit/clock/week → is_valid() now true (eph_mask still 0)
+            ch.nav.assist_eph = Some(*e);
+            n += 1;
+        }
+    }
+    log::warn!(
+        "A-GNSS: injected {n} ephemerides ({} SVs in '{eph}'); TTFF now bounded by the first decoded TOW",
+        by_sv.len(),
+    );
 }
 
 pub struct Receiver {
@@ -521,6 +566,10 @@ impl Receiver {
                     ),
                 );
             }
+        }
+
+        if let Some(eph) = cfg.eph.as_deref() {
+            inject_assist_ephemerides(&mut channels, eph, cfg.eph_date.as_deref(), &cfg.file);
         }
 
         Self {

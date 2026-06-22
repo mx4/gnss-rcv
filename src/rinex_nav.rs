@@ -18,6 +18,7 @@ use crate::ephemeris::Ephemeris;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{Epoch, TimeScale};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -203,6 +204,88 @@ pub fn parse_rinex_nav(text: &str) -> Vec<Ephemeris> {
     out
 }
 
+/// Parse "YYYY-MM-DD" or "YYYY-MM-DDThh:mm:ss" into a GPST [`Epoch`]. A date with
+/// no time defaults to 12:00 (mid-day) — a daily brdc is centred there, so it is
+/// the least-bad reference when only the day is known.
+pub fn parse_ref_epoch(s: &str) -> Option<Epoch> {
+    let (date, time) = s.split_once('T').unwrap_or((s, "12:00:00"));
+    let mut d = date.split('-');
+    let y: i32 = d.next()?.trim().parse().ok()?;
+    let mo: u8 = d.next()?.parse().ok()?;
+    let da: u8 = d.next()?.parse().ok()?;
+    let mut t = time.split(':');
+    let h: u8 = t.next()?.parse().ok()?;
+    let mi: u8 = t.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let se: u8 = t.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    Some(Epoch::from_gregorian(
+        y,
+        mo,
+        da,
+        h,
+        mi,
+        se,
+        0,
+        TimeScale::GPST,
+    ))
+}
+
+/// Year + day-of-year (1-based) for `e`, the address of the GSSC daily brdc.
+fn year_doy(e: Epoch) -> (u32, u32) {
+    let (y, ..) = e.to_gregorian_utc();
+    let jan1 = Epoch::from_gregorian(y, 1, 1, 0, 0, 0, 0, TimeScale::GPST);
+    let doy = ((e - jan1).to_seconds() / 86_400.0).floor() as u32 + 1;
+    (y as u32, doy)
+}
+
+/// Resolve, parse, and select the broadcast ephemeris to inject for Assisted-GNSS.
+/// `eph` is a RINEX-3 nav file path, or `"auto"` to download the day's brdc from
+/// ESA GSSC (caching in `cache_dir`; needs `date`). `date` (optional) is the
+/// reference epoch used to pick, per SV, the record whose `toe` is nearest — and,
+/// for `"auto"`, the day to fetch. Without `date`, the file's median `toe` is the
+/// reference. Returns SV → chosen ephemeris.
+pub fn load_assist_ephemerides(
+    eph: &str,
+    date: Option<&str>,
+    cache_dir: &Path,
+) -> std::io::Result<HashMap<SV, Ephemeris>> {
+    let ref_epoch = date.and_then(parse_ref_epoch);
+    let path = if eph == "auto" {
+        let r = ref_epoch.ok_or_else(|| {
+            std::io::Error::other("--eph auto needs --eph-date YYYY-MM-DD[Thh:mm:ss]")
+        })?;
+        let (y, doy) = year_doy(r);
+        ensure_brdc(cache_dir, y, doy)?
+    } else {
+        PathBuf::from(eph)
+    };
+    let all = parse_rinex_nav(&std::fs::read_to_string(&path)?);
+    if all.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "no GPS/Galileo ephemerides parsed from {}",
+            path.display()
+        )));
+    }
+    // Reference for the per-SV pick: the given epoch, else the file's median toe.
+    let reference = ref_epoch.unwrap_or_else(|| {
+        let mut toes: Vec<Epoch> = all.iter().map(|e| e.toe_gpst).collect();
+        toes.sort();
+        toes[toes.len() / 2]
+    });
+    let mut by_sv: HashMap<SV, Ephemeris> = HashMap::new();
+    for e in all {
+        if !e.is_valid() {
+            continue;
+        }
+        let closer = by_sv
+            .get(&e.sv)
+            .is_none_or(|cur| (e.toe_gpst - reference).abs() < (cur.toe_gpst - reference).abs());
+        if closer {
+            by_sv.insert(e.sv, e);
+        }
+    }
+    Ok(by_sv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +370,73 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         std::fs::write(&p, b"cached").unwrap();
         let got = ensure_brdc(&dir, 1999, 1).expect("cache hit");
         assert_eq!(got, p);
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn parse_ref_epoch_date_and_datetime() {
+        // date-only defaults to mid-day (a daily brdc is centred there).
+        assert_eq!(
+            parse_ref_epoch("2025-06-15"),
+            Some(Epoch::from_gregorian(
+                2025,
+                6,
+                15,
+                12,
+                0,
+                0,
+                0,
+                TimeScale::GPST
+            ))
+        );
+        assert_eq!(
+            parse_ref_epoch("2025-06-15T06:30:00"),
+            Some(Epoch::from_gregorian(
+                2025,
+                6,
+                15,
+                6,
+                30,
+                0,
+                0,
+                TimeScale::GPST
+            ))
+        );
+        assert!(parse_ref_epoch("nonsense").is_none());
+    }
+
+    #[test]
+    fn year_doy_maps_calendar_to_day_of_year() {
+        assert_eq!(
+            year_doy(parse_ref_epoch("2025-06-15").unwrap()),
+            (2025, 166)
+        );
+        assert_eq!(year_doy(parse_ref_epoch("2025-01-01").unwrap()), (2025, 1));
+        assert_eq!(
+            year_doy(parse_ref_epoch("2024-12-31").unwrap()),
+            (2024, 366)
+        );
+    }
+
+    #[test]
+    fn load_assist_selects_per_sv_from_a_file() {
+        let dir = std::env::temp_dir();
+        let p = dir.join("gnss_assist_fixture.rnx");
+        std::fs::write(&p, FIXTURE).unwrap();
+        let by_sv = load_assist_ephemerides(p.to_str().unwrap(), Some("2025-06-15"), &dir).unwrap();
+        // FIXTURE carries G01 (GPS) and E04 (Galileo), one record each.
+        assert_eq!(by_sv.len(), 2);
+        assert!(
+            by_sv
+                .keys()
+                .any(|sv| sv.constellation == Constellation::GPS)
+        );
+        assert!(
+            by_sv
+                .keys()
+                .any(|sv| sv.constellation == Constellation::Galileo)
+        );
+        assert!(by_sv.values().all(|e| e.is_valid()));
         std::fs::remove_file(&p).ok();
     }
 
