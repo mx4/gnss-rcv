@@ -454,6 +454,16 @@ impl Channel {
             assist.iode,
             self.nav.eph.iode,
         );
+        // Publish for the UI: the per-SV figure and the session-worst.
+        {
+            let mut st = self.pub_state.lock().unwrap();
+            if let Some(cs) = st.channels.get_mut(&self.sv) {
+                cs.assist_delta_m = Some(d);
+            }
+            if let Some(a) = st.agnss.as_mut() {
+                a.max_delta_m = Some(a.max_delta_m.map_or(d, |m| m.max(d)));
+            }
+        }
         self.nav.assist_crosschecked = true;
     }
 

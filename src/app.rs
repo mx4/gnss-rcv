@@ -211,6 +211,18 @@ fn dop_color(dop: f64) -> egui::Color32 {
     }
 }
 
+/// Colour for the A-GNSS injected-vs-decoded |Δ| (m): green when the right brdc
+/// issue was injected (≈0), amber for a stale `toe`, red for a wrong orbit.
+fn agnss_delta_color(d: f64) -> egui::Color32 {
+    if d < 50.0 {
+        egui::Color32::from_rgb(80, 200, 100) // green: right issue
+    } else if d < 5000.0 {
+        egui::Color32::from_rgb(220, 190, 50) // amber: stale toe
+    } else {
+        egui::Color32::from_rgb(220, 80, 60) // red: wrong/garbage
+    }
+}
+
 /// C/N0 quality band: 0 = green (strong, ≥40 dB-Hz), 1 = yellow (≥35), 2 = red.
 /// Drives both the dB-Hz cell colour and the table's strong-first row order, so
 /// the two never disagree.
@@ -563,7 +575,19 @@ impl GnssRcvApp {
     }
 
     fn update_top(&mut self, ctx: &egui::Context) {
-        let (sv_elaz, tow_text, has_ion, has_utc, pos_text, pos_url, osnma_kroot, dop, sbas, run) = {
+        let (
+            sv_elaz,
+            tow_text,
+            has_ion,
+            has_utc,
+            pos_text,
+            pos_url,
+            osnma_kroot,
+            dop,
+            sbas,
+            run,
+            agnss,
+        ) = {
             let st = self.pub_state.lock().unwrap();
             let mut sv_elaz: Vec<(SV, f64, f64, f64)> = st
                 .channels
@@ -606,6 +630,9 @@ impl GnssRcvApp {
                     st.sbas_source.map(sbas_system_short).unwrap_or("SBAS"),
                 ),
                 (st.run_progress, st.realtime_x),
+                st.agnss
+                    .as_ref()
+                    .map(|a| (a.source.clone(), a.injected, a.max_delta_m)),
             )
         };
 
@@ -693,6 +720,29 @@ impl GnssRcvApp {
                                                          data is authenticated",
                                                         );
                                                     });
+                                                }
+                                                // Assisted-GNSS (--eph): brdc source,
+                                                // # SV orbits injected, worst cross-check Δ.
+                                                if let Some((src, inj, max_d)) = &agnss {
+                                                    ui.horizontal(|ui| {
+                                                        status_label(ui, "A-GNSS", h);
+                                                        ui.monospace(format!("{src} · {inj} SV"));
+                                                        match max_d {
+                                                            Some(d) => ui.colored_label(
+                                                                agnss_delta_color(*d),
+                                                                format!("· Δ{d:.0}m"),
+                                                            ),
+                                                            None => ui.weak("· Δ—"),
+                                                        };
+                                                    })
+                                                    .response
+                                                    .on_hover_text(
+                                                        "Assisted-GNSS: downloaded brdc injected so \
+                                                         channels fix on the first decoded TOW. Δ = \
+                                                         worst injected-vs-decoded SV-orbit \
+                                                         difference (≈0 = the right issue; large = \
+                                                         stale).",
+                                                    );
                                                 }
                                             });
                                             // Correction-flag column, beside all the text lines
@@ -930,6 +980,8 @@ impl GnssRcvApp {
                 let sbas_msg_mask = channel.unwrap().sbas_msg_mask;
                 let tx_anchored = channel.unwrap().tx_anchored;
                 let iode = channel.unwrap().iode;
+                let assist = channel.unwrap().assist;
+                let assist_delta_m = channel.unwrap().assist_delta_m;
                 let eph_age_sec = (pub_state.tow_gpst - channel.unwrap().toe_gpst).to_seconds();
                 let used_in_fix = pub_state.fix_svs.contains(&sv);
                 let is_sbas_source = pub_state.sbas_source == Some(sv);
@@ -961,13 +1013,30 @@ impl GnssRcvApp {
                             draw_sbas_cell(ui, sbas_msgs, sbas_msg_mask, is_sbas_source);
                             return;
                         }
-                        if used_in_fix {
-                            // Contributing to the fix: collapse the pips to a
-                            // freshness-coloured check (detail moves to the hover).
-                            draw_eph_used(ui, iode, eph_age_sec);
-                        } else {
-                            draw_eph_pages(ui, sv, eph_mask, tx_anchored);
-                        }
+                        ui.horizontal(|ui| {
+                            // A-GNSS: badge SVs whose orbit was injected (--eph). Colour
+                            // = the injected-vs-decoded |Δ| once known (grey until then).
+                            if assist {
+                                let (color, hover) = match assist_delta_m {
+                                    Some(d) => (
+                                        agnss_delta_color(d),
+                                        format!("Assisted orbit (--eph) · Δ {d:.0} m vs decoded"),
+                                    ),
+                                    None => (
+                                        egui::Color32::from_rgb(120, 140, 170),
+                                        "Assisted orbit (--eph) · cross-check pending".to_string(),
+                                    ),
+                                };
+                                ui.colored_label(color, "Ⓐ").on_hover_text(hover);
+                            }
+                            if used_in_fix {
+                                // Contributing to the fix: collapse the pips to a
+                                // freshness-coloured check (detail moves to the hover).
+                                draw_eph_used(ui, iode, eph_age_sec);
+                            } else {
+                                draw_eph_pages(ui, sv, eph_mask, tx_anchored);
+                            }
+                        });
                     });
                     if is_galileo {
                         row.col(|ui| {

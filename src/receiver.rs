@@ -149,6 +149,7 @@ fn inject_assist_ephemerides(
     eph: &str,
     date: Option<&str>,
     recording: &Path,
+    state: &Arc<Mutex<GnssState>>,
 ) {
     let cache_dir = recording.parent().unwrap_or_else(|| Path::new("."));
     let by_sv = match crate::rinex_nav::load_assist_ephemerides(eph, date, cache_dir) {
@@ -158,7 +159,7 @@ fn inject_assist_ephemerides(
             return;
         }
     };
-    let mut n = 0;
+    let mut injected = Vec::new();
     for (sv, ch) in channels.iter_mut() {
         if let Some(issues) = by_sv.get(sv) {
             // A coarse initial pick (mid-day issue) just so is_valid()/week hold
@@ -168,11 +169,35 @@ fn inject_assist_ephemerides(
             ch.nav.eph = initial; // orbit/clock/week → is_valid() true (eph_mask still 0)
             ch.nav.assist_eph = Some(initial);
             ch.nav.assist_set = issues.clone();
-            n += 1;
+            injected.push(*sv);
+        }
+    }
+    // Publish for the UI: a session status line + a per-SV "assisted" flag.
+    let source = if eph == "auto" {
+        date.unwrap_or("auto").to_string()
+    } else {
+        Path::new(eph)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(eph)
+            .to_string()
+    };
+    {
+        let mut st = state.lock().unwrap();
+        st.agnss = Some(crate::state::AgnssStatus {
+            source,
+            injected: injected.len(),
+            max_delta_m: None,
+        });
+        for sv in &injected {
+            if let Some(cs) = st.channels.get_mut(sv) {
+                cs.assist = true;
+            }
         }
     }
     log::warn!(
-        "A-GNSS: injected {n} ephemerides ({} SVs in '{eph}'); TTFF now bounded by the first decoded TOW",
+        "A-GNSS: injected {} ephemerides ({} SVs in '{eph}'); TTFF now bounded by the first decoded TOW",
+        injected.len(),
         by_sv.len(),
     );
 }
@@ -585,7 +610,13 @@ impl Receiver {
         }
 
         if let Some(eph) = cfg.eph.as_deref() {
-            inject_assist_ephemerides(&mut channels, eph, cfg.eph_date.as_deref(), &cfg.file);
+            inject_assist_ephemerides(
+                &mut channels,
+                eph,
+                cfg.eph_date.as_deref(),
+                &cfg.file,
+                &state,
+            );
         }
 
         Self {

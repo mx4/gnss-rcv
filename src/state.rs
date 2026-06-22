@@ -45,6 +45,12 @@ pub struct ChannelState {
     /// flags a fresh upload. Valid once `has_eph`.
     pub iode: u32,
     pub toe_gpst: Epoch,
+    /// Assisted-GNSS (`--eph`): this SV's orbit was injected from a downloaded
+    /// brdc (so it could anchor on the first decoded TOW). The UI badges these.
+    pub assist: bool,
+    /// Injected-vs-decoded SV-position difference (m), once the on-air ephemeris
+    /// fully decodes — the per-SV A-GNSS health figure. `None` until then.
+    pub assist_delta_m: Option<f64>,
 }
 impl Default for ChannelState {
     fn default() -> Self {
@@ -64,8 +70,23 @@ impl Default for ChannelState {
             sbas_msg_mask: 0,
             iode: 0,
             toe_gpst: Epoch::default(),
+            assist: false,
+            assist_delta_m: None,
         }
     }
+}
+
+/// Session-level Assisted-GNSS status, for the top-panel status row. Present
+/// once `--eph` injected at least one orbit.
+pub struct AgnssStatus {
+    /// Where the brdc came from — the `--eph-date` (auto) or the file name.
+    pub source: String,
+    /// How many SV orbits were injected.
+    pub injected: usize,
+    /// Worst injected-vs-decoded cross-check |Δ| (m) seen so far across SVs —
+    /// the health figure (≈0 when the right issue was injected). `None` until
+    /// the first on-air ephemeris completes.
+    pub max_delta_m: Option<f64>,
 }
 
 pub struct GnssState {
@@ -104,6 +125,9 @@ pub struct GnssState {
     /// or `None` until the first block (which carries the total) arrives. Drives
     /// the UI's KROOT progress bar.
     pub osnma_kroot: Option<(u8, u8)>,
+    /// Assisted-GNSS injection status (`--eph`), or `None` when off. Drives the
+    /// top-panel A-GNSS status row.
+    pub agnss: Option<AgnssStatus>,
     /// Fix precision from the most recent solve: horizontal and vertical dilution
     /// of precision (unitless geometry factors, lower is better) and the number
     /// of satellites that contributed. All zero before the first fix.
@@ -154,6 +178,7 @@ impl GnssState {
             sbas_corr: SbasCorrections::default(),
             sbas_source: None,
             osnma_kroot: None,
+            agnss: None,
             hdop: 0.0,
             vdop: 0.0,
             fix_sv_count: 0,
