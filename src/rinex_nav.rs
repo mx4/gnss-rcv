@@ -18,6 +18,65 @@ use crate::ephemeris::Ephemeris;
 use gnss_rs::constellation::Constellation;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{Epoch, TimeScale};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The GSSC daily station whose RINEX-3 mixed-nav we cache. Any IGS station's
+/// `brdc` carries the same broadcast ephemeris; ESA's ESOC is on GSSC and
+/// auth-free. (Change here to use a different station.)
+const BRDC_STATION: &str = "ESOC00DEU";
+
+/// RINEX-3 mixed-navigation filename (GPS + Galileo + …) for `year` / `doy`
+/// (day-of-year). The downloaded `.gz` decompresses to this name.
+pub fn brdc_mn_name(year: u32, doy: u32) -> String {
+    format!("{BRDC_STATION}_R_{year}{doy:03}0000_01D_MN.rnx")
+}
+
+/// ESA GSSC (no-auth) URL of the compressed daily mixed-nav for `year` / `doy`.
+fn brdc_mn_url(year: u32, doy: u32) -> String {
+    format!(
+        "ftp://gssc.esa.int/gnss/data/daily/{year}/{doy:03}/{}.gz",
+        brdc_mn_name(year, doy)
+    )
+}
+
+/// Trivial read-only ephemeris cache: if the day's `brdc` is already in `dir`,
+/// use it; otherwise download it from ESA GSSC (no auth) and decompress.
+/// Returns the local RINEX path. Shells out to `curl` + `gunzip` — the same
+/// tools `fetch.py` / `gen_gpssim.py` use — so there is no runtime crate
+/// dependency. The cached file is never modified (read-only).
+pub fn ensure_brdc(dir: &Path, year: u32, doy: u32) -> std::io::Result<PathBuf> {
+    let local = dir.join(brdc_mn_name(year, doy));
+    if local.exists() {
+        return Ok(local); // cache hit — use it
+    }
+    let url = brdc_mn_url(year, doy);
+    let gz = dir.join(format!("{}.gz", brdc_mn_name(year, doy)));
+    log::warn!("A-GNSS: ephemeris not cached, downloading {url}");
+    let downloaded = Command::new("curl")
+        .args(["-sS", "--fail", "-m", "120", "-o"])
+        .arg(&gz)
+        .arg(&url)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !downloaded {
+        let _ = std::fs::remove_file(&gz);
+        return Err(std::io::Error::other(
+            "brdc download failed (offline, or no file for that day yet)",
+        ));
+    }
+    let unzipped = Command::new("gunzip")
+        .arg("-f")
+        .arg(&gz)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !unzipped || !local.exists() {
+        return Err(std::io::Error::other("brdc gunzip failed"));
+    }
+    Ok(local)
+}
 
 /// Parse the 19-char fixed-width float fields of a nav line, starting at byte
 /// `start` (RINEX is ASCII). Fortran `D` exponents are normalised to `E`.
@@ -205,5 +264,71 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
         // The toc epochs land where the calendar says (sanity on the time build).
         let (y, mo, d, ..) = g.toc_gpst.to_gregorian_utc();
         assert_eq!((y, mo, d), (2025, 6, 15));
+    }
+
+    #[test]
+    fn brdc_filename_and_url() {
+        assert_eq!(
+            brdc_mn_name(2025, 166),
+            "ESOC00DEU_R_20251660000_01D_MN.rnx"
+        );
+        // day-of-year is zero-padded to 3 digits.
+        assert_eq!(brdc_mn_name(2025, 9), "ESOC00DEU_R_20250090000_01D_MN.rnx");
+        let url = brdc_mn_url(2025, 166);
+        assert!(url.starts_with("ftp://gssc.esa.int/"));
+        assert!(url.ends_with("ESOC00DEU_R_20251660000_01D_MN.rnx.gz"));
+    }
+
+    #[test]
+    fn cache_hit_uses_existing_file_without_downloading() {
+        // An already-cached file is returned as-is (no curl invocation).
+        let dir = std::env::temp_dir();
+        let p = dir.join(brdc_mn_name(1999, 1));
+        std::fs::write(&p, b"cached").unwrap();
+        let got = ensure_brdc(&dir, 1999, 1).expect("cache hit");
+        assert_eq!(got, p);
+        std::fs::remove_file(&p).ok();
+    }
+
+    // The whole A-GNSS fetch path end-to-end: download a real brdc from ESA GSSC,
+    // parse it, and confirm the cache hits on the second call. Needs network, so
+    // it skips cleanly when offline.
+    #[test]
+    #[ignore = "network: downloads a real brdc from ESA GSSC"]
+    fn downloads_caches_and_parses_real_brdc() {
+        let dir = std::env::temp_dir().join("gnss_agnss_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = match ensure_brdc(&dir, 2025, 166) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                return;
+            }
+        };
+        let ephs = parse_rinex_nav(&std::fs::read_to_string(&path).unwrap());
+        let gps = ephs
+            .iter()
+            .filter(|e| e.sv.constellation == Constellation::GPS)
+            .count();
+        let gal = ephs
+            .iter()
+            .filter(|e| e.sv.constellation == Constellation::Galileo)
+            .count();
+        let valid = ephs.iter().filter(|e| e.is_valid()).count();
+        eprintln!(
+            "parsed {} ephemerides ({gps} GPS, {gal} Galileo), {valid} valid",
+            ephs.len()
+        );
+        assert!(
+            gps > 20 && gal > 10,
+            "expected many GPS + Galileo ephemerides"
+        );
+        // Most are valid; the few that aren't have toe/toc == 0 (a Sunday-00:00
+        // week boundary), which `Ephemeris::is_valid()` treats as unset — a real
+        // edge to handle when wiring injection (Phase 2).
+        assert!(valid > ephs.len() / 2, "most ephemerides should be valid");
+        // Second call is a cache hit (same path, no re-download).
+        assert_eq!(ensure_brdc(&dir, 2025, 166).unwrap(), path);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
