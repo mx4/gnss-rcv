@@ -59,6 +59,17 @@ fn brdc2_name(year: u32, doy: u32) -> String {
     format!("brdc{doy:03}0.{:02}n", year % 100)
 }
 
+/// The dedicated download cache for A-GNSS brdc files — kept out of `resources/`
+/// (the recordings) and git-ignored. Created on first use; `GNSS_BRDC_DIR`
+/// overrides the default `ephemeris/`.
+pub fn brdc_cache_dir() -> PathBuf {
+    let dir = std::env::var_os("GNSS_BRDC_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ephemeris"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
 /// Download `url` to `path` with curl (FTP, no auth); true on success.
 fn curl_to(path: &Path, url: &str) -> bool {
     Command::new("curl")

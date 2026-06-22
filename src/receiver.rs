@@ -148,11 +148,10 @@ fn inject_assist_ephemerides(
     channels: &mut HashMap<SV, Channel>,
     eph: &str,
     date: Option<&str>,
-    recording: &Path,
     state: &Arc<Mutex<GnssState>>,
 ) {
-    let cache_dir = recording.parent().unwrap_or_else(|| Path::new("."));
-    let by_sv = match crate::rinex_nav::load_assist_ephemerides(eph, date, cache_dir) {
+    let cache_dir = crate::rinex_nav::brdc_cache_dir();
+    let by_sv = match crate::rinex_nav::load_assist_ephemerides(eph, date, &cache_dir) {
         Ok(m) => m,
         Err(e) => {
             log::error!("A-GNSS: --eph '{eph}' failed: {e}");
@@ -620,21 +619,10 @@ impl Receiver {
         // injects now (at t=0, for the earliest possible fix).
         let mut agnss_deferred = None;
         if let Some(eph) = cfg.eph.as_deref() {
-            let cache_dir = cfg
-                .file
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf();
             if eph == "auto" && cfg.eph_date.is_none() {
-                agnss_deferred = Some(cache_dir);
+                agnss_deferred = Some(crate::rinex_nav::brdc_cache_dir());
             } else {
-                inject_assist_ephemerides(
-                    &mut channels,
-                    eph,
-                    cfg.eph_date.as_deref(),
-                    &cfg.file,
-                    &state,
-                );
+                inject_assist_ephemerides(&mut channels, eph, cfg.eph_date.as_deref(), &state);
             }
         }
 
