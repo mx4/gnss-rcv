@@ -204,6 +204,19 @@
     ]
   },
   {
+    "name": "pocketsdr-8band",
+    "url": "https://gpspp.sakura.ne.jp/pocketsdr/L1B1G1L2G2L5E5bL6_20250327_0248_16MHz.zip",
+    "dest": "L1B1G1L2G2L5E5bL6_20250327_0248_16MHz.bin",
+    "size": 0,
+    "archive": "zip",
+    "flags": "-t pocketsdr-raw32-ch0 --fs 16000000 --fi 0 --qzss",
+    "note": "PocketSDR 8-channel multi-band (Takasu, 2025-03-27), RAW32 8-ch 2-bit IQ at 16 MHz, ~300s (19.2 GiB unzipped). F_LO = 1575.42/1561/1602/1227.6/1246/1176.45/1207.14/1273 MHz -> CH0 L1/E1, CH1 BeiDou B1I, CH2 GLONASS G1, CH3 L2, CH4 GLONASS G2, CH5 L5/E5a, CH6 E5b, CH7 E6/L6 -- ALL zero-IF (LO at each band centre). CH0 (L1) and CH5 (E5a) are both zero-IF and sample-synchronous: the prime test asset for an L1+E5a dual-frequency (iono-free) fix. Needs a RAW32 channel reader (pocketsdr-raw32-chN) -- the existing pocketsdr-raw16-ch2 handles the 4-channel eindhoven file; this one is 8 channels.",
+    "tags": [
+      "gps",
+      "galileo"
+    ]
+  },
+  {
     "name": "pocketsdr-bonn",
     "url": "https://rnav.info.hiroshima-cu.ac.jp/gnss/pocketsdr/20241107bonn/L1bl.bin.gz",
     "dest": "pocketsdr-bonn.bin",
