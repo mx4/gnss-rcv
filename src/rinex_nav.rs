@@ -323,10 +323,14 @@ E04 2025 06 14 23 20 00-2.597768907435E-04-9.933387445926E-12 0.000000000000E+00
             gps > 20 && gal > 10,
             "expected many GPS + Galileo ephemerides"
         );
-        // Most are valid; the few that aren't have toe/toc == 0 (a Sunday-00:00
-        // week boundary), which `Ephemeris::is_valid()` treats as unset — a real
-        // edge to handle when wiring injection (Phase 2).
-        assert!(valid > ephs.len() / 2, "most ephemerides should be valid");
+        // Essentially all are valid — including the Sunday-00:00 records whose
+        // toe/toc == 0 (the week boundary), now that is_valid() gates on orbit
+        // values rather than a 0-sentinel on toe/toc (see Phase 2 boundary fix).
+        assert!(
+            valid > ephs.len() * 99 / 100,
+            "nearly all ephemerides should be valid, got {valid}/{}",
+            ephs.len()
+        );
         // Second call is a cache hit (same path, no re-download).
         assert_eq!(ensure_brdc(&dir, 2025, 166).unwrap(), path);
         std::fs::remove_dir_all(&dir).ok();

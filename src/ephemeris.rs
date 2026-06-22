@@ -124,19 +124,26 @@ impl Ephemeris {
     /// True once the broadcast ephemeris has decoded into a physically plausible
     /// orbit+clock the solver can consume. Checks at least one field from each
     /// message part carrying the orbit/clock — GPS LNAV subframes 1-3, Galileo
-    /// I/NAV word types 1-5 — so a half-decoded ephemeris can't slip through,
-    /// plus an eccentricity sanity bound to reject a corrupt frame. The orbit
-    /// thresholds are constellation-agnostic (GPS a≈26 560 km, Galileo a≈29 600
-    /// km both pass) so this stays correct as more signals are added.
+    /// I/NAV word types 1-5 / F/NAV pages 1-4 — so a half-decoded ephemeris can't
+    /// slip through, plus an eccentricity sanity bound to reject a corrupt frame.
+    /// The orbit thresholds are constellation-agnostic (GPS a≈26 560 km, Galileo
+    /// a≈29 600 km both pass) so this stays correct as more signals are added.
+    ///
+    /// Uses orbit/clock *values* (which are never legitimately zero) as the
+    /// "decoded" signal, NOT `toc`/`toe`: those are seconds-of-week and are
+    /// genuinely 0 at the Sunday-00:00 week boundary, so a 0-sentinel on them
+    /// wrongly rejected a valid week-boundary ephemeris (real on the signal path,
+    /// common when injecting a Sunday-dated A-GNSS brdc). `a` covers the
+    /// subframe/word that also carries `toe`; `f0` (SV clock bias, never 0 for a
+    /// real SV) covers the one that carries `toc`.
     pub fn is_valid(&self) -> bool {
-        self.ts_sec != 0.0           // timestamped on first decode
-            && self.week != 0        // GPS/GST week number
-            && self.toc != 0         // clock reference time
-            && self.toe != 0         // ephemeris reference time
-            && self.a >= 20_000_000.0 // semi-major axis decoded (from sqrt_a)
+        self.ts_sec != 0.0           // timestamped on first decode / injected
+            && self.week != 0        // week number (LNAV SF1 / I-NAV w5 / F-NAV p1)
+            && self.a >= 20_000_000.0 // semi-major axis decoded (LNAV SF2, from sqrt_a)
             && self.ecc < 0.5        // sanity: real orbits have ecc << 1
-            && self.i0 != 0.0        // inclination at reference time
-            && self.omg_dot != 0.0 // rate of right ascension
+            && self.i0 != 0.0        // inclination at reference time (LNAV SF3)
+            && self.omg_dot != 0.0   // rate of right ascension (LNAV SF3)
+            && self.f0 != 0.0 // clock decoded (LNAV SF1 / I-NAV w4 / F-NAV clock)
     }
 
     /// Number of distinct ephemeris-bearing messages decoded so far — Galileo
@@ -164,6 +171,7 @@ mod tests {
         e.ecc = 0.012;
         e.i0 = 0.96;
         e.omg_dot = -8.0e-9;
+        e.f0 = -1.0e-4; // SV clock bias — never 0 for a real SV (gates is_valid)
         e
     }
 
@@ -179,7 +187,9 @@ mod tests {
 
     #[test]
     fn missing_any_subframe_field_is_invalid() {
-        // Zeroing any single field a subframe sets must invalidate the ephemeris.
+        // Zeroing any single completeness field must invalidate the ephemeris.
+        // The gates are the orbit/clock *values* (never legitimately 0), one per
+        // message part: week (SF1), f0 (SF1 clock), a (SF2), i0 & omg_dot (SF3).
         let check = |zero: fn(&mut Ephemeris), name: &str| {
             let mut e = valid_eph();
             zero(&mut e);
@@ -187,11 +197,21 @@ mod tests {
         };
         check(|e| e.ts_sec = 0.0, "untimestamped");
         check(|e| e.week = 0, "sf1 week");
-        check(|e| e.toc = 0, "sf1 toc");
-        check(|e| e.toe = 0, "sf2 toe");
+        check(|e| e.f0 = 0.0, "sf1 clock f0");
         check(|e| e.a = 0.0, "sf2 a");
         check(|e| e.i0 = 0.0, "sf3 i0");
         check(|e| e.omg_dot = 0.0, "sf3 omg_dot");
+    }
+
+    #[test]
+    fn week_boundary_toc_toe_zero_stays_valid() {
+        // toc/toe == 0 is a real value at the Sunday-00:00 week boundary (and is
+        // common in an injected Sunday-dated A-GNSS brdc) — it must NOT invalidate
+        // an otherwise-complete ephemeris.
+        let mut e = valid_eph();
+        e.toc = 0;
+        e.toe = 0;
+        assert!(e.is_valid(), "week-boundary toc/toe == 0 must stay valid");
     }
 
     #[test]

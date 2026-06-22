@@ -838,6 +838,12 @@ pub fn canned_ephemeris_subframes() -> [[u8; 300]; 3] {
     let s = &mut sf[0];
     setbitu(s, 60, 10, 300); // week (+2048 -> 2348)
     setbitu(s, 218, 16, 2250); // toc (×16 -> 36,000 s)
+    setbitu(
+        s,
+        270,
+        22,
+        ((-1e-4 * p2(31)).round() as i32 as u32) & 0x3F_FFFF,
+    ); // af0 ~ -1e-4 s
 
     // subframe 2 — orbit size/shape + ephemeris reference time
     let s = &mut sf[1];

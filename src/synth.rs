@@ -785,6 +785,7 @@ fn pick_constellation(
             e.omg0 = i_omg0 as f64 * (TAU / 12.0) - PI;
             e.m0 = i_m0 as f64 * (TAU / 18.0) - PI;
             e.omg_dot = -8.0e-9; // typical nodal regression; also gates is_valid
+            e.f0 = -1.0e-4; // SV clock bias — never 0 for a real SV; also gates is_valid
             e.ts_sec = 1.0;
             let pos = compute_sv_position_ecef(&e, toe_gpst);
             let (el, az) = elevation_azimuth(rx, pos);
