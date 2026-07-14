@@ -33,5 +33,3 @@ pub mod util;
 pub mod wls;
 
 pub use app::egui_main;
-
-extern crate rtlsdr_mt;

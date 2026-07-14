@@ -44,9 +44,9 @@ gnss-rs = "2.6.0"
 # required by gnss-rtk's Solver::new_survey to set up the EARTH_J2000 frame.
 anise = { version = "0.6", features = ["embed_ephem"] }
 map_3d = "0.1.7"
-egui = "0.31.1"
-eframe = "0.31.1"
-egui_extras = "0.31.1"
+egui = "0.35"
+eframe = "0.35"
+egui_extras = "0.35"
 galileo-osnma = { version = "0.11.6", default-features = false, features = ["std"] }
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 

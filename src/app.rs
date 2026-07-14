@@ -357,10 +357,10 @@ pub fn egui_main(plots: bool, sbas: bool, qzss: bool) {
 }
 
 impl eframe::App for GnssRcvApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.handle_shortcuts(ctx);
-        self.update_top(ctx);
-        self.update_central(ctx);
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.handle_shortcuts(ui.ctx());
+        self.update_top(ui);
+        self.update_central(ui);
     }
 }
 
@@ -578,7 +578,7 @@ impl GnssRcvApp {
         });
     }
 
-    fn update_top(&mut self, ctx: &egui::Context) {
+    fn update_top(&mut self, ui: &mut egui::Ui) {
         let (
             sv_elaz,
             tow_text,
@@ -640,9 +640,8 @@ impl GnssRcvApp {
             )
         };
 
-        egui::TopBottomPanel::top("top_panel")
-            .resizable(false)
-            .show(ctx, |ui| {
+        egui::Panel::top("top_panel")
+            .show(ui, |ui| {
                 // One frame box: controls + status on the left, sky plot column on the right.
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     StripBuilder::new(ui)
@@ -783,7 +782,8 @@ impl GnssRcvApp {
                                         });
                                     });
                                     let box_h = status.response.rect.height();
-                                    self.update_start_stop(ui, ctx, box_h, btn_area_w);
+                                    let ctx = ui.ctx().clone();
+                                    self.update_start_stop(ui, &ctx, box_h, btn_area_w);
                                 });
                                 // Run progress — fraction of the recording processed,
                                 // plus the real-time factor; only while a run is active.
@@ -830,8 +830,8 @@ impl GnssRcvApp {
             });
     }
 
-    fn update_central(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn update_central(&mut self, ui: &mut egui::Ui) {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.tab, Tab::Dashboard, "Dashboard");
                 ui.selectable_value(&mut self.tab, Tab::Diagnostics, "Diagnostics");
@@ -872,10 +872,9 @@ impl GnssRcvApp {
         tracked_svs.sort_by_key(|(sv, _)| *sv);
         tracked_svs.sort_by_key(|(_, cn0)| cn0_band(*cn0));
 
-        egui::SidePanel::left("diag_sv_list")
-            .resizable(false)
-            .exact_width(58.0)
-            .show_inside(ui, |ui| {
+        egui::Panel::left("diag_sv_list")
+            .exact_size(58.0)
+            .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (sv, cn0) in &tracked_svs {
                         let label = egui::RichText::new(format!("{sv}")).color(cn0_color(*cn0));
@@ -889,7 +888,7 @@ impl GnssRcvApp {
                 });
             });
 
-        egui::CentralPanel::default().show_inside(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let selected = self.diag_sv;
             if let Some(sv) = selected {
                 let hist = {
