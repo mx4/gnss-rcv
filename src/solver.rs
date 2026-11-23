@@ -1,3 +1,4 @@
+use anise::almanac::metaload::MetaAlmanac;
 use colored::Colorize;
 use gnss_rs::sv::SV;
 use gnss_rtk::prelude::{
@@ -303,7 +304,7 @@ impl PositionSolver {
     #[allow(clippy::new_without_default)]
     pub fn new(pub_state: Arc<Mutex<GnssState>>) -> Self {
         let cfg = make_config();
-        let almanac = Almanac::until_2035().expect("Almanac");
+        let almanac = MetaAlmanac::latest().expect("Almanac");
         let earth_frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
         let ephs: SharedEphemerides = Arc::new(Mutex::new(Vec::new()));
         let solver = make_solver(&almanac, earth_frame, &cfg, &ephs);
@@ -885,7 +886,10 @@ mod tests {
             ephs: Arc::new(Mutex::new(Vec::new())),
         };
 
-        let almanac = Almanac::until_2035().expect("Almanac");
+        let almanac = MetaAlmanac::latest().unwrap_or_else(|e| {
+            panic!("failed to create an ANISE almanach: {}", e);
+        });
+
         let frame = almanac.frame_from_uid(EARTH_J2000).expect("earth frame");
 
         assert!(a.state_at(t, sv, frame).is_some(), "own store is visible");
